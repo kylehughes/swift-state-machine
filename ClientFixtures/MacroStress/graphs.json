@@ -1,0 +1,13 @@
+{
+  "schema": "MacroStressGraph",
+  "mode": "shared",
+  "initialPhase": 0,
+  "edgeSource": "edgeIndex % phases",
+  "edgeDestination": "(edgeSource + 1) % phases",
+  "inputGroup": "edgeIndex // phases",
+  "graphs": [
+    {"phases": 2, "edges": 1},
+    {"phases": 32, "edges": 128},
+    {"phases": 128, "edges": 512}
+  ]
+}

@@ -1,0 +1,243 @@
+[
+  {
+    "id": "CT-001",
+    "pattern": "consumed more than once",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-001-successor",
+    "pattern": "consumed more than once",
+    "scope": "independent imported Change successor ownership boundary"
+  },
+  {
+    "id": "CT-002",
+    "pattern": "consumed more than once",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-003",
+    "pattern": "requires the types|no member",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-004",
+    "pattern": "cannot convert value",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-005",
+    "pattern": "consumed more than once",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-006",
+    "pattern": "inaccessible|cannot be constructed",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-007",
+    "pattern": "inaccessible|cannot be constructed",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-008",
+    "pattern": "inaccessible",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-010",
+    "pattern": "not a member type|no member",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-011",
+    "pattern": "inaccessible|no member",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-012",
+    "pattern": "does not conform to the .Sendable.|unavailable",
+    "scope": "production lower-guarantee AtomicRecordStorage; sealed Shared facade uses this same storage"
+  },
+  {
+    "id": "CT-013",
+    "pattern": "non-sendable|non-Sendable",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-014",
+    "pattern": "cannot pass function of type|async.*synchronous",
+    "scope": "exact production lock source plus same-file private paired sync/async fixture, excluded shipping",
+    "productionSourceAppend": "Sources/StateMachine/RetainedAtomic.swift"
+  },
+  {
+    "id": "CT-015",
+    "pattern": "no member",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-016",
+    "pattern": "requires that.*Encodable",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-017",
+    "pattern": "noncopyable.*consumed|consum.*captur|captur.*consum",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-018",
+    "pattern": "Copyable",
+    "scope": "production lower-guarantee AtomicRecordStorage; sealed Shared facade uses this same storage"
+  },
+  {
+    "id": "CT-019",
+    "pattern": "cannot convert value.*FetchSuccessCompletion",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-020",
+    "pattern": "cannot convert value.*FetchFailureCompletion",
+    "scope": "handwritten domain production boundary"
+  },
+  {
+    "id": "CT-009",
+    "pattern": "cannot convert value.*AuditSuccessCompletion.*FetchSuccessCompletion",
+    "scope": "handwritten facade distinct accepted fetch/audit operation types"
+  },
+  {
+    "id": "GCT-001",
+    "pattern": "consumed more than once",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-003",
+    "pattern": "requires the types|no member",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-006",
+    "pattern": "inaccessible|cannot be constructed",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-007",
+    "pattern": "inaccessible|cannot be constructed",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-008",
+    "pattern": "inaccessible|cannot be constructed",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-009",
+    "pattern": "cannot convert value.*AuditSuccessCompletion.*FetchSuccessCompletion",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-010",
+    "pattern": "not a member type|no member",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-011",
+    "pattern": "inaccessible|no member",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-019",
+    "pattern": "cannot convert value.*FetchSuccessCompletion",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "GCT-020",
+    "pattern": "cannot convert value.*FetchFailureCompletion",
+    "scope": "generated production facade separate-module authority boundary"
+  },
+  {
+    "id": "CT-009-work",
+    "pattern": "cannot convert value.*AuditWork.*FetchWork",
+    "scope": "distinct operation work boundary"
+  },
+  {
+    "id": "GCT-009-work",
+    "pattern": "cannot convert value.*AuditWork.*FetchWork",
+    "scope": "distinct operation work boundary"
+  },
+  {
+    "id": "GMT-002",
+    "pattern": "requires|declared|Destination",
+    "scope": "actual external macro expansion lexical or compiler witness boundary"
+  },
+  {
+    "id": "GMT-003",
+    "pattern": "cannot assign value|cannot convert value|conflicting arguments",
+    "scope": "actual external macro expansion lexical or compiler witness boundary"
+  },
+  {
+    "id": "GMT-004",
+    "pattern": "reserved",
+    "scope": "actual external macro expansion lexical or compiler witness boundary"
+  },
+  {
+    "id": "GMT-008",
+    "pattern": "Sendable",
+    "scope": "actual external macro expansion lexical or compiler witness boundary"
+  },
+  {
+    "id": "GMT-004-generic-phase",
+    "pattern": "nongeneric struct or enum",
+    "scope": "unsupported generic phase nominal specialization; nested generic fields remain supported"
+  },
+  {
+    "id": "GMT-003-operation",
+    "pattern": "cannot assign value|conflicting arguments|cannot convert value",
+    "scope": "invariant semantic equality witness rejects subtype/existential coercion"
+  },
+  {
+    "id": "GMT-003-router",
+    "pattern": "cannot assign value|conflicting arguments|cannot convert value",
+    "scope": "invariant semantic equality witness rejects subtype/existential coercion"
+  },
+  {
+    "id": "GMT-002-enclosing-generic",
+    "pattern": "Generic schemas",
+    "scope": "actionable unsupported declaration diagnostic from actual macro expansion"
+  },
+  {
+    "id": "GMT-002-metadata-placement",
+    "pattern": "directly inside",
+    "scope": "actionable unsupported declaration diagnostic from actual macro expansion"
+  },
+  {
+    "id": "GMT-002-owned-router",
+    "pattern": "unavailable in .ownedOnly",
+    "scope": "actionable unsupported declaration diagnostic from actual macro expansion"
+  },
+  {
+    "id": "GMT-004-snapshot-case",
+    "pattern": "reserved by generated Snapshot",
+    "scope": "deterministic reserved Snapshot case diagnostic"
+  },
+  {
+    "id": "GHOST-MainActor",
+    "pattern": "main actor-isolated|MainActor",
+    "scope": "G5 normal-import generated confined host boundary"
+  },
+  {
+    "id": "GHOST-IsolatedOutcome",
+    "pattern": "non-Sendable|non-sendable",
+    "scope": "G5 normal-import generated confined host boundary"
+  },
+  {
+    "id": "GHOST-IsolatedMode",
+    "pattern": "no member|not a member type",
+    "scope": "G5 normal-import generated confined host boundary"
+  },
+  {
+    "id": "GHOST-ActorSealing",
+    "pattern": "inaccessible",
+    "scope": "G5 normal-import generated confined host boundary"
+  }
+]

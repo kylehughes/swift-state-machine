@@ -1,0 +1,69 @@
+import StateMachine
+import StateMachineSchema
+
+/// The isolated schema counterpart of the handwritten editor, with confined value inputs and outputs.
+@StateMachine(mode: .isolated, initial: "draft", scopes: ["save"])
+nonisolated public enum GeneratedNote {
+    /// Independent editable data.
+    public struct Draft: ~Sendable {
+        /// The current text.
+        public let text: String
+        /// Creates ordinary draft data.
+        public init(text: String) { self.text = text }
+    }
+    /// Historical submitted data, independent of whether its task remains authorized.
+    public struct Saving: ~Sendable {
+        /// The submitted text.
+        public let text: String
+        /// Creates ordinary historical data.
+        public init(text: String) { self.text = text }
+    }
+    /// Independent saved data returned within the driver's actor.
+    public struct Saved: ~Sendable {
+        /// The saved text.
+        public let text: String
+        /// Creates ordinary result data without granting completion authority.
+        public init(text: String) { self.text = text }
+    }
+    case draft(Draft)
+    case saving(Saving)
+    case saved(Saved)
+    /// Dynamic editor inputs.
+    public enum Input: ~Sendable {
+        case save
+        case edit(String)
+        case cancel
+    }
+    /// Inert typed work descriptions.
+    public enum Effect: ~Sendable { case save(Save.Input) }
+    /// One confined operation; no Sendable conformance is imposed on its input or outcome.
+    @Operation(effect: "save", scope: "save", activeIn: ["saving"], admission: .latest)
+    public enum Save {
+        /// The immutable input.
+        public typealias Input = Draft
+        /// The independent output.
+        public typealias Output = Saved
+        /// This sample's storage cannot fail.
+        public typealias Failure = Never
+    }
+    @Transition(from: "draft", to: "saving", on: .input("save"), starts: ["save"])
+    fileprivate static func begin(_ source: borrowing Draft) -> Change<Saving, Effect> {
+        Change(Saving(text: source.text), effects: [.save(Draft(text: source.text))])
+    }
+    @Transition(from: "saving", to: "saved", on: .success("save"))
+    fileprivate static func received(_ source: borrowing Saving, _ output: Save.Output) -> Change<Saved, Effect> {
+        Change(output)
+    }
+    @Transition(from: "draft", to: "draft", on: .input("edit"))
+    fileprivate static func edit(_ source: borrowing Draft, _ text: String) -> Change<Draft, Effect> {
+        Change(Draft(text: text))
+    }
+    @Transition(from: "saving", to: "draft", on: .input("edit"), invalidates: ["save"])
+    fileprivate static func replace(_ source: borrowing Saving, _ text: String) -> Change<Draft, Effect> {
+        Change(Draft(text: text))
+    }
+    @Transition(from: "saving", to: "draft", on: .input("cancel"), invalidates: ["save"])
+    fileprivate static func cancel(_ source: borrowing Saving) -> Change<Draft, Effect> {
+        Change(Draft(text: source.text))
+    }
+}
