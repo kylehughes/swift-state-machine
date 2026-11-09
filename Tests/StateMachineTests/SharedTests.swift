@@ -1,5 +1,6 @@
 import Dispatch
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -252,7 +253,7 @@ private final class SharedCallbackLifetime: Sendable {
         #expect(ordinals == [closed.ordinal])
     }
 
-    @Test func slowSubscriberCoalescesToFinalValueWithoutLosingBatches() async throws {
+    @Test(.parksCooperativeThread) func slowSubscriberCoalescesToFinalValueWithoutLosingBatches() async throws {
         let shared = try owner()
         let release = DispatchSemaphore(value: 0)
         let (entered, entry) = AsyncStream<Void>.makeStream()
@@ -335,7 +336,7 @@ private final class SharedCallbackLifetime: Sendable {
         #expect(shared.drainCommands(limit: 100).isEmpty)
     }
 
-    @Test func packageRunnerSerializesBacklogAndRacingProducersWithClose() async throws {
+    @Test(.parksCooperativeThread) func packageRunnerSerializesBacklogAndRacingProducersWithClose() async throws {
         struct CallbackState: Sendable {
             var active = 0
             var maximum = 0
@@ -449,7 +450,9 @@ private final class SharedCallbackLifetime: Sendable {
         }
     }
 
-    @Test func unsubscribeAllowsClaimedCallbackAndReleasesCaptureWhileTokenRemainsAlive() async throws {
+    @Test(.parksCooperativeThread) func unsubscribeAllowsClaimedCallbackAndReleasesCaptureWhileTokenRemainsAlive()
+        async throws
+    {
         let shared = try owner(configuration: .init(subscriberCapacity: 1))
         let release = DispatchSemaphore(value: 0)
         let ordinals = OSAllocatedUnfairLock(initialState: [UInt64]())

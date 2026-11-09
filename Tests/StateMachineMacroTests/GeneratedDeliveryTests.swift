@@ -1,6 +1,7 @@
 import Dispatch
 import StateMachine
 import StateMachineSchema
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -132,7 +133,7 @@ nonisolated private enum DeliveryFlow: Sendable {
     }
 }
 
-@Suite(.serialized) struct GeneratedDeliveryTests {
+@Suite(.serialized, .parksCooperativeThread) struct GeneratedDeliveryTests {
     private enum Failure: Error { case unexpected }
     @Test func generatedManualConflictRetainsFirstOutcomeAndReconcilesOnce() async throws {
         let gate = DeliveryFlow.gate

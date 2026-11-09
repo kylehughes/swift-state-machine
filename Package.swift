@@ -37,7 +37,7 @@ let package = Package(
             name: "StateMachineMacroTests",
             dependencies: [
                 "StateMachineSchema", "StateMachine", "StateMachineMacros", "StateMachineExamples",
-                "StateMachineReferenceModel",
+                "StateMachineReferenceModel", "StateMachineTestSupport",
                 .product(name: "SwiftParser", package: "swift-syntax"),
                 .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
             ],
@@ -52,7 +52,15 @@ let package = Package(
         ),
         .testTarget(
             name: "StateMachineTests",
-            dependencies: ["StateMachine", "StateMachineExamples", "StateMachineUI", "StateMachineReferenceModel"],
+            dependencies: [
+                "StateMachine", "StateMachineExamples", "StateMachineUI", "StateMachineReferenceModel",
+                "StateMachineTestSupport",
+            ],
+            swiftSettings: [.treatAllWarnings(as: .error)]
+        ),
+        .target(
+            name: "StateMachineTestSupport",
+            path: "Tests/Support",
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
         .target(

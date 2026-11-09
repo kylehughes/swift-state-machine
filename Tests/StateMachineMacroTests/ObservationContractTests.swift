@@ -1,6 +1,7 @@
 import Dispatch
 import StateMachine
 import StateMachineSchema
+import StateMachineTestSupport
 import Testing
 
 @StateMachine(mode: .shared)
@@ -213,7 +214,7 @@ struct ObservationContractTests {
         #expect(quiescent)
     }
 
-    @Test func slowSubscriberCoalescesSnapshotsWithoutCoalescingCommands_RT026() async throws {
+    @Test(.parksCooperativeThread) func slowSubscriberCoalescesSnapshotsWithoutCoalescingCommands_RT026() async throws {
         typealias Host = RuntimeSharedHost<Int, Description, RuntimeTicket, Never>
         typealias Core = Host.Engine
         let scope = RuntimeScopeID(kind: 1)

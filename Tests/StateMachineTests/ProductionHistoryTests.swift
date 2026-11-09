@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -11,7 +12,7 @@ import os
 ///
 /// Neither these bounds nor the witness search prove
 /// universal linearizability, scheduler fairness, or durable effect execution.
-@Suite(.serialized) struct ProductionHistoryTests {
+@Suite(.serialized, .parksCooperativeThread) struct ProductionHistoryTests {
     private typealias Flow = ReferenceProfile
 
     private static func root(_ snapshot: Flow.Snapshot) -> ReferenceRoot {
