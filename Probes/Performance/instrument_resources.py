@@ -174,7 +174,7 @@ CONFINED_TYPES = {'RuntimeActorHost', 'RuntimeMainActorHost', 'RuntimeMainActorS
 def assert_shared_fixture_scope():
     """The excluded hosts are linked definitions, never instantiated by this workload."""
     fixture = Path(__file__).resolve().parent
-    if '@StateMachine(mode: .shared,' not in (fixture / 'Domain.swift').read_text():
+    if '@StateMachine(mode: .shared)' not in (fixture / 'Domain.swift').read_text():
         raise ValueError('Resource exclusion requires the Shared benchmark domain')
     for name in ['Main.swift', 'Support.swift', 'Workloads.swift']:
         tokens = [token for token, _, _ in swift_tokens((fixture / name).read_text())]

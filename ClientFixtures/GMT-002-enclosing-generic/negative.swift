@@ -2,15 +2,15 @@ import StateMachine
 import StateMachineSchema
 struct Outer<Element> {
 
-@StateMachine(mode: .shared, initial: "idle", scopes: [])
+@StateMachine(mode: .shared)
 nonisolated enum Counter: Sendable {
     struct Idle: Sendable { let value: [String: [Int?]] }
     struct Done: Sendable { let value: Int }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case done(Done)
     enum Input: Sendable { case finish(Int) }
     enum Effect: Sendable {}
-    @Transition(from: "idle", to: "done", on: .input("finish"))
+    @Transition(on: Input.finish)
     fileprivate static func finish(_ source: borrowing Idle, _ value: Int) -> Change<Done, Effect> {
         Change(Done(value: value + source.value.count))
     }

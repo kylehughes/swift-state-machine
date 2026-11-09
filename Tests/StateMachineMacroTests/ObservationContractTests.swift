@@ -3,7 +3,7 @@ import StateMachine
 import StateMachineSchema
 import Testing
 
-@StateMachine(mode: .shared, initial: "before", scopes: [])
+@StateMachine(mode: .shared)
 nonisolated private enum ObservationValueFlow: Sendable, Equatable {
     struct Before: Sendable, Equatable {
         let left: Int
@@ -15,7 +15,7 @@ nonisolated private enum ObservationValueFlow: Sendable, Equatable {
         let right: Int
         let history: [String: [[Int]]]
     }
-    case before(Before)
+    @Initial case before(Before)
     case after(After)
     enum Input: Sendable {
         case advance
@@ -23,12 +23,12 @@ nonisolated private enum ObservationValueFlow: Sendable, Equatable {
     }
     enum Effect: Sendable {}
 
-    @Transition(from: "before", to: "after", on: .input("advance"))
+    @Transition(on: Input.advance)
     fileprivate static func advance(_ source: borrowing Before) -> Change<After, Effect> {
         Change(After(left: source.left + 1, right: source.right + 10, history: source.history))
     }
 
-    @Transition(from: "after", to: "after", on: .input("append"))
+    @Transition(on: Input.append)
     fileprivate static func append(_ source: borrowing After, _ value: Int) -> Change<After, Effect> {
         var history = source.history
         history["rows", default: []].append([value, value + 1])
@@ -36,14 +36,14 @@ nonisolated private enum ObservationValueFlow: Sendable, Equatable {
     }
 }
 
-@StateMachine(mode: .isolated, initial: "value", scopes: [])
+@StateMachine(mode: .isolated)
 nonisolated private enum IsolatedObservationValueFlow {
     struct Value { let history: [String: [[Int]]] }
-    case value(Value)
+    @Initial case value(Value)
     enum Input { case append(Int) }
     enum Effect {}
 
-    @Transition(from: "value", to: "value", on: .input("append"))
+    @Transition(on: Input.append)
     fileprivate static func append(_ source: borrowing Value, _ value: Int) -> Change<Value, Effect> {
         var history = source.history
         history["rows", default: []].append([value, value + 1])

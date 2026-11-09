@@ -2,15 +2,15 @@ import StateMachine
 import StateMachineSchema
 import Testing
 
-@StateMachine(mode: .shared, initial: "idle")
+@StateMachine(mode: .shared)
 nonisolated enum Counter: Sendable {
     struct Idle: Sendable { let value: [String: [Int?]] }
     struct Done: Sendable { let value: Int }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case done(Done)
     enum Input: Sendable { case finish(Int) }
     enum Effect: Sendable {}
-    @Transition(from: "idle", to: "done", on: .input("finish"))
+    @Transition(on: Input.finish)
     fileprivate static func finish(_ source: borrowing Idle, _ value: Int) -> Change<Done, Effect> {
         Change(Done(value: value + source.value.count))
     }
@@ -46,7 +46,7 @@ nonisolated enum Counter: Sendable {
     #expect(change.next.withValue { $0.value } == 9)
 }
 
-@StateMachine(mode: .isolated, initial: "idle", scopes: [])
+@StateMachine(mode: .isolated)
 nonisolated enum IsolatedCounter {
     final class Text {
         let value: String
@@ -54,26 +54,26 @@ nonisolated enum IsolatedCounter {
     }
     struct Idle { let text: Text }
     struct Done { let text: Text }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case done(Done)
     enum Input { case finish }
     enum Effect {}
-    @Transition(from: "idle", to: "done", on: .input("finish"))
+    @Transition(on: Input.finish)
     fileprivate static func finish(_ source: borrowing Idle) -> Change<Done, Effect> {
         Change(Done(text: source.text))
     }
 }
 
-@StateMachine(mode: .ownedOnly, initial: "idle", scopes: [])
+@StateMachine(mode: .ownedOnly)
 nonisolated enum UniqueCounter: ~Copyable {
     struct Idle: ~Copyable { let value: Int }
     struct Done: ~Copyable { let value: Int }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case done(Done)
     enum Input { case finish(Bool) }
     enum Effect {}
     enum Rejection: Error { case declined }
-    @Transition(from: "idle", to: "done", on: .input("finish"))
+    @Transition(on: Input.finish)
     fileprivate static func finish(_ source: consuming Idle, _ accept: Bool) -> Advance<Idle, Done, Effect, Rejection> {
         if accept { return .advanced(Done(value: source.value), effects: []) }
         return .rejected(.declined, source)

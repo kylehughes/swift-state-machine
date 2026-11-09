@@ -3,7 +3,7 @@ import StateMachineSchema
 import Testing
 import os
 
-@StateMachine(mode: .shared, initial: "ready", scopes: ["effects"])
+@StateMachine(mode: .shared)
 nonisolated private enum OwnedValueContract: Sendable {
     struct Ready: Sendable {
         let identifier: Int
@@ -14,38 +14,39 @@ nonisolated private enum OwnedValueContract: Sendable {
         let history: [String: [Int]]
         let label: String
     }
-    case ready(Ready)
+    @Initial case ready(Ready)
     case finished(Finished)
+    enum Scope { case effects }
     enum Input: Sendable {
         case finish(String)
         case checked(String)
         case silent
     }
     enum Effect: Sendable, Equatable {
-        case audit(Int)
-        case publish(String)
+        case audit(Audit.Input)
+        case publish(Publish.Input)
     }
     enum Rejection: Error { case emptyLabel }
-    @Operation(effect: "audit", scope: "effects", activeIn: ["finished"], admission: .latest)
+    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
     enum Audit {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(effect: "publish", scope: "effects", activeIn: ["finished"], admission: .latest)
+    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
     enum Publish {
         typealias Input = String
         typealias Output = String
         typealias Failure = Never
     }
-    @Transition(from: "ready", to: "finished", on: .input("finish"), starts: ["audit", "publish"])
+    @Transition(on: Input.finish, starts: [Audit.self, Publish.self])
     fileprivate static func finish(_ source: borrowing Ready, _ label: String) -> Change<Finished, Effect> {
         Change(
             Finished(identifier: source.identifier, history: source.history, label: label),
             effects: [.audit(source.identifier), .publish(label)]
         )
     }
-    @Transition(from: "ready", to: "finished", on: .input("checked"), starts: ["audit", "publish"])
+    @Transition(on: Input.checked, starts: [Audit.self, Publish.self])
     fileprivate static func checked(
         _ source: borrowing Ready,
         _ label: String
@@ -53,24 +54,24 @@ nonisolated private enum OwnedValueContract: Sendable {
         guard !label.isEmpty else { throw .emptyLabel }
         return finish(source, label)
     }
-    @Transition(from: "finished", to: "finished", on: .success("audit"))
+    @Transition(onSuccess: Audit.self)
     fileprivate static func audited(_ source: borrowing Finished, _ output: Audit.Output) -> Change<Finished, Effect> {
         Change(copy source)
     }
-    @Transition(from: "finished", to: "finished", on: .success("publish"))
+    @Transition(onSuccess: Publish.self)
     fileprivate static func published(
         _ source: borrowing Finished,
         _ output: Publish.Output
     ) -> Change<Finished, Effect> {
         Change(copy source)
     }
-    @Transition(from: "ready", to: "finished", on: .input("silent"))
+    @Transition(on: Input.silent)
     fileprivate static func silent(_ source: borrowing Ready) -> Change<Finished, Effect> {
         Change(Finished(identifier: source.identifier, history: source.history, label: "silent"))
     }
 }
 
-@StateMachine(mode: .ownedOnly, initial: "ready", scopes: ["effects"])
+@StateMachine(mode: .ownedOnly)
 nonisolated private enum OwnedResourceContract: ~Copyable {
     struct Resource: ~Copyable {
         let identifier: Int
@@ -86,41 +87,42 @@ nonisolated private enum OwnedResourceContract: ~Copyable {
         let history: [String: [Int]]
         let label: String
     }
-    case ready(Ready)
+    @Initial case ready(Ready)
     case finished(Finished)
+    enum Scope { case effects }
     enum Input { case finish(String) }
     enum Effect: Equatable {
-        case audit(Int)
-        case publish(String)
+        case audit(Audit.Input)
+        case publish(Publish.Input)
     }
     enum Rejection: Error { case emptyLabel }
-    @Operation(effect: "audit", scope: "effects", activeIn: ["finished"], admission: .latest)
+    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
     enum Audit {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(effect: "publish", scope: "effects", activeIn: ["finished"], admission: .latest)
+    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
     enum Publish {
         typealias Input = String
         typealias Output = String
         typealias Failure = Never
     }
-    @Transition(from: "finished", to: "finished", on: .success("audit"))
+    @Transition(onSuccess: Audit.self)
     fileprivate static func audited(
         _ source: consuming Finished,
         _ output: Audit.Output
     ) -> Advance<Finished, Finished, Effect, Never> {
         .advanced(source, effects: [])
     }
-    @Transition(from: "finished", to: "finished", on: .success("publish"))
+    @Transition(onSuccess: Publish.self)
     fileprivate static func published(
         _ source: consuming Finished,
         _ output: Publish.Output
     ) -> Advance<Finished, Finished, Effect, Never> {
         .advanced(source, effects: [])
     }
-    @Transition(from: "ready", to: "finished", on: .input("finish"), starts: ["audit", "publish"])
+    @Transition(on: Input.finish, starts: [Audit.self, Publish.self])
     fileprivate static func finish(
         _ source: consuming Ready,
         _ label: String

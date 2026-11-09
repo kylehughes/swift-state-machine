@@ -99,21 +99,54 @@ private struct SchemaParser {
         return name.text == text
     }
 
-    private func literal(_ expression: ExprSyntax) throws -> String {
-        guard let string = expression.as(StringLiteralExprSyntax.self), string.segments.count == 1,
-            case .stringSegment(let segment) = string.segments.first,
-            identifier(segment.content.text)
-        else { try reject(expression, "Use an Swift identifier string without interpolation or escapes.") }
-        return segment.content.text
+    /// Reads `<Enum>.<case>`, the only accepted spelling of a declared case reference.
+    private func caseReference(_ expression: ExprSyntax, in enumeration: String) throws -> String {
+        guard let member = expression.as(MemberAccessExprSyntax.self),
+            let base = member.base?.as(DeclReferenceExprSyntax.self), base.argumentNames == nil,
+            base.baseName.text == enumeration, member.declName.argumentNames == nil,
+            case .identifier(let name) = member.declName.baseName.tokenKind, identifier(name)
+        else { try reject(expression, "Reference a declared case as \(enumeration).<case>.") }
+        return name
     }
 
-    private func list(_ expression: ExprSyntax) throws -> [String] {
+    private func caseReferences(_ expression: ExprSyntax, in enumeration: String) throws -> [String] {
         guard let array = expression.as(ArrayExprSyntax.self) else {
-            try reject(expression, "Use an array of literal identifier strings.")
+            try reject(expression, "Use an array literal of \(enumeration).<case> references.")
         }
-        let values = try array.elements.map { try literal($0.expression) }
+        let values = try array.elements.map { try caseReference($0.expression, in: enumeration) }
         guard Set(values).count == values.count else {
-            try reject(expression, "Remove duplicate identifiers from this metadata list.")
+            try reject(expression, "Remove duplicate references from this metadata list.")
+        }
+        return values
+    }
+
+    /// Reads `<Type>.self`, the only accepted spelling of a declared phase payload or operation reference.
+    private func typeReference(_ expression: ExprSyntax) throws -> String {
+        guard let member = expression.as(MemberAccessExprSyntax.self),
+            let base = member.base?.as(DeclReferenceExprSyntax.self), base.argumentNames == nil,
+            member.declName.baseName.tokenKind == .keyword(.self), identifier(base.baseName.text)
+        else { try reject(expression, "Reference a type declared directly inside the schema as <Type>.self.") }
+        return base.baseName.text
+    }
+
+    /// Reads a phase payload spelling from a signature, allowing `Self.` or schema-name qualification.
+    private func payloadName(_ type: TypeSyntax, schema: String) -> String {
+        if let member = type.as(MemberTypeSyntax.self), member.genericArgumentClause == nil,
+            let base = member.baseType.as(IdentifierTypeSyntax.self), base.genericArgumentClause == nil,
+            base.name.text == "Self" || base.name.text == schema
+        {
+            return member.name.text
+        }
+        return type.trimmedDescription
+    }
+
+    private func typeReferences(_ expression: ExprSyntax) throws -> [(name: String, node: ExprSyntax)] {
+        guard let array = expression.as(ArrayExprSyntax.self) else {
+            try reject(expression, "Use an array literal of <Type>.self references.")
+        }
+        let values = try array.elements.map { (name: try typeReference($0.expression), node: $0.expression) }
+        guard Set(values.map(\.name)).count == values.count else {
+            try reject(expression, "Remove duplicate references from this metadata list.")
         }
         return values
     }
@@ -126,7 +159,10 @@ private struct SchemaParser {
         -> [String: ExprSyntax]
     {
         guard case .argumentList(let arguments) = attribute.arguments else {
-            try reject(attribute, "Provide literal labeled metadata arguments.")
+            guard required.isEmpty, attribute.arguments == nil else {
+                try reject(attribute, "Provide labeled metadata arguments.")
+            }
+            return [:]
         }
         var result: [String: ExprSyntax] = [:]
         for argument in arguments {
@@ -156,16 +192,38 @@ private struct SchemaParser {
         return member.declName.baseName.text
     }
 
-    private func trigger(_ expression: ExprSyntax) throws -> Schema.Trigger {
-        guard let call = expression.as(FunctionCallExprSyntax.self), call.arguments.count == 1,
-            let argument = call.arguments.first, argument.label == nil,
-            call.trailingClosure == nil, call.additionalTrailingClosures.isEmpty
-        else { try reject(expression, "Use .input(\"case\"), .success(\"effect\"), or .failure(\"effect\").") }
-        let kind = try member(call.calledExpression)
-        guard ["input", "success", "failure"].contains(kind) else {
-            try reject(expression, "A trigger must be .input, .success, or .failure.")
+    /// Reads the one trigger label of an edge or router: `on`, `onSuccess`, or `onFailure`.
+    private func trigger(
+        _ metadata: [String: ExprSyntax],
+        attribute: AttributeSyntax,
+        inputs: [Schema.Case],
+        operations: [Schema.Operation]
+    ) throws -> Schema.Trigger {
+        let labels = ["on", "onSuccess", "onFailure"].filter { metadata[$0] != nil }
+        guard labels.count == 1, let label = labels.first, let expression = metadata[label] else {
+            try reject(
+                attribute,
+                "Name exactly one trigger: on: Input.<case>, onSuccess: <Operation>.self, or onFailure: <Operation>.self."
+            )
         }
-        return Schema.Trigger(kind: kind, name: try literal(argument.expression))
+        guard label != "on" else {
+            let name = try caseReference(expression, in: "Input")
+            guard inputs.contains(where: { $0.caseName == name }) else {
+                try reject(expression, "'\(name)' is not a declared Input case.")
+            }
+            return Schema.Trigger(kind: "input", name: name)
+        }
+        let name = try typeReference(expression)
+        guard let operation = operations.first(where: { $0.name == name }) else {
+            try reject(expression, "'\(name)' is not a declared @Operation namespace.")
+        }
+        return Schema.Trigger(kind: label == "onSuccess" ? "success" : "failure", name: operation.effect)
+    }
+
+    private func describe(_ trigger: Schema.Trigger, operations: [Schema.Operation]) -> String {
+        guard trigger.kind != "input" else { return "on: Input.\(trigger.name)" }
+        let name = operations.first { $0.effect == trigger.name }?.name ?? trigger.name
+        return "\(trigger.kind == "success" ? "onSuccess" : "onFailure"): \(name).self"
     }
 
     private func marker(_ attributes: AttributeListSyntax, named name: String) throws -> AttributeSyntax? {
@@ -179,9 +237,9 @@ private struct SchemaParser {
         return matches.first
     }
 
-    private func cases(_ declaration: EnumDeclSyntax, effect: Bool) throws -> [Schema.Case] {
+    private func cases(_ declaration: EnumDeclSyntax, payloads: ClosedRange<Int>) throws -> [Schema.Case] {
         guard declaration.genericParameterClause == nil, declaration.genericWhereClause == nil else {
-            try reject(declaration, "Input and Effect must be nongeneric closed enums.")
+            try reject(declaration, "Input, Effect, and Scope must be nongeneric closed enums.")
         }
         var result: [Schema.Case] = []
         for member in declaration.memberBlock.members {
@@ -192,12 +250,14 @@ private struct SchemaParser {
                 }
                 let parameters = element.parameterClause?.parameters
                 let count = parameters?.count ?? 0
-                guard element.rawValue == nil, count <= 1, !effect || count == 1 else {
+                guard element.rawValue == nil, payloads.contains(count) else {
                     try reject(
                         element,
-                        effect
-                            ? "Each Effect case requires exactly one unlabeled payload."
-                            : "Each Input case accepts zero or one unlabeled payload."
+                        payloads == 1 ... 1
+                            ? "Each phase and Effect case requires exactly one unlabeled payload."
+                            : payloads == 0 ... 0
+                                ? "Each Scope case is a plain name without a payload or raw value."
+                                : "Each Input case accepts zero or one unlabeled payload."
                     )
                 }
                 if let parameter = parameters?.first {
@@ -267,29 +327,47 @@ private struct SchemaParser {
         guard identifier(declaration.name.text) else {
             try reject(declaration, "Use an unescaped Swift schema identifier.")
         }
-        let root = try arguments(attribute, required: ["mode", "initial"], optional: ["scopes"])
+        let root = try arguments(attribute, required: ["mode"])
         let mode = try member(root["mode"]!)
         guard ["shared", "isolated", "ownedOnly"].contains(mode) else {
             try reject(attribute, "Mode must be .shared, .isolated, or .ownedOnly.")
         }
-        let initial = try literal(root["initial"]!)
-        let scopes = try root["scopes"].map(list) ?? []
         let members = declaration.memberBlock.members
+        var initialCases: [EnumCaseDeclSyntax] = []
         for member in members {
             guard let attributed = member.decl.asProtocol(WithAttributesSyntax.self) else { continue }
-            for name in ["Transition", "Route", "Operation"] {
+            for name in ["Transition", "Route", "Operation", "Initial"] {
                 guard let attribute = try marker(attributed.attributes, named: name) else { continue }
-                guard
-                    name == "Operation" ? member.decl.is(EnumDeclSyntax.self) : member.decl.is(FunctionDeclSyntax.self)
-                else {
-                    try reject(
-                        attribute,
-                        name == "Operation"
-                            ? "@Operation must mark a nested enum namespace."
-                            : "@\(name) must mark a static function declared directly inside the schema."
-                    )
+                switch name {
+                case "Operation":
+                    guard member.decl.is(EnumDeclSyntax.self) else {
+                        try reject(attribute, "@Operation must mark a nested enum namespace.")
+                    }
+                case "Initial":
+                    guard let phase = member.decl.as(EnumCaseDeclSyntax.self), phase.elements.count == 1,
+                        attribute.arguments == nil
+                    else {
+                        try reject(
+                            attribute,
+                            "@Initial takes no arguments and must mark a declaration of one phase case directly inside the schema."
+                        )
+                    }
+                    initialCases.append(phase)
+                default:
+                    guard member.decl.is(FunctionDeclSyntax.self) else {
+                        try reject(
+                            attribute,
+                            "@\(name) must mark a static function declared directly inside the schema."
+                        )
+                    }
                 }
             }
+        }
+        guard initialCases.count == 1, let initial = initialCases.first?.elements.first?.name.text else {
+            try reject(
+                initialCases.dropFirst().first.map(Syntax.init) ?? Syntax(attribute),
+                "Mark exactly one phase case with @Initial."
+            )
         }
         var nominalNames: [String] = []
         var nestedEnums: [EnumDeclSyntax] = []
@@ -316,10 +394,10 @@ private struct SchemaParser {
                 }
             }
         }
-        let rootCases = try cases(declaration, effect: true)
+        let rootCases = try cases(declaration, payloads: 1 ... 1)
         let phases = try rootCases.map { value -> Schema.Phase in
-            guard let type = value.payloadType, identifier(type), nominalNames.contains(type), type != "Input",
-                type != "Effect"
+            guard let type = value.payloadType, identifier(type), nominalNames.contains(type),
+                !["Input", "Effect", "Scope"].contains(type)
             else {
                 try reject(
                     declaration,
@@ -334,9 +412,11 @@ private struct SchemaParser {
                 "Declare at least one phase, with a different nested nominal payload type for every phase."
             )
         }
-        let phaseNames = Set(phases.map(\.caseName))
-        guard phaseNames.contains(initial) else {
-            try reject(attribute, "Initial phase '\(initial)' is not a declared phase case.")
+        func phase(_ reference: (name: String, node: ExprSyntax)) throws -> String {
+            guard let phase = phases.first(where: { $0.typeName == reference.name }) else {
+                try reject(reference.node, "'\(reference.name)' is not a phase payload type declared in this schema.")
+            }
+            return phase.caseName
         }
         guard let inputEnum = nestedEnums.first(where: { $0.name.text == "Input" }),
             let effectEnum = nestedEnums.first(where: { $0.name.text == "Effect" })
@@ -346,8 +426,11 @@ private struct SchemaParser {
                 "Declare closed Input and Effect enums directly inside the schema; empty enums are allowed."
             )
         }
-        let inputs = try cases(inputEnum, effect: false)
-        let effects = try cases(effectEnum, effect: true)
+        let inputs = try cases(inputEnum, payloads: 0 ... 1)
+        let effects = try cases(effectEnum, payloads: 1 ... 1)
+        let scopes =
+            try nestedEnums.first { $0.name.text == "Scope" }
+            .map { try cases($0, payloads: 0 ... 0).map(\.caseName) } ?? []
         var operations: [Schema.Operation] = []
         for namespace in nestedEnums {
             guard let attribute = try marker(namespace.attributes, named: "Operation") else { continue }
@@ -359,20 +442,26 @@ private struct SchemaParser {
             }
             let metadata = try arguments(
                 attribute,
-                required: ["effect", "scope", "activeIn", "admission"],
+                required: ["scope", "activeIn", "admission"],
                 optional: ["requires"]
             )
-            let effect = try literal(metadata["effect"]!)
-            let scope = try literal(metadata["scope"]!)
-            let dependencies = try metadata["requires"].map(list) ?? []
-            let activeIn = try list(metadata["activeIn"]!)
-            guard effects.contains(where: { $0.caseName == effect }), scopes.contains(scope),
+            let requests = effects.filter { $0.payloadType == "\(namespace.name.text).Input" }
+            guard requests.count == 1, let effect = requests.first?.caseName else {
+                try reject(
+                    namespace,
+                    "Exactly one Effect case must request this operation by carrying \(namespace.name.text).Input."
+                )
+            }
+            let scope = try caseReference(metadata["scope"]!, in: "Scope")
+            let dependencies = try metadata["requires"].map { try caseReferences($0, in: "Scope") } ?? []
+            let activeIn = try typeReferences(metadata["activeIn"]!).map(phase)
+            guard scopes.contains(scope),
                 Set(dependencies).isSubset(of: Set(scopes)), !dependencies.contains(scope),
-                !activeIn.isEmpty, Set(activeIn).isSubset(of: phaseNames)
+                !activeIn.isEmpty
             else {
                 try reject(
                     attribute,
-                    "Operation metadata must reference a declared effect, primary scope, distinct additional scopes, and nonempty declared active phases."
+                    "Operation metadata must reference a primary Scope case, distinct additional Scope cases, and at least one active phase."
                 )
             }
             let aliases = namespace.memberBlock.members.compactMap { $0.decl.as(TypeAliasDeclSyntax.self) }
@@ -403,8 +492,11 @@ private struct SchemaParser {
                 )
             )
         }
-        guard operations.count == effects.count, Set(operations.map(\.effect)).count == effects.count else {
-            try reject(declaration, "Every Effect case must bind to exactly one @Operation namespace.")
+        if let unbound = effects.first(where: { effect in !operations.contains { $0.effect == effect.caseName } }) {
+            try reject(
+                effectEnum,
+                "Effect case '\(unbound.caseName)' must request an @Operation namespace by carrying its Input alias, such as Fetch.Input."
+            )
         }
         for scope in scopes {
             let sets = operations.filter { $0.scope == scope }.map { Set($0.activeIn) }
@@ -415,6 +507,7 @@ private struct SchemaParser {
                 )
             }
         }
+        let triggerLabels: Set<String> = ["on", "onSuccess", "onFailure"]
         var transitions: [Schema.Transition] = []
         var routes: [Schema.Route] = []
         var edgeNames = Set<String>()
@@ -451,23 +544,12 @@ private struct SchemaParser {
             else { try reject(function, "Transition and router names must be unique and cannot be overloaded.") }
             let metadata = try arguments(
                 attribute,
-                required: isRoute ? ["from", "on"] : ["from", "to", "on"],
-                optional: isRoute ? [] : ["invalidates", "starts"]
+                required: [],
+                optional: isRoute ? triggerLabels : triggerLabels.union(["invalidates", "starts"])
             )
-            let from = try literal(metadata["from"]!)
-            let on = try trigger(metadata["on"]!)
-            guard phaseNames.contains(from) else { try reject(attribute, "Source '\(from)' is not a declared phase.") }
+            let on = try trigger(metadata, attribute: attribute, inputs: inputs, operations: operations)
             let input = inputs.first { $0.caseName == on.name }
             let operation = operations.first { $0.effect == on.name }
-            guard on.kind == "input" ? input != nil : operation != nil else {
-                try reject(
-                    attribute,
-                    "Trigger '\(on.name)' does not name a declared \(on.kind == "input" ? "input" : "effect")."
-                )
-            }
-            if on.kind != "input", let operation, !operation.activeIn.contains(from) {
-                try reject(attribute, "Completion edges must start in an operation's activeIn phase.")
-            }
             let parameters = Array(function.signature.parameterClause.parameters)
             let needsPayload = on.kind != "input" || input?.payloadType != nil
             guard parameters.count == (needsPayload ? 2 : 1) else {
@@ -476,58 +558,58 @@ private struct SchemaParser {
                     "This trigger requires \(needsPayload ? "source and trigger payload parameters" : "only a source parameter")."
                 )
             }
-            let sourceType = phases.first { $0.caseName == from }!.typeName
+            let expectedOwnership = mode == "ownedOnly" ? "consuming" : "borrowing"
+            let sourceType: String
+            var authoredSource = parameters[0].type.trimmedDescription
             if isRoute {
                 guard let observed = parameters[0].type.as(IdentifierTypeSyntax.self),
-                    observed.name.text == "Observed", observed.genericArgumentClause?.arguments.count == 1,
+                    observed.name.text == "Observed", let arguments = observed.genericArgumentClause?.arguments,
+                    arguments.count == 1, let argument = arguments.first,
                     let result = function.signature.returnClause?.type.as(IdentifierTypeSyntax.self),
                     result.name.text == "PreparationResult", result.genericArgumentClause == nil
                 else {
-                    try reject(function, "A router must accept Observed<\(sourceType)> and return PreparationResult.")
+                    try reject(function, "A router must accept Observed<Source> and return PreparationResult.")
                 }
+                guard case .type(let observedType) = argument.argument else {
+                    try reject(argument, "A router must accept Observed<Source> and return PreparationResult.")
+                }
+                sourceType = payloadName(observedType, schema: declaration.name.text)
+            } else {
+                guard let source = parameters[0].type.as(AttributedTypeSyntax.self),
+                    source.attributes.isEmpty, source.specifiers.count == 1,
+                    source.specifiers.first?.as(SimpleTypeSpecifierSyntax.self)?.specifier.text == expectedOwnership
+                else {
+                    try reject(
+                        parameters[0],
+                        "Use an explicitly \(expectedOwnership) phase payload as the source parameter."
+                    )
+                }
+                sourceType = payloadName(source.baseType, schema: declaration.name.text)
+                authoredSource = source.baseType.trimmedDescription
+            }
+            guard let from = phases.first(where: { $0.typeName == sourceType })?.caseName else {
+                try reject(
+                    parameters[0].type,
+                    "Source '\(sourceType)' is not a phase payload type declared in this schema."
+                )
+            }
+            if on.kind != "input", let operation, !operation.activeIn.contains(from) {
+                try reject(attribute, "Completion edges must start in an operation's activeIn phase.")
+            }
+            if isRoute {
                 routes.append(
                     Schema.Route(
                         name: function.name.text,
                         from: from,
                         trigger: on,
-                        sourceType: parameters[0].type.trimmedDescription,
+                        sourceType: authoredSource,
                         payloadType: needsPayload ? parameters[1].type.trimmedDescription : nil
                     )
                 )
                 continue
             }
-            let to = try literal(metadata["to"]!)
-            guard let destination = phases.first(where: { $0.caseName == to }) else {
-                try reject(attribute, "Destination '\(to)' is not a declared phase.")
-            }
-            let invalidates = try metadata["invalidates"].map(list) ?? []
-            let starts = try metadata["starts"].map(list) ?? []
-            guard Set(invalidates).isSubset(of: Set(scopes)), Set(starts).isSubset(of: Set(effects.map(\.caseName)))
-            else {
-                try reject(attribute, "invalidates must name declared scopes and starts must name declared effects.")
-            }
-            for effect in starts {
-                let started = operations.first { $0.effect == effect }!
-                let boundScopes = [started.scope] + started.requires
-                guard started.activeIn.contains(to),
-                    boundScopes.allSatisfy({ scope in
-                        operations.first(where: { $0.scope == scope })?.activeIn.contains(to) ?? true
-                    })
-                else {
-                    try reject(
-                        attribute,
-                        "Started effect '\(effect)' and every required scope must be eligible in destination '\(to)'."
-                    )
-                }
-            }
-            let expectedOwnership = mode == "ownedOnly" ? "consuming" : "borrowing"
-            guard let source = parameters[0].type.as(AttributedTypeSyntax.self),
-                source.attributes.isEmpty, source.specifiers.count == 1,
-                source.specifiers.first?.as(SimpleTypeSpecifierSyntax.self)?.specifier.text == expectedOwnership
-            else {
-                try reject(parameters[0], "Use an explicitly \(expectedOwnership) \(sourceType) source parameter.")
-            }
             var failureType = function.signature.effectSpecifiers?.throwsClause?.type?.trimmedDescription
+            let destinationType: String
             if mode == "ownedOnly" {
                 guard function.signature.effectSpecifiers?.throwsClause == nil,
                     let result = function.signature.returnClause?.type.as(IdentifierTypeSyntax.self),
@@ -539,12 +621,49 @@ private struct SchemaParser {
                         "Owned-only transitions cannot throw and must return Advance<Source, Destination, Effect, Failure>."
                     )
                 }
+                guard case .type(let advanced) = arguments[arguments.index(after: arguments.startIndex)].argument else {
+                    try reject(result, "Advance must name the destination phase payload type.")
+                }
+                destinationType = payloadName(advanced, schema: declaration.name.text)
                 failureType = arguments.last?.argument.trimmedDescription
             } else {
                 guard let result = function.signature.returnClause?.type.as(IdentifierTypeSyntax.self),
                     result.name.text == "Change",
-                    let arguments = result.genericArgumentClause?.arguments, arguments.count == 2
-                else { try reject(function, "A value transition must return Change<\(destination.typeName), Effect>.") }
+                    let arguments = result.genericArgumentClause?.arguments, arguments.count == 2,
+                    let argument = arguments.first
+                else { try reject(function, "A value transition must return Change<Destination, Effect>.") }
+                guard case .type(let changed) = argument.argument else {
+                    try reject(result, "Change must name the destination phase payload type.")
+                }
+                destinationType = payloadName(changed, schema: declaration.name.text)
+            }
+            guard let to = phases.first(where: { $0.typeName == destinationType })?.caseName else {
+                try reject(
+                    function.signature.returnClause!.type,
+                    "Destination '\(destinationType)' is not a phase payload type declared in this schema."
+                )
+            }
+            let invalidates = try metadata["invalidates"].map { try caseReferences($0, in: "Scope") } ?? []
+            guard Set(invalidates).isSubset(of: Set(scopes)) else {
+                try reject(metadata["invalidates"]!, "invalidates must reference declared Scope cases.")
+            }
+            var starts: [String] = []
+            for reference in try metadata["starts"].map(typeReferences) ?? [] {
+                guard let started = operations.first(where: { $0.name == reference.name }) else {
+                    try reject(reference.node, "'\(reference.name)' is not a declared @Operation namespace.")
+                }
+                let boundScopes = [started.scope] + started.requires
+                guard started.activeIn.contains(to),
+                    boundScopes.allSatisfy({ scope in
+                        operations.first(where: { $0.scope == scope })?.activeIn.contains(to) ?? true
+                    })
+                else {
+                    try reject(
+                        reference.node,
+                        "Started operation '\(started.name)' and every required scope must be eligible in destination '\(destinationType)'."
+                    )
+                }
+                starts.append(started.effect)
             }
             transitions.append(
                 Schema.Transition(
@@ -555,7 +674,7 @@ private struct SchemaParser {
                     invalidates: invalidates,
                     starts: starts,
                     payloadType: needsPayload ? parameters[1].type.trimmedDescription : nil,
-                    sourceType: source.baseType.trimmedDescription,
+                    sourceType: authoredSource,
                     returnType: function.signature.returnClause!.type.trimmedDescription,
                     failureType: failureType
                 )
@@ -614,7 +733,7 @@ private struct SchemaParser {
                 guard routers.count <= 1, edges.count <= 1 || routers.count == 1 else {
                     try reject(
                         declaration,
-                        "Ambiguous routing for '\(phase.caseName)' and .\(on.kind)(\"\(on.name)\"); declare exactly one @Route when multiple edges match."
+                        "Ambiguous routing from '\(phase.typeName)' for \(describe(on, operations: operations)); declare exactly one @Route when multiple edges match."
                     )
                 }
             }
@@ -629,7 +748,7 @@ private struct SchemaParser {
                     else {
                         try reject(
                             declaration,
-                            "Operation '\(operation.name)' needs a \(kind) edge or router in active phase '\(phase)'."
+                            "Operation '\(operation.name)' needs a \(kind) edge or router in active phase case '\(phase)'."
                         )
                     }
                 }

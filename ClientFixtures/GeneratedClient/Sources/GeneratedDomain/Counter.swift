@@ -2,7 +2,7 @@ import StateMachine
 import StateMachineSchema
 
 /// A domain compiled in an independent package using only distributed runtime APIs.
-@StateMachine(mode: .shared, initial: "idle", scopes: [])
+@StateMachine(mode: .shared)
 nonisolated public enum Counter: Sendable {
     /// Initial ordinary payload data.
     public struct Idle: Sendable {
@@ -18,14 +18,14 @@ nonisolated public enum Counter: Sendable {
         /// Creates completed model data without live authority.
         public init(_ value: Int) { self.value = value }
     }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case done(Done)
     /// Closed dynamic inputs.
     public enum Input: Sendable { case finish(Int) }
     /// No managed operations are declared in this graph.
     public enum Effect: Sendable {}
     /// Computes the declared successor synchronously from a borrowed predecessor.
-    @Transition(from: "idle", to: "done", on: .input("finish"))
+    @Transition(on: Input.finish)
     fileprivate static func finish(_ source: borrowing Idle, _ value: Int) -> Change<Done, Effect> {
         Change(Done(value + source.value.count))
     }

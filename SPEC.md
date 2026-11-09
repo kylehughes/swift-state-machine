@@ -513,30 +513,32 @@ This document defines the domain-facing surface and the schema-to-runtime bounda
 
 ### 2. Schema grammar
 
-`MACRO-101`: `@StateMachine` attaches to one enum declaration. Its arguments are literal `mode`, `initial`, and `scopes` metadata. Phase cases, input/effect enums, operation declarations, transition declarations, and routers MUST appear in that lexical declaration. Cross-file scanning, extension discovery, runtime reflection, and string-based runtime dispatch are prohibited.
+`MACRO-101`: `@StateMachine` attaches to one enum declaration. Its only argument is literal `mode` metadata. Exactly one phase case declaration carries the `@Initial` marker. Invalidation scopes are the payload-free cases of an optional nested `Scope` enum; omitting it declares no scopes. The root attribute cannot reference the schema's own members, because resolving them requires the expansion that attribute introduces; initial-phase and scope metadata therefore live in the body. Phase cases, the scope enum, input/effect enums, operation declarations, transition declarations, and routers MUST appear in that lexical declaration. Cross-file scanning, extension discovery, runtime reflection, and string-based runtime dispatch are prohibited.
 
 `MACRO-102`: Each phase case MUST contain exactly one unlabeled payload whose type is a distinct nominal struct or enum declared directly inside the schema. Phase aliases and reuse of one payload type for multiple cases are prohibited in this grammar. This restriction makes `Observed<Idle>` and `Owned<Idle>` identify one phase unambiguously. Payload fields may use imported types, generic containers, and validated domain types normally.
 
 Generic schema parameters and constraints MAY be preserved if the compiler spike verifies the complete generated surface. If unsupported in the first release, that limitation MUST be documented; do not emit partially working generic schemas. Metadata for generic definitions MUST NOT depend on unsupported generic static stored properties.
 
-`MACRO-103`: Nested `Input` and `Effect` are closed enums. Input cases have zero or one unlabeled payload. Each Effect case has exactly one payload matching its operation's `Input` alias. Empty enums represent no inputs/effects. Names in attributes are literal identifiers validated at expansion and lowered to generated primitive tags. Interpolation, computed identifiers, arbitrary attribute expressions, and overloaded edge names are unsupported.
+`MACRO-103`: Nested `Input` and `Effect` are closed enums. Input cases have zero or one unlabeled payload. Each Effect case has exactly one payload spelled `<Operation>.Input`; that spelling binds the case to exactly one operation namespace, and each operation is requested by exactly one case. The binding is carried by the payload rather than by an `@Operation` argument because an attribute on the namespace cannot reference an Effect case whose payload names that namespace without a circular reference. Empty enums represent no inputs/effects.
+
+Schema metadata names declarations by reference and never by string. The accepted spellings are `Input.<case>` for an input trigger, `Scope.<case>` for a scope, and `<Type>.self` for a phase payload or an operation namespace. The compiler resolves each reference, so an undeclared name is a type-checking error at the attribute. Expansion reads the same spelling lexically, rejects a reference of the wrong kind, and lowers it to generated primitive tags. An edge's endpoints are not metadata: its source phase is the payload type of its source parameter (or of a router's `Observed<Source>`), and its destination phase is the payload type named by its `Change` or `Advance` result. These signature types MAY be qualified with `Self.` or the schema name. A trigger is exactly one of `on: Input.<case>`, `onSuccess: <Operation>.self`, or `onFailure: <Operation>.self`. String literals, implicit-member, qualified or computed references, arbitrary attribute expressions, and overloaded edge names are unsupported.
 
 The following example shows the required shape. Omitted bodies and payload fields are intentional specification placeholders.
 
 ```swift
-@StateMachine(
-    mode: .shared, initial: "idle", scopes: ["load", "authentication"]
-)
+@StateMachine(mode: .shared)
 nonisolated public enum ProfileFlow: Sendable {
     public struct Idle: Sendable { /* initial data */ }
     public struct Loading: Sendable { /* request data */ }
     public struct Loaded: Sendable { /* profile data */ }
     public struct Failed: Sendable { /* request and failure */ }
 
-    case idle(Idle)
+    @Initial case idle(Idle)
     case loading(Loading)
     case loaded(Loaded)
     case failed(Failed)
+
+    enum Scope { case load, authentication }
 
     public enum Input: Sendable {
         case load(ProfileRequest)
@@ -548,58 +550,41 @@ nonisolated public enum ProfileFlow: Sendable {
         case fetch(Fetch.Input)
     }
 
-    @Operation(
-        effect: "fetch", scope: "load", requires: ["authentication"],
-        activeIn: ["loading"], admission: .latest
-    )
+    @Operation(scope: Scope.load, requires: [Scope.authentication], activeIn: [Loading.self], admission: .latest)
     public enum Fetch {
         public typealias Input = ProfileRequest
         public typealias Output = Profile
         public typealias Failure = NetworkFailure
     }
 
-    @Transition(
-        from: "idle", to: "loading", on: .input("load"),
-        invalidates: ["load"], starts: ["fetch"]
-    )
+    @Transition(on: Input.load, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate nonisolated static func begin(
         _ source: borrowing Idle, _ input: ProfileRequest
     ) throws(LoadRejection) -> Change<Loading, Effect> { /* ... */ }
 
-    @Transition(
-        from: "loading", to: "idle", on: .input("cancel"),
-        invalidates: ["load"]
-    )
+    @Transition(on: Input.cancel, invalidates: [Scope.load])
     fileprivate nonisolated static func cancel(
         _ source: borrowing Loading
     ) -> Change<Idle, Effect> { /* ... */ }
 
-    @Transition(
-        from: "loading", to: "loaded", on: .success("fetch")
-    )
+    @Transition(onSuccess: Fetch.self)
     fileprivate nonisolated static func received(
         _ source: borrowing Loading, _ output: Fetch.Output
     ) -> Change<Loaded, Effect> { /* ... */ }
 
-    @Transition(
-        from: "loading", to: "failed", on: .failure("fetch")
-    )
+    @Transition(onFailure: Fetch.self)
     fileprivate nonisolated static func failed(
         _ source: borrowing Loading, _ error: Fetch.Failure
     ) -> Change<Failed, Effect> { /* ... */ }
 
-    @Transition(
-        from: "loading", to: "loading",
-        on: .input("authenticationChanged"),
-        invalidates: ["authentication"]
-    )
+    @Transition(on: Input.authenticationChanged, invalidates: [Scope.authentication])
     fileprivate nonisolated static func authenticationChanged(
         _ source: borrowing Loading, _ change: AuthenticationChange
     ) -> Change<Loading, Effect> { /* update session-bearing root data */ }
 }
 ```
 
-`MACRO-104`: `@Transition`, `@Operation`, and `@Route` are metadata markers; the root macro generates supporting members beside the original declarations. In particular, generate `FetchWork` and `FetchCompletion` as members of `ProfileFlow`. Do not depend on rewriting the existing nested `Fetch` enum. Generated names MUST be deterministic, reserved, and diagnosed on collision.
+`MACRO-104`: `@Initial`, `@Transition`, `@Operation`, and `@Route` are metadata markers; the root macro generates supporting members beside the original declarations. In particular, generate `FetchWork` and `FetchCompletion` as members of `ProfileFlow`. Do not depend on rewriting the existing nested `Fetch` enum. Generated names MUST be deterministic, reserved, and diagnosed on collision.
 
 `MACRO-105`: In value modes, a transition is a synchronous static function with an explicitly borrowed source, an optional trigger payload, and `Change<Destination, Effect>` as its result. It MAY use typed throws. The support type has the following shape, with checked conditional Sendable conformance where its stored values permit:
 
@@ -613,7 +598,7 @@ public struct Change<Next, Intent> {
 
 Change contains no executable callbacks. Async functions, untyped throws, inout source mutation, variadic parameters, and method-level generic edge signatures are unsupported in this grammar.
 
-Each edge has exactly one destination. Branching is expressed by explicit routers selecting several declared edges. Attribute `starts` is an allowed-effect set, not a promise to emit those effects. Omission means no effects are allowed. `invalidates` lists declared scopes to revoke if the edge commits.
+Each edge has exactly one destination. Branching is expressed by explicit routers selecting several declared edges. Attribute `starts` is the set of operations whose effects the edge may emit, not a promise to emit them. Omission means no effects are allowed. `invalidates` lists declared scopes to revoke if the edge commits.
 
 ### 3. Generated values and ownership
 
@@ -780,10 +765,10 @@ Cancellation invalidates admission before late results can commit. Physical canc
 
 `ROUTE-104`: Generate `prepare(_:on:) -> PreparationResult` for dynamic Input routing. A missing input/source edge returns an explicit invalid-phase rejection. It MUST NOT silently ignore the input. Direct methods expose typed PreparationFailure; dynamic dispatch preserves domain failures in a generated closed PreparationRejection enum with cases for throwing edges, plan failures, and structural routing failures.
 
-`ROUTE-105`: Exactly one edge for a `(source, trigger)` pair permits generated dispatch. Multiple edges require one explicit `@Route(from:on:)` function. A router accepts the matching observed phase plus its typed input or sealed outcome and returns PreparationResult. For example:
+`ROUTE-105`: Exactly one edge for a `(source, trigger)` pair permits generated dispatch. Multiple edges require one explicit `@Route()` function. A router accepts the matching observed phase plus its typed input or sealed outcome and returns PreparationResult. For example:
 
 ```swift
-@Route(from: "loading", on: .success("fetch"))
+@Route(onSuccess: Fetch.self)
 fileprivate nonisolated static func routeFetched(
     _ source: Observed<Loading>,
     _ completion: FetchSuccessCompletion
@@ -870,7 +855,7 @@ Owned completion-shaped edges MAY take ordinary output values: the caller owns t
 
 ### 10. Diagnostics and acceptance obligations
 
-`MACRO-106`: Reject unknown identifiers, duplicate/reserved names, unsupported placements/signatures, invalid initial phase, aliased/reused phase types, wrong payload arity, undeclared scopes, malformed admission limits, ambiguous routes, and mode-incompatible host requests. Diagnose declared starts that are ineligible in the destination phase. Report the offending declaration and corrective requirement.
+`MACRO-106`: Reject unsupported reference spellings, references of the wrong kind, duplicate/reserved names, unsupported placements/signatures, a missing or repeated initial marker, source or destination types that are not phase payloads, aliased/reused phase types, wrong payload arity, effect cases that request no operation, undeclared scopes, malformed admission limits, ambiguous routes, and mode-incompatible host requests. Diagnose declared starts that are ineligible in the destination phase. Report the offending declaration and corrective requirement.
 
 `MACRO-107`: Emit compiler witnesses for source/input/destination types, Change effect types, operation aliases, router signatures, ownership, isolation, Copyable, and Sendable requirements. SwiftSyntax text inspection MUST NOT pretend to resolve arbitrary semantic type equality or inspect imported implementations. Diagnostics and witnesses complement each other.
 

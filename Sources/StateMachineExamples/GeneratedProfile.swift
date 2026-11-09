@@ -2,7 +2,7 @@ import StateMachine
 import StateMachineSchema
 
 /// A generated profile workflow with typed operations and sealed host authority.
-@StateMachine(mode: .shared, initial: "idle", scopes: ["load", "authentication"])
+@StateMachine(mode: .shared)
 nonisolated public enum GeneratedProfile: Sendable {
     /// Initial user data.
     public struct Idle: Sendable {
@@ -37,10 +37,12 @@ nonisolated public enum GeneratedProfile: Sendable {
             self.failure = failure
         }
     }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case loading(Loading)
     case loaded(Loaded)
     case failed(Failed)
+    /// Authority that edges invalidate and operations hold.
+    enum Scope { case load, authentication }
     /// Closed dynamic inputs.
     public enum Input: Sendable {
         case load(ProfileRequest)
@@ -58,7 +60,7 @@ nonisolated public enum GeneratedProfile: Sendable {
     /// Typed request validation.
     public enum LoadRejection: Error { case wrongUser }
     /// The profile fetch operation.
-    @Operation(effect: "fetch", scope: "load", requires: ["authentication"], activeIn: ["loading"], admission: .latest)
+    @Operation(scope: Scope.load, requires: [Scope.authentication], activeIn: [Loading.self], admission: .latest)
     public enum Fetch {
         /// The immutable fetch input.
         public typealias Input = ProfileRequest
@@ -69,10 +71,9 @@ nonisolated public enum GeneratedProfile: Sendable {
     }
     /// An independent operation with different work and completion types.
     @Operation(
-        effect: "audit",
-        scope: "load",
-        requires: ["authentication"],
-        activeIn: ["loading"],
+        scope: Scope.load,
+        requires: [Scope.authentication],
+        activeIn: [Loading.self],
         admission: .parallel(limit: 2)
     )
     public enum Audit {
@@ -84,7 +85,7 @@ nonisolated public enum GeneratedProfile: Sendable {
         public typealias Failure = ProfileFailure
     }
     /// Starts a fetch only for the initial user.
-    @Transition(from: "idle", to: "loading", on: .input("load"), invalidates: ["load"], starts: ["fetch"])
+    @Transition(on: Input.load, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate static func begin(
         _ source: borrowing Idle,
         _ request: ProfileRequest
@@ -93,27 +94,27 @@ nonisolated public enum GeneratedProfile: Sendable {
         return Change(Loading(request: request), effects: [.fetch(request)])
     }
     /// Cancels the active load epoch.
-    @Transition(from: "loading", to: "idle", on: .input("cancel"), invalidates: ["load"])
+    @Transition(on: Input.cancel, invalidates: [Scope.load])
     fileprivate static func cancel(_ source: borrowing Loading) -> Change<Idle, Effect> {
         Change(Idle(userID: source.request.userID))
     }
     /// Accepts a successful fetch.
-    @Transition(from: "loading", to: "loaded", on: .success("fetch"))
+    @Transition(onSuccess: Fetch.self)
     fileprivate static func received(_ source: borrowing Loading, _ output: Fetch.Output) -> Change<Loaded, Effect> {
         Change(Loaded(profile: output))
     }
     /// Accepts a failed fetch.
-    @Transition(from: "loading", to: "failed", on: .failure("fetch"))
+    @Transition(onFailure: Fetch.self)
     fileprivate static func failed(_ source: borrowing Loading, _ failure: Fetch.Failure) -> Change<Failed, Effect> {
         Change(Failed(request: source.request, failure: failure))
     }
     /// Rotates a dependency epoch without replacing the visible phase.
-    @Transition(from: "loading", to: "loading", on: .input("authenticationChanged"), invalidates: ["authentication"])
+    @Transition(on: Input.authenticationChanged, invalidates: [Scope.authentication])
     fileprivate static func authenticationChanged(_ source: borrowing Loading) -> Change<Loading, Effect> {
         Change(copy source)
     }
     /// Starts a refresh only for the loaded user.
-    @Transition(from: "loaded", to: "loading", on: .input("refresh"), invalidates: ["load"], starts: ["fetch"])
+    @Transition(on: Input.refresh, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate static func refresh(
         _ source: borrowing Loaded,
         _ request: ProfileRequest
@@ -122,22 +123,22 @@ nonisolated public enum GeneratedProfile: Sendable {
         return Change(Loading(request: request), effects: [.fetch(request)])
     }
     /// Restarts the retained request.
-    @Transition(from: "failed", to: "loading", on: .input("retry"), invalidates: ["load"], starts: ["fetch"])
+    @Transition(on: Input.retry, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate static func retry(_ source: borrowing Failed) -> Change<Loading, Effect> {
         Change(Loading(request: source.request), effects: [.fetch(source.request)])
     }
     /// Starts an independent audit while the load scope remains eligible.
-    @Transition(from: "loading", to: "loading", on: .input("audit"), starts: ["audit"])
+    @Transition(on: Input.audit, starts: [Audit.self])
     fileprivate static func audit(_ source: borrowing Loading, _ input: String) -> Change<Loading, Effect> {
         Change(copy source, effects: [.audit(input)])
     }
     /// Acknowledges audit success without changing profile data.
-    @Transition(from: "loading", to: "loading", on: .success("audit"))
+    @Transition(onSuccess: Audit.self)
     fileprivate static func audited(_ source: borrowing Loading, _ output: Audit.Output) -> Change<Loading, Effect> {
         Change(copy source)
     }
     /// Acknowledges audit failure without changing profile data.
-    @Transition(from: "loading", to: "loading", on: .failure("audit"))
+    @Transition(onFailure: Audit.self)
     fileprivate static func auditFailed(
         _ source: borrowing Loading,
         _ failure: Audit.Failure

@@ -3,45 +3,46 @@ import StateMachineSchema
 import Testing
 import os
 
-@StateMachine(mode: .shared, initial: "idle", scopes: ["first", "second"])
+@StateMachine(mode: .shared)
 nonisolated private enum ChainFlow: Sendable {
     struct Idle: Sendable { let value: Int }
     struct First: Sendable { let value: Int }
     struct Second: Sendable { let value: Int }
     struct Done: Sendable { let value: Int }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case first(First)
     case second(Second)
     case done(Done)
+    enum Scope { case first, second }
     enum Input: Sendable { case begin }
     enum Effect: Sendable {
         case firstOperation(FirstOperation.Input)
         case secondOperation(SecondOperation.Input)
     }
-    @Operation(effect: "firstOperation", scope: "first", activeIn: ["first"], admission: .latest)
+    @Operation(scope: Scope.first, activeIn: [First.self], admission: .latest)
     enum FirstOperation {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(effect: "secondOperation", scope: "second", activeIn: ["second"], admission: .latest)
+    @Operation(scope: Scope.second, activeIn: [Second.self], admission: .latest)
     enum SecondOperation {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Transition(from: "idle", to: "first", on: .input("begin"), starts: ["firstOperation"])
+    @Transition(on: Input.begin, starts: [FirstOperation.self])
     fileprivate static func begin(_ source: borrowing Idle) -> Change<First, Effect> {
         Change(First(value: source.value), effects: [.firstOperation(source.value)])
     }
-    @Transition(from: "first", to: "second", on: .success("firstOperation"), starts: ["secondOperation"])
+    @Transition(onSuccess: FirstOperation.self, starts: [SecondOperation.self])
     fileprivate static func firstReceived(
         _ source: borrowing First,
         _ value: FirstOperation.Output
     ) -> Change<Second, Effect> {
         Change(Second(value: value), effects: [.secondOperation(value)])
     }
-    @Transition(from: "second", to: "done", on: .success("secondOperation"))
+    @Transition(onSuccess: SecondOperation.self)
     fileprivate static func secondReceived(
         _ source: borrowing Second,
         _ value: SecondOperation.Output

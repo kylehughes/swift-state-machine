@@ -8,18 +8,18 @@ This graph has one legal transition, from a draft to an approved value:
 import StateMachine
 import StateMachineSchema
 
-@StateMachine(mode: .shared, initial: "draft")
+@StateMachine(mode: .shared)
 nonisolated enum Approval: Sendable {
     struct Draft: Sendable { let title: String }
     struct Approved: Sendable { let title: String }
 
-    case draft(Draft)
+    @Initial case draft(Draft)
     case approved(Approved)
 
     enum Input: Sendable { case approve }
     enum Effect: Sendable {}
 
-    @Transition(from: "draft", to: "approved", on: .input("approve"))
+    @Transition(on: Input.approve)
     fileprivate static func approve(
         _ source: borrowing Draft
     ) -> Change<Approved, Effect> {
@@ -39,6 +39,28 @@ Calling the edge consumes the draft owner and returns the complete successor
 with its ordered effect descriptions. This graph has no effects to execute.
 Its plain `Draft` and `Approved` values remain ordinary data. Constructing an
 `Approved` does not construct an `Owned<Approved>`.
+
+## Refer to declarations, not names
+
+A schema names nothing with a string. `@Initial` marks the phase in which fresh
+ownership is created. An edge's endpoints come from its signature: `approve`
+borrows a `Draft` and returns `Change<Approved, Effect>`, so it leads from the
+`draft` phase to the `approved` phase. Its trigger, `Input.approve`, is an
+ordinary reference that the compiler resolves, so a misspelled case fails to
+compile at the attribute, and completion and rename work as they do elsewhere.
+
+| To name | Write |
+| --- | --- |
+| The initial phase | `@Initial` on its `case` |
+| An edge's source and destination | The payload types in its signature |
+| An input trigger | `on: Input.approve` |
+| An operation's outcome | `onSuccess: Fetch.self` or `onFailure: Fetch.self` |
+| Operations an edge may start | `starts: [Fetch.self]` |
+| A scope | `Scope.load`, a case of a nested `Scope` enum |
+| Phases where an operation may run | `activeIn: [Loading.self]` |
+
+Write each reference exactly as shown. The macro reads the spelling, so it
+rejects qualified, computed, and implicit-member forms such as `.approve`.
 
 ## Choose the ownership contract
 
@@ -131,8 +153,10 @@ alone does not acknowledge termination.
 
 ## Declare effects and branching
 
-Each effect case binds to one `Operation` namespace with explicit `Input`,
-`Output`, and `Failure` aliases. The operation declares its primary scope,
+An `Operation` namespace declares explicit `Input`, `Output`, and `Failure`
+aliases. One effect case requests it by carrying that input alias, as in
+`case publish(Publication.Input)`. Scopes are the cases of a nested `Scope`
+enum. The operation declares its primary scope,
 dependency scopes, eligible phases, and admission policy. Work receives the
 post-commit activation identities of all those scopes. Invalidating any bound
 scope revokes that work, even if the visible phase remains the same.
@@ -141,37 +165,38 @@ For example, this graph publishes a message and enters its final phase when
 publication succeeds:
 
 ```swift
-@StateMachine(mode: .shared, initial: "ready", scopes: ["publication"])
+@StateMachine(mode: .shared)
 nonisolated enum MessageFlow: Sendable {
     struct Ready: Sendable { let message: String }
     struct Sent: Sendable { let message: String }
-    case ready(Ready)
+    @Initial case ready(Ready)
     case sent(Sent)
 
+    enum Scope { case publication }
     enum Input: Sendable { case send }
     enum Effect: Sendable { case publish(Publication.Input) }
 
-    @Operation(effect: "publish", scope: "publication", activeIn: ["ready"], admission: .latest)
+    @Operation(scope: Scope.publication, activeIn: [Ready.self], admission: .latest)
     enum Publication {
         typealias Input = String
         typealias Output = Void
         typealias Failure = Never
     }
 
-    @Transition(from: "ready", to: "ready", on: .input("send"), starts: ["publish"])
+    @Transition(on: Input.send, starts: [Publication.self])
     fileprivate static func send(_ source: borrowing Ready) -> Change<Ready, Effect> {
         Change(Ready(message: source.message), effects: [.publish(source.message)])
     }
 
-    @Transition(from: "ready", to: "sent", on: .success("publish"))
+    @Transition(onSuccess: Publication.self)
     fileprivate static func published(_ source: borrowing Ready, _ output: Publication.Output) -> Change<Sent, Effect> {
         Change(Sent(message: source.message))
     }
 }
 ```
 
-The trigger names the effect case, `publish`, rather than its `Publication`
-namespace. Each operation needs a success edge or router in every eligible
+The completion trigger and the `starts` list both name the `Publication`
+namespace, which identifies the operation. Each operation needs a success edge or router in every eligible
 phase, and a failure edge or router when its failure type is not `Never`.
 These declarations also apply when you use only the generated owned API.
 

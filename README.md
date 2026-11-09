@@ -18,18 +18,18 @@ Define phase data and an ordinary transition function inside a schema:
 import StateMachine
 import StateMachineSchema
 
-@StateMachine(mode: .shared, initial: "draft")
+@StateMachine(mode: .shared)
 nonisolated enum Approval: Sendable {
     struct Draft: Sendable { let title: String }
     struct Approved: Sendable { let title: String }
 
-    case draft(Draft)
+    @Initial case draft(Draft)
     case approved(Approved)
 
     enum Input: Sendable { case approve }
     enum Effect: Sendable {}
 
-    @Transition(from: "draft", to: "approved", on: .input("approve"))
+    @Transition(on: Input.approve)
     fileprivate static func approve(
         _ source: borrowing Draft
     ) -> Change<Approved, Effect> {
@@ -45,6 +45,10 @@ func approveDraft() {
 
 approveDraft()
 ```
+
+Nothing in the schema is named by a string. `@Initial` marks the starting
+phase, the edge's source and destination are the payload types in its
+signature, and `Input.approve` is a reference the compiler resolves.
 
 The macro generates `approve()` on `Owned<Draft>` and consumes that owner when
 called. `Owned<Approved>` has no `approve()` method. Plain phase structs remain

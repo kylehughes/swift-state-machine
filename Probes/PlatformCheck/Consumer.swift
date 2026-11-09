@@ -3,14 +3,14 @@ import StateMachineExamples
 import StateMachineSchema
 import StateMachineUI
 
-@StateMachine(mode: .shared, initial: "idle")
+@StateMachine(mode: .shared)
 nonisolated private enum PlatformWorkflow: Sendable {
     struct Idle: Sendable { let value: Int }
-    case idle(Idle)
+    @Initial case idle(Idle)
     enum Input: Sendable { case edit(Int) }
     enum Effect: Sendable {}
 
-    @Transition(from: "idle", to: "idle", on: .input("edit"))
+    @Transition(on: Input.edit)
     fileprivate static func edit(_ source: borrowing Idle, _ value: Int) -> Change<Idle, Effect> {
         Change(Idle(value: value))
     }

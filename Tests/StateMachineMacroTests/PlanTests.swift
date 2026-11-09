@@ -2,10 +2,11 @@ import StateMachine
 import StateMachineSchema
 import Testing
 
-@StateMachine(mode: .shared, initial: "idle", scopes: ["work"])
+@StateMachine(mode: .shared)
 nonisolated enum PlanFlow: Sendable {
     struct Idle: Sendable { let value: Int }
-    case idle(Idle)
+    @Initial case idle(Idle)
+    enum Scope { case work }
     enum Input: Sendable {
         case run(Int)
         case forbidden
@@ -15,33 +16,33 @@ nonisolated enum PlanFlow: Sendable {
         case b(B.Input)
     }
     enum Rejection: Error { case negative }
-    @Operation(effect: "a", scope: "work", activeIn: ["idle"], admission: .latest)
+    @Operation(scope: Scope.work, activeIn: [Idle.self], admission: .latest)
     enum A {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(effect: "b", scope: "work", activeIn: ["idle"], admission: .parallel(limit: 2))
+    @Operation(scope: Scope.work, activeIn: [Idle.self], admission: .parallel(limit: 2))
     enum B {
         typealias Input = String
         typealias Output = String
         typealias Failure = Never
     }
-    @Transition(from: "idle", to: "idle", on: .input("run"), starts: ["a", "b"])
+    @Transition(on: Input.run, starts: [A.self, B.self])
     fileprivate static func run(_ source: borrowing Idle, _ count: Int) throws(Rejection) -> Change<Idle, Effect> {
         guard count >= 0 else { throw .negative }
         if count == 3 { return Change(copy source, effects: [.b("one"), .b("two"), .b("three")]) }
         return Change(copy source, effects: count == 2 ? [.a(1), .a(2)] : [.b("first"), .a(1)])
     }
-    @Transition(from: "idle", to: "idle", on: .input("forbidden"))
+    @Transition(on: Input.forbidden)
     fileprivate static func forbidden(_ source: borrowing Idle) -> Change<Idle, Effect> {
         Change(copy source, effects: [.a(1)])
     }
-    @Transition(from: "idle", to: "idle", on: .success("a"))
+    @Transition(onSuccess: A.self)
     fileprivate static func receivedA(_ source: borrowing Idle, _ value: A.Output) -> Change<Idle, Effect> {
         Change(copy source)
     }
-    @Transition(from: "idle", to: "idle", on: .success("b"))
+    @Transition(onSuccess: B.self)
     fileprivate static func receivedB(_ source: borrowing Idle, _ value: B.Output) -> Change<Idle, Effect> {
         Change(copy source)
     }

@@ -221,6 +221,16 @@
     "scope": "deterministic reserved Snapshot case diagnostic"
   },
   {
+    "id": "GMT-002-reference",
+    "pattern": "has no member 'finsh'",
+    "scope": "schema metadata is a compiler-resolved reference; a misspelled case is a type-checking error at the attribute"
+  },
+  {
+    "id": "GMT-002-reference-kind",
+    "pattern": "not a declared @Operation namespace",
+    "scope": "a resolved reference of the wrong kind is rejected at its spelling by actual macro expansion"
+  },
+  {
     "id": "GHOST-MainActor",
     "pattern": "main actor-isolated|MainActor",
     "scope": "G5 normal-import generated confined host boundary"

@@ -1,23 +1,24 @@
 import StateMachine
 import StateMachineSchema
-@StateMachine(mode: .shared, initial: "idle", scopes: ["work"])
+@StateMachine(mode: .shared)
 nonisolated enum OperationWitness: Sendable {
     struct Idle: Sendable {}
     struct Loading: Sendable {}
-    case idle(Idle)
+    @Initial case idle(Idle)
     case loading(Loading)
     enum RequestFailure: Error { case rejected }
+    enum Scope { case work }
     enum Input: Sendable { case begin }
     enum Effect: Sendable { case fetch(Fetch.Input) }
-    @Operation(effect: "fetch", scope: "work", activeIn: ["loading"], admission: .latest)
+    @Operation(scope: Scope.work, activeIn: [Loading.self], admission: .latest)
     enum Fetch { typealias Input = any Error; typealias Output = Int; typealias Failure = Never }
-    @Transition(from: "idle", to: "loading", on: .input("begin"), starts: ["fetch"])
+    @Transition(on: Input.begin, starts: [Fetch.self])
     fileprivate static func begin(_ source: borrowing Idle) -> Change<Loading, Effect> {
         Change(Loading(), effects: [.fetch(RequestFailure.rejected)])
     }
-    @Transition(from: "loading", to: "idle", on: .success("fetch"))
+    @Transition(onSuccess: Fetch.self)
     fileprivate static func received(_ source: borrowing Loading, _ value: Fetch.Output) -> Change<Idle, Effect> { Change(Idle()) }
-    @Route(from: "loading", on: .success("fetch"))
+    @Route(onSuccess: Fetch.self)
     fileprivate static func route(_ source: Observed<Loading>, _ completion: FetchSuccessCompletion) -> PreparationResult {
         do { return .prepared(try source.received(completion)) }
         catch { switch error { case .plan(let reason): return .rejected(.plan(reason)); case .domain(let never): switch never {} } }

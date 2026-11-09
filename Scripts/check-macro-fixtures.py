@@ -24,13 +24,13 @@ def generate_source(phases, edges, name):
         "import StateMachine",
         "import StateMachineSchema",
         "",
-        '@StateMachine(mode: .shared, initial: "phase0", scopes: [])',
+        "@StateMachine(mode: .shared)",
         f"nonisolated enum {name}: Sendable {{",
     ]
     for phase in range(phases):
         lines.append(f"    struct Phase{phase}: Sendable {{ let value: Int }}")
     for phase in range(phases):
-        lines.append(f"    case phase{phase}(Phase{phase})")
+        lines.append(f"    {'@Initial ' if phase == 0 else ''}case phase{phase}(Phase{phase})")
     lines.append("    enum Input: Sendable {")
     for group in range((edges + phases - 1) // phases):
         lines.append(f"        case event{group}")
@@ -40,7 +40,7 @@ def generate_source(phases, edges, name):
         destination = (source + 1) % phases
         group = edge // phases
         lines.extend([
-            f'    @Transition(from: "phase{source}", to: "phase{destination}", on: .input("event{group}"))',
+            f"    @Transition(on: Input.event{group})",
             f"    fileprivate static func step{edge}(_ source: borrowing Phase{source}) -> Change<Phase{destination}, Effect> {{",
             f"        Change(Phase{destination}(value: source.value + 1))",
             "    }",

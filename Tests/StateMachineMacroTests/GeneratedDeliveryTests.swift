@@ -4,7 +4,7 @@ import StateMachineSchema
 import Testing
 import os
 
-@StateMachine(mode: .shared, initial: "idle", scopes: ["load"])
+@StateMachine(mode: .shared)
 nonisolated private enum DeliveryFlow: Sendable {
     struct Idle: Sendable { let presentation: Int }
     struct Loading: Sendable {
@@ -15,9 +15,10 @@ nonisolated private enum DeliveryFlow: Sendable {
         let result: Int
         let presentation: Int
     }
-    case idle(Idle)
+    @Initial case idle(Idle)
     case loading(Loading)
     case loaded(Loaded)
+    enum Scope { case load }
     enum Input: Sendable {
         case begin(Int)
         case edit(Int)
@@ -27,39 +28,39 @@ nonisolated private enum DeliveryFlow: Sendable {
         case fetch(Fetch.Input)
         case audit(Audit.Input)
     }
-    @Operation(effect: "fetch", scope: "load", activeIn: ["loading"], admission: .latest)
+    @Operation(scope: Scope.load, activeIn: [Loading.self], admission: .latest)
     enum Fetch {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(effect: "audit", scope: "load", activeIn: ["loading"], admission: .latest)
+    @Operation(scope: Scope.load, activeIn: [Loading.self], admission: .latest)
     enum Audit {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Transition(from: "loading", to: "loading", on: .input("audit"), starts: ["audit"])
+    @Transition(on: Input.audit, starts: [Audit.self])
     fileprivate static func audit(_ source: borrowing Loading, _ value: Int) -> Change<Loading, Effect> {
         Change(copy source, effects: [.audit(value)])
     }
-    @Transition(from: "loading", to: "loading", on: .success("audit"))
+    @Transition(onSuccess: Audit.self)
     fileprivate static func audited(_ source: borrowing Loading, _ value: Audit.Output) -> Change<Loading, Effect> {
         Change(copy source)
     }
-    @Transition(from: "idle", to: "loading", on: .input("begin"), starts: ["fetch"])
+    @Transition(on: Input.begin, starts: [Fetch.self])
     fileprivate static func begin(_ source: borrowing Idle, _ request: Int) -> Change<Loading, Effect> {
         Change(Loading(request: request, presentation: source.presentation), effects: [.fetch(request)])
     }
-    @Transition(from: "loading", to: "loading", on: .input("edit"))
+    @Transition(on: Input.edit)
     fileprivate static func edit(_ source: borrowing Loading, _ presentation: Int) -> Change<Loading, Effect> {
         Change(Loading(request: source.request, presentation: presentation))
     }
-    @Transition(from: "loading", to: "loaded", on: .success("fetch"))
+    @Transition(onSuccess: Fetch.self)
     fileprivate static func received(_ source: borrowing Loading, _ value: Fetch.Output) -> Change<Loaded, Effect> {
         Change(Loaded(result: value, presentation: source.presentation))
     }
-    @Route(from: "loading", on: .success("fetch"))
+    @Route(onSuccess: Fetch.self)
     fileprivate static func route(
         _ source: Observed<Loading>,
         _ completion: FetchSuccessCompletion
