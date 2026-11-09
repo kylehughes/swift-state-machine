@@ -1,6 +1,4 @@
-import Testing
-
-/// Admits one test at a time to code that parks a cooperative-pool thread.
+/// Admits one caller at a time to code that parks a cooperative-pool thread.
 ///
 /// Some tests hold a synchronous production callback claimed by blocking it on a semaphore, and
 /// the test body that releases it needs a cooperative thread to resume. The pool is process-wide
@@ -30,29 +28,18 @@ private actor CooperativeThreadHold {
     }
 }
 
-/// Serializes a test against every other test, in any suite, that parks a cooperative-pool thread.
-public struct ParksCooperativeThreadTrait: TestTrait, SuiteTrait, TestScoping {
-    /// Applies the scope to each test in a suite rather than to the suite as a whole.
-    public var isRecursive: Bool { true }
-
-    /// Runs the test while it alone may park a cooperative-pool thread.
-    public func provideScope(
-        for test: Test,
-        testCase: Test.Case?,
-        performing function: @Sendable () async throws -> Void
-    ) async throws {
-        await CooperativeThreadHold.shared.acquire()
-        do {
-            try await function()
-        } catch {
-            await CooperativeThreadHold.shared.release()
-            throw error
-        }
+/// Runs an operation while it alone, across every test target in the process, may park a
+/// cooperative-pool thread.
+///
+/// This module stays free of the Testing library so that it builds for every platform; each test
+/// target wraps this function in its own `parksCooperativeThread` trait.
+public func withExclusiveCooperativeThreadHold(_ operation: @Sendable () async throws -> Void) async throws {
+    await CooperativeThreadHold.shared.acquire()
+    do {
+        try await operation()
+    } catch {
         await CooperativeThreadHold.shared.release()
+        throw error
     }
-}
-
-extension Trait where Self == ParksCooperativeThreadTrait {
-    /// Declares that the test blocks a cooperative-pool thread until its own body releases it.
-    public static var parksCooperativeThread: Self { Self() }
+    await CooperativeThreadHold.shared.release()
 }

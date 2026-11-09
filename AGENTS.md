@@ -52,11 +52,21 @@ the completed change:
 ```sh
 python3 Scripts/check-tests.py --configuration debug
 python3 Scripts/check-tests.py --configuration release
+python3 Scripts/check-tests.py --macro-implementation
 python3 Scripts/check-compiler-fixtures.py
 python3 Scripts/check-macro-expansions.py --output /tmp/state-machine-expansions
 python3 Scripts/check-macro-fixtures.py --output /tmp/state-machine-graph
 xcrun swift-format lint --strict --recursive Sources Tests Package.swift
 ```
+
+Tests that import `StateMachineMacros` or SwiftSyntax belong in
+`Tests/StateMachineMacroImplementationTests`. `Package.swift` declares that
+target only when `STATE_MACHINE_MACRO_IMPLEMENTATION_TESTS` is set, and
+`--macro-implementation` sets it and uses a separate scratch path. Keep both
+dependencies out of every other test target: SwiftPM links macros against its
+prebuilt SwiftSyntax only while no declared test target depends on either, and
+otherwise every build, including each platform build, compiles SwiftSyntax from
+source.
 
 Compiler rejection fixtures need a passing control with the same imports and
 flags, a real compilation that reaches ownership checking, and a matched

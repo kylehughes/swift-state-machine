@@ -1,7 +1,6 @@
 import Dispatch
 import StateMachine
 import StateMachineSchema
-import StateMachineTestSupport
 import Testing
 
 @StateMachine(mode: .shared)

@@ -3,6 +3,28 @@
 import CompilerPluginSupport
 import PackageDescription
 
+/// Tests that import the macro implementation or SwiftSyntax live in their own opt-in target.
+///
+/// SwiftPM links macros against its prebuilt SwiftSyntax only while no test target depends on
+/// SwiftSyntax or on a macro target. Declaring this target makes every build of the package,
+/// including each platform build, compile SwiftSyntax from source.
+let macroImplementationTests: [Target] =
+    Context.environment["STATE_MACHINE_MACRO_IMPLEMENTATION_TESTS"] == nil
+    ? []
+    : [
+        .testTarget(
+            name: "StateMachineMacroImplementationTests",
+            dependencies: [
+                "StateMachineMacros",
+                .product(name: "SwiftDiagnostics", package: "swift-syntax"),
+                .product(name: "SwiftParser", package: "swift-syntax"),
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxMacroExpansion", package: "swift-syntax"),
+            ],
+            swiftSettings: [.treatAllWarnings(as: .error)]
+        )
+    ]
+
 let package = Package(
     name: "StateMachine",
     platforms: [.iOS(.v16), .macOS(.v13), .tvOS(.v16), .watchOS(.v9), .visionOS(.v1), .macCatalyst(.v16)],
@@ -36,10 +58,8 @@ let package = Package(
         .testTarget(
             name: "StateMachineMacroTests",
             dependencies: [
-                "StateMachineSchema", "StateMachine", "StateMachineMacros", "StateMachineExamples",
-                "StateMachineReferenceModel", "StateMachineTestSupport",
-                .product(name: "SwiftParser", package: "swift-syntax"),
-                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
+                "StateMachineSchema", "StateMachine", "StateMachineExamples", "StateMachineReferenceModel",
+                "StateMachineTestSupport",
             ],
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
@@ -74,6 +94,6 @@ let package = Package(
             path: "Tests/ReferenceModel/Tests",
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
-    ],
+    ] + macroImplementationTests,
     swiftLanguageModes: [.v6]
 )

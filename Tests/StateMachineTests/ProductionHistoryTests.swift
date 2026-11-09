@@ -2,7 +2,6 @@ import Dispatch
 import Foundation
 import StateMachine
 import StateMachineExamples
-import StateMachineTestSupport
 import Testing
 import os
 

@@ -1,6 +1,7 @@
 """Run Swift Testing and require nonempty, complete individual observations."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +21,10 @@ def observe(selection, report):
     return observed
 
 
+IMPLEMENTATION_ENVIRONMENT = "STATE_MACHINE_MACRO_IMPLEMENTATION_TESTS"
+IMPLEMENTATION_TARGET = "StateMachineMacroImplementationTests"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--configuration", choices=("debug", "release"), default="debug")
@@ -27,8 +32,21 @@ def main():
     parser.add_argument("--sanitize", choices=("thread",))
     parser.add_argument("--enable-code-coverage", action="store_true")
     parser.add_argument("--output", type=Path, help="Fresh directory for selected tests and xUnit observations")
+    parser.add_argument(
+        "--macro-implementation",
+        action="store_true",
+        help="Run only the opt-in macro implementation tests, in their own scratch path. "
+        "Declaring that target makes SwiftPM compile SwiftSyntax from source.",
+    )
     args = parser.parse_args()
     common = ["--build-system", "native", "--configuration", args.configuration]
+    selection = []
+    if args.macro_implementation:
+        # The opt-in target changes the package graph; a separate scratch path keeps the default
+        # graph's prebuilt-backed products from being rebuilt.
+        os.environ[IMPLEMENTATION_ENVIRONMENT] = "1"
+        args.scratch_path = args.scratch_path or Path(".build/macro-implementation")
+        selection = ["--filter", "^" + IMPLEMENTATION_TARGET + r"\."]
     if args.scratch_path:
         common += ["--scratch-path", str(args.scratch_path.resolve())]
     if args.sanitize:
@@ -39,8 +57,13 @@ def main():
         args.output.mkdir(parents=True, exist_ok=False)
     manifest = json.loads(subprocess.check_output(["swift", "package", "dump-package"], text=True, timeout=120))
     targets = [target["name"] for target in manifest["targets"] if target["type"] == "test"]
-    selected = subprocess.check_output(["swift", "test", *common, "list"], text=True, timeout=600).splitlines()
+    if args.macro_implementation:
+        targets = [name for name in targets if name == IMPLEMENTATION_TARGET]
+    selected = subprocess.check_output(["swift", "test", *common, "list", *selection], text=True, timeout=600).splitlines()
     selected = [line.strip() for line in selected if line.strip()]
+    if args.macro_implementation:
+        # `swift test list` ignores --filter, so narrow the expected selection the same way.
+        selected = [line for line in selected if line.startswith(IMPLEMENTATION_TARGET + ".")]
     selected = [line if "/" in line else "/".join(line.rsplit(".", 1)) for line in selected]
     if not targets or any(not any(case.startswith(name + ".") or case.startswith(name + "/") for case in selected) for name in targets):
         raise ValueError("A test target has no selected tests")
@@ -50,7 +73,9 @@ def main():
         scratch = args.scratch_path or Path(".build")
         directory = Path(tempfile.mkdtemp(prefix="test-observations-", dir=scratch))
     report = directory / "results.xml"
-    subprocess.run(["swift", "test", *common, "--xunit-output", str(report.resolve())], check=True, timeout=600)
+    subprocess.run(
+        ["swift", "test", *common, *selection, "--xunit-output", str(report.resolve())], check=True, timeout=600
+    )
     reports = list(directory.glob("*.xml"))
     if not reports:
         raise ValueError("Test execution produced no xUnit observations")
@@ -60,12 +85,12 @@ def main():
         for suite in document.findall(".//testsuite"):
             combined.append(suite)
     observed = observe(selected, ET.tostring(combined))
-    selection = {"expected": selected, "observed": observed, "swift_test_arguments": common}
+    record = {"expected": selected, "observed": observed, "swift_test_arguments": common + selection}
     if args.enable_code_coverage:
-        selection["coverage_export"] = subprocess.check_output(
+        record["coverage_export"] = subprocess.check_output(
             ["swift", "test", *common, "--show-codecov-path"], text=True, timeout=120
         ).strip()
-    (directory / "selection.json").write_text(json.dumps(selection, indent=2) + "\n")
+    (directory / "selection.json").write_text(json.dumps(record, indent=2) + "\n")
     print(f"Passed {len(observed)} selected tests; observations: {directory}")
 
 

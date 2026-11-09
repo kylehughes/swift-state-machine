@@ -44,6 +44,9 @@ jobs:
     - name: Release tests
       run: python3 Scripts/check-tests.py --configuration release
       timeout-minutes: 20
+    - name: Macro implementation tests
+      run: python3 Scripts/check-tests.py --macro-implementation
+      timeout-minutes: 20
     - name: Platform floor builds
       run: python3 Scripts/check-platforms.py
       timeout-minutes: 65
