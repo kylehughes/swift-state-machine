@@ -46,10 +46,6 @@ func approveDraft() {
 approveDraft()
 ```
 
-Nothing in the schema is named by a string. `@Initial` marks the starting
-phase, the edge's source and destination are the payload types in its
-signature, and `Input.approve` is a reference the compiler resolves.
-
 The macro generates `approve()` on `Owned<Draft>` and consumes that owner when
 called. `Owned<Approved>` has no `approve()` method. Plain phase structs remain
 ordinary data: constructing `Approved(title:)` does not create an

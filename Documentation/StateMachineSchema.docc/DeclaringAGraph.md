@@ -40,14 +40,13 @@ with its ordered effect descriptions. This graph has no effects to execute.
 Its plain `Draft` and `Approved` values remain ordinary data. Constructing an
 `Approved` does not construct an `Owned<Approved>`.
 
-## Refer to declarations, not names
+## Connect the declarations
 
-A schema names nothing with a string. `@Initial` marks the phase in which fresh
-ownership is created. An edge's endpoints come from its signature: `approve`
-borrows a `Draft` and returns `Change<Approved, Effect>`, so it leads from the
-`draft` phase to the `approved` phase. Its trigger, `Input.approve`, is an
-ordinary reference that the compiler resolves, so a misspelled case fails to
-compile at the attribute, and completion and rename work as they do elsewhere.
+`@Initial` marks the phase in which fresh ownership is created. An edge's
+endpoints come from its signature: `approve` borrows a `Draft` and returns
+`Change<Approved, Effect>`, so it leads from the `draft` phase to the
+`approved` phase. Its trigger, `Input.approve`, is an ordinary reference that
+the compiler resolves, so a misspelled case fails to compile at the attribute.
 
 | To name | Write |
 | --- | --- |
@@ -60,7 +59,7 @@ compile at the attribute, and completion and rename work as they do elsewhere.
 | Phases where an operation may run | `activeIn: [Loading.self]` |
 
 Write each reference exactly as shown. The macro reads the spelling, so it
-rejects qualified, computed, and implicit-member forms such as `.approve`.
+rejects qualified and computed forms.
 
 ## Choose the ownership contract
 

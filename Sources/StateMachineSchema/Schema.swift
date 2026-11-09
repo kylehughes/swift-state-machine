@@ -20,10 +20,9 @@ nonisolated public enum StateMachineAdmission: Sendable {
 
 /// Expands a closed lexical enum schema into sealed ownership surfaces.
 ///
-/// The schema names nothing with strings. Phases are the enum's cases, each carrying a distinct
-/// nested payload type; `@Initial` marks the starting phase. Invalidation scopes are the cases of
-/// an optional nested `Scope` enum. Every other piece of metadata is a reference the compiler
-/// resolves: `Input.load`, `Effect.fetch`, `Scope.load`, `Loading.self`.
+/// Phases are the enum's cases, each carrying a distinct nested payload type; `@Initial` marks the
+/// starting phase. Invalidation scopes are the cases of an optional nested `Scope` enum. Other
+/// metadata is a reference the compiler resolves: `Input.load`, `Scope.load`, `Loading.self`.
 ///
 /// Schema, case, operation and edge names use unescaped Swift identifiers.
 /// Generated facade names and required support-type spellings are reserved in the schema.

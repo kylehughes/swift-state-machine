@@ -3,8 +3,7 @@
 Declare a typed state graph and generate its ownership and admission APIs.
 
 A schema keeps phase payloads, inputs, effects, operations, and transitions in
-one enum. Declarations refer to each other by reference, never by string, so
-the compiler checks every name. The macro generates phase-specific methods and sealed observations,
+one enum. The macro generates phase-specific methods and sealed observations,
 proposals, and work values. Authored transition functions remain ordinary Swift
 functions, so the compiler checks their payload types, ownership, errors, and
 isolation.
