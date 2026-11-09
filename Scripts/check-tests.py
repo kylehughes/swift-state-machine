@@ -50,7 +50,12 @@ def main():
         scratch = args.scratch_path or Path(".build")
         directory = Path(tempfile.mkdtemp(prefix="test-observations-", dir=scratch))
     report = directory / "results.xml"
-    subprocess.run(["swift", "test", *common, "--xunit-output", str(report.resolve())], check=True, timeout=600)
+    # Several tests hold a production callback claimed by blocking a cooperative-pool thread. Run in
+    # parallel on a three-core runner they occupy the whole pool, and the bodies that would release
+    # them cannot resume until the callbacks time out.
+    subprocess.run(
+        ["swift", "test", *common, "--no-parallel", "--xunit-output", str(report.resolve())], check=True, timeout=600
+    )
     reports = list(directory.glob("*.xml"))
     if not reports:
         raise ValueError("Test execution produced no xUnit observations")
