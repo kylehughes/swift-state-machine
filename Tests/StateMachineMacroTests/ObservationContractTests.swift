@@ -21,18 +21,17 @@ nonisolated private enum ObservationValueFlow: Sendable, Equatable {
         case advance
         case append(Int)
     }
-    enum Effect: Sendable {}
 
     @Transition(on: Input.advance)
-    fileprivate static func advance(_ source: borrowing Before) -> Change<After, Effect> {
-        Change(After(left: source.left + 1, right: source.right + 10, history: source.history))
+    fileprivate static func advance(_ source: Before) -> After {
+        After(left: source.left + 1, right: source.right + 10, history: source.history)
     }
 
     @Transition(on: Input.append)
-    fileprivate static func append(_ source: borrowing After, _ value: Int) -> Change<After, Effect> {
+    fileprivate static func append(_ source: After, _ value: Int) -> After {
         var history = source.history
         history["rows", default: []].append([value, value + 1])
-        return Change(After(left: source.left, right: source.right, history: history))
+        return After(left: source.left, right: source.right, history: history)
     }
 }
 
@@ -41,13 +40,12 @@ nonisolated private enum IsolatedObservationValueFlow {
     struct Value { let history: [String: [[Int]]] }
     @Initial case value(Value)
     enum Input { case append(Int) }
-    enum Effect {}
 
     @Transition(on: Input.append)
-    fileprivate static func append(_ source: borrowing Value, _ value: Int) -> Change<Value, Effect> {
+    fileprivate static func append(_ source: Value, _ value: Int) -> Value {
         var history = source.history
         history["rows", default: []].append([value, value + 1])
-        return Change(Value(history: history))
+        return Value(history: history)
     }
 }
 
@@ -92,8 +90,7 @@ struct ObservationContractTests {
         // This raw host exercises real shared storage and FIFO batches. The test
         // invokes the declared domain edge itself; it does not claim raw candidate
         // construction enforces a generated facade's sealed transition boundary.
-        let change = ObservationValueFlow.advance(initial)
-        let successor = ObservationValueFlow.after(change.next)
+        let successor = ObservationValueFlow.after(ObservationValueFlow.advance(initial))
         let candidate = try Core.prepare(on: old, next: successor)
         let start = ObservationReadGate()
         let committed = ObservationReadGate()

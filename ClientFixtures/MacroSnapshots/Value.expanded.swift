@@ -7,10 +7,7 @@ fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {
 fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {
 }
 
-fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {
-}
-
-fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {
+fileprivate struct _RouterSourceIsPhasePayload<Value: ~Copyable> {
 }
 
 fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {
@@ -24,13 +21,19 @@ fileprivate struct _EffectIsCopyable<Value> {
 
 fileprivate static func _stateMachineWitnesses() {
     let _: _TransitionSourceIsPhasePayload<Idle> = _TransitionSourceIsPhasePayload<Idle>()
-    let _: _TransitionReturnsDeclaredResult<Change<Done, Effect>> = _TransitionReturnsDeclaredResult<Change<Done, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Done> = _TransitionReturnsDeclaredResult<Done>()
     let _: _TriggerPayloadMatchesDeclaration<Int> = _TriggerPayloadMatchesDeclaration<Int>()
 
 
     let _ = _EffectIsCopyable<Effect>()
     let _ = _SharedModeRequiresSendable<Input>();
     let _ = _SharedModeRequiresSendable<Effect>()
+}
+
+/// Inert descriptions of the operations this workflow can start.
+internal enum Effect: Sendable {
+
+
 }
 
 /// Unique authority over one declared workflow phase.
@@ -43,10 +46,9 @@ internal struct Owned<Phase: ~Copyable & Sendable>: ~Copyable, Sendable {
     internal borrowing func withValue<Result>(_ body: (borrowing Phase) -> Result) -> Result {
         body(phase)
     }
-    /// Advances through the authored edge, preserving effect order.
-internal consuming func finish(_ input: Int) -> Change<Owned<Done>, Effect> where Phase == Idle {
-    let change = Counter.finish(phase, input)
-    return Change(Owned<Done>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+internal consuming func finish(_ input: Int) -> Owned<Done> where Phase == Idle {
+    Owned<Done>(Counter.finish(phase, input))
     }
 }
 
@@ -81,13 +83,14 @@ internal struct Observed<Phase: Sendable>: Sendable {
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 internal func finish(_ input: Int) throws(PreparationFailure<Never>) -> Prepared where Phase == Idle {
-    let change: Change<Done, Effect>
-    change = Counter.finish(payload, input)
+    let next: Done
+    next = Counter.finish(payload, input)
     do {
-    let candidate = try _stateMachinePrepare(on: record, next: .done(change.next), effects: change.effects,
-        from: 0, to: 1, invalidates: [],
-        allowed: [], requiring: nil, claim: claim)
-    return Prepared(candidate)
+        let candidate = try _stateMachinePrepare(on: record, next: .done(next),
+            effects: [],
+            from: 0, to: 1, invalidates: [],
+            requiring: nil, claim: claim)
+        return Prepared(candidate)
     } catch {
         throw .plan(error)
     }
@@ -246,7 +249,7 @@ fileprivate static var _stateMachineEligibility: [[Int]] {
 
 fileprivate static func _stateMachinePrepare(
     on record: _StateMachineEngine.Snapshot, next: Counter, effects: [Effect], from: Int, to: Int,
-    invalidates: [Int], allowed: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
+    invalidates: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
 ) throws(PlanRejection) -> _StateMachineEngine.Candidate {
     var edits: [_StateMachineEngine.ScopeEdit] = []
     for (scope, phases) in _stateMachineEligibility.enumerated() {
@@ -381,6 +384,7 @@ internal struct Local: ~Copyable {
     internal mutating func deliver(_ completion: Completion) -> DeliveryResult {
 
     }
+
     /// Claims one retained outcome before evaluating domain code.
     internal mutating func reconcile(id: PendingCompletionID) -> DeliveryResult {
         switch ledger.claim(id, in: &engine) {
@@ -485,6 +489,7 @@ internal struct Local: ~Copyable {
     /// Retains the first terminal outcome and validates current authority.
     internal func deliver(_ completion: Completion) -> DeliveryResult {
     }
+
     /// Reads immutable retained first-outcome diagnostics.
     internal func pendingCompletions() -> [PendingCompletion] {
         host.pendingCompletions()
@@ -591,6 +596,7 @@ internal final class Shared: Sendable {
     /// Retains and attempts delivery of the first typed terminal outcome.
     internal func deliver(_ completion: Completion) -> DeliveryResult {
     }
+
     /// Returns immutable first-outcome diagnostics.
     internal func pendingCompletions() -> [PendingCompletion] {
         host.pendingCompletions()
@@ -697,6 +703,7 @@ internal final class ActorHost: Sendable {
     /// Retains the first terminal outcome and validates current authority.
     internal func deliver(_ completion: Completion) async -> DeliveryResult {
     }
+
     /// Reads immutable retained first-outcome diagnostics.
     internal func pendingCompletions() async -> [PendingCompletion] {
         await host.pendingCompletions()

@@ -67,6 +67,16 @@ struct Schema {
     }
 
     struct Transition {
+        /// How the authored function spells its result.
+        enum Shape {
+            /// The destination payload itself; the edge starts nothing.
+            case destination
+            /// `Change<Destination, Effect.Edge>`.
+            case change
+            /// `Advance<Source, Destination, Effect, Failure>`, the owned-only fallible form.
+            case advance
+        }
+
         let name: String
         let from: String
         let to: String
@@ -77,6 +87,9 @@ struct Schema {
         let sourceType: String
         let returnType: String
         let failureType: String?
+        let shape: Shape
+        /// The generated `Effect.<Namespace>` this edge returns, when it starts operations.
+        let effectNamespace: String?
     }
 
     struct Route {
@@ -85,6 +98,11 @@ struct Schema {
         let trigger: Trigger
         let sourceType: String
         let payloadType: String?
+        let failureType: String?
+        /// The generated `Route.<Namespace>` this router returns, when it has edges to choose.
+        let namespace: String?
+        /// The candidate edge names in declaration order.
+        let choices: [String]
     }
 
     let name: String
@@ -94,7 +112,6 @@ struct Schema {
     let scopes: [String]
     let phases: [Phase]
     let inputs: [Case]
-    let effects: [Case]
     let operations: [Operation]
     let transitions: [Transition]
     let routes: [Route]
@@ -259,6 +276,21 @@ private struct SchemaParser {
         return "\(trigger.kind == .success ? "onSuccess" : "onFailure"): \(name).self"
     }
 
+    /// Lower-cases the leading capital run: `Fetch` to `fetch`, `URLLoad` to `urlLoad`.
+    private func lowerCamel(_ name: String) -> String {
+        let characters = Array(name)
+        var run = 0
+        while run < characters.count, characters[run].isUppercase { run += 1 }
+        guard run > 0 else { return name }
+        let lowered = run > 1 && run < characters.count ? run - 1 : run
+        return String(characters[..<lowered]).lowercased() + String(characters[lowered...])
+    }
+
+    /// The generated companion type name for an authored function: `begin` to `Begin`.
+    private func companion(_ name: String) -> String {
+        name.prefix(1).uppercased() + name.dropFirst()
+    }
+
     /// Finds the authored declaration to blame for a name, falling back to the schema.
     private func anchor(for name: String, in declaration: EnumDeclSyntax) -> Syntax {
         func matches(_ token: TokenSyntax) -> Bool {
@@ -297,7 +329,7 @@ private struct SchemaParser {
 
     private func cases(_ declaration: EnumDeclSyntax, payloads: ClosedRange<Int>) throws -> [Schema.Case] {
         guard declaration.genericParameterClause == nil, declaration.genericWhereClause == nil else {
-            try reject(declaration, "Input, Effect, and Scope must be nongeneric closed enums.")
+            try reject(declaration, "Input and Scope must be nongeneric closed enums.")
         }
         var result: [Schema.Case] = []
         for member in declaration.memberBlock.members {
@@ -312,7 +344,7 @@ private struct SchemaParser {
                     try reject(
                         element,
                         payloads == 1 ... 1
-                            ? "Each phase and Effect case requires exactly one unlabeled payload."
+                            ? "Each phase case requires exactly one unlabeled payload."
                             : payloads == 0 ... 0
                                 ? "Each Scope case is a plain name without a payload or raw value."
                                 : "Each Input case accepts zero or one unlabeled payload."
@@ -366,12 +398,11 @@ private struct SchemaParser {
                 "Use a synchronous nongeneric static function with unlabeled, nonvariadic parameters and no defaults."
             )
         }
-        let effects = function.signature.effectSpecifiers
-        if let throwsClause = effects?.throwsClause {
-            guard !route, throwsClause.type != nil, throwsClause.throwsSpecifier.text == "throws" else {
+        if let throwsClause = function.signature.effectSpecifiers?.throwsClause {
+            guard throwsClause.type != nil, throwsClause.throwsSpecifier.text == "throws" else {
                 try reject(
                     function,
-                    route ? "Routers cannot throw." : "Transitions must use typed throws(Failure), or omit throws."
+                    "\(route ? "Routers" : "Transitions") must use typed throws(Failure), or omit throws."
                 )
             }
         }
@@ -475,16 +506,19 @@ private struct SchemaParser {
             }
             return phase.caseName
         }
-        guard let inputEnum = nestedEnums.first(where: { $0.name.text == "Input" }),
-            let effectEnum = nestedEnums.first(where: { $0.name.text == "Effect" })
-        else {
+        if let authored = nestedEnums.first(where: { $0.name.text == "Effect" }) {
+            try reject(
+                authored.name,
+                "Effect is generated from the @Operation namespaces; delete this declaration."
+            )
+        }
+        guard let inputEnum = nestedEnums.first(where: { $0.name.text == "Input" }) else {
             try reject(
                 declaration,
-                "Declare closed Input and Effect enums directly inside the schema; empty enums are allowed."
+                "Declare a closed Input enum directly inside the schema; an empty enum is allowed."
             )
         }
         let inputs = try cases(inputEnum, payloads: 0 ... 1)
-        let effects = try cases(effectEnum, payloads: 1 ... 1)
         let scopes =
             try nestedEnums.first { $0.name.text == "Scope" }
             .map { try cases($0, payloads: 0 ... 0).map(\.caseName) } ?? []
@@ -502,11 +536,17 @@ private struct SchemaParser {
                 required: ["scope", "activeIn", "admission"],
                 optional: ["requires"]
             )
-            let requests = effects.filter { $0.payloadType == "\(namespace.name.text).Input" }
-            guard requests.count == 1, let effect = requests.first?.caseName else {
+            let effect = lowerCamel(namespace.name.text)
+            guard effect != namespace.name.text, identifier(effect), !["cancel", "authority"].contains(effect) else {
                 try reject(
-                    namespace,
-                    "Exactly one Effect case must request this operation by carrying \(namespace.name.text).Input."
+                    namespace.name,
+                    "Operation '\(namespace.name.text)' would generate the effect case '\(effect)', which is a keyword or collides with a generated member; rename the namespace with a capitalized, distinct name."
+                )
+            }
+            guard !operations.contains(where: { $0.effect == effect }) else {
+                try reject(
+                    namespace.name,
+                    "Operation '\(namespace.name.text)' generates the same effect case '\(effect)' as another operation; rename one."
                 )
             }
             let scope = try caseReference(metadata["scope"]!, in: "Scope")
@@ -546,12 +586,6 @@ private struct SchemaParser {
                     outputType: types["Output"]!,
                     failureType: types["Failure"]!
                 )
-            )
-        }
-        if let unbound = effects.first(where: { effect in !operations.contains { $0.effect == effect.caseName } }) {
-            try reject(
-                effectEnum,
-                "Effect case '\(unbound.caseName)' must request an @Operation namespace by carrying its Input alias, such as Fetch.Input."
             )
         }
         for scope in scopes {
@@ -622,43 +656,38 @@ private struct SchemaParser {
                     "This trigger requires \(needsPayload ? "source and trigger payload parameters" : "only a source parameter")."
                 )
             }
-            let expectedOwnership = mode == .ownedOnly ? "consuming" : "borrowing"
-            let sourceType: String
-            var authoredSource = parameters[0].type.trimmedDescription
-            if isRoute {
-                guard let observed = parameters[0].type.as(IdentifierTypeSyntax.self),
-                    observed.name.text == "Observed", let arguments = observed.genericArgumentClause?.arguments,
-                    arguments.count == 1, let argument = arguments.first,
-                    let result = function.signature.returnClause?.type.as(IdentifierTypeSyntax.self),
-                    result.name.text == "PreparationResult", result.genericArgumentClause == nil
-                else {
-                    try reject(function, "A router must accept Observed<Source> and return PreparationResult.")
-                }
-                guard case .type(let observedType) = argument.argument else {
-                    try reject(argument, "A router must accept Observed<Source> and return PreparationResult.")
-                }
-                sourceType = payloadName(observedType, schema: declaration.name.text)
-            } else {
-                guard let source = parameters[0].type.as(AttributedTypeSyntax.self),
-                    source.attributes.isEmpty, source.specifiers.count == 1,
-                    source.specifiers.first?.as(SimpleTypeSpecifierSyntax.self)?.specifier.text == expectedOwnership
+            let base: TypeSyntax
+            if let attributed = parameters[0].type.as(AttributedTypeSyntax.self) {
+                let expectedOwnership = mode == .ownedOnly ? "consuming" : "borrowing"
+                guard attributed.attributes.isEmpty, attributed.specifiers.count == 1,
+                    attributed.specifiers.first?.as(SimpleTypeSpecifierSyntax.self)?.specifier.text
+                        == expectedOwnership
                 else {
                     try reject(
                         parameters[0],
-                        "Use an explicitly \(expectedOwnership) phase payload as the source parameter."
+                        mode == .ownedOnly
+                            ? "Use an explicitly consuming phase payload as the source parameter."
+                            : "Use a plain or borrowing phase payload as the source parameter."
                     )
                 }
-                sourceType = payloadName(source.baseType, schema: declaration.name.text)
-                authoredSource = source.baseType.trimmedDescription
+                base = attributed.baseType
+            } else {
+                guard mode != .ownedOnly else {
+                    try reject(parameters[0], "Use an explicitly consuming phase payload as the source parameter.")
+                }
+                base = parameters[0].type
             }
+            let sourceType = payloadName(base, schema: declaration.name.text)
             guard let from = phases.first(where: { $0.typeName == sourceType })?.caseName else {
-                try reject(
-                    parameters[0].type,
-                    "Source '\(sourceType)' is not a phase payload type declared in this schema."
-                )
+                try reject(base, "Source '\(sourceType)' is not a phase payload type declared in this schema.")
             }
             if on.kind != .input, let operation, !operation.activeIn.contains(from) {
                 try reject(attribute, "Completion edges must start in an operation's activeIn phase.")
+            }
+            let payloadType = needsPayload ? parameters[1].type.trimmedDescription : nil
+            let thrown = function.signature.effectSpecifiers?.throwsClause?.type?.trimmedDescription
+            guard let result = function.signature.returnClause?.type else {
+                try reject(function, "Return the destination phase payload, a Change, or a Route choice.")
             }
             if isRoute {
                 routes.append(
@@ -666,44 +695,100 @@ private struct SchemaParser {
                         name: function.name.text,
                         from: from,
                         trigger: on,
-                        sourceType: authoredSource,
-                        payloadType: needsPayload ? parameters[1].type.trimmedDescription : nil
+                        sourceType: base.trimmedDescription,
+                        payloadType: payloadType,
+                        failureType: thrown,
+                        namespace: nil,
+                        choices: []
                     )
                 )
                 continue
             }
-            var failureType = function.signature.effectSpecifiers?.throwsClause?.type?.trimmedDescription
-            let destinationType: String
-            if mode == .ownedOnly {
-                guard function.signature.effectSpecifiers?.throwsClause == nil,
-                    let result = function.signature.returnClause?.type.as(IdentifierTypeSyntax.self),
-                    result.name.text == "Advance",
-                    let arguments = result.genericArgumentClause?.arguments, arguments.count == 4
+            var started: [Schema.Operation] = []
+            let startReferences = try metadata["starts"].map(typeReferences) ?? []
+            for reference in startReferences {
+                guard let operation = operations.first(where: { $0.name == reference.name }) else {
+                    try reject(reference.node, "'\(reference.name)' is not a declared @Operation namespace.")
+                }
+                started.append(operation)
+            }
+            let effectNamespace = started.isEmpty ? nil : companion(function.name.text)
+            if let effectNamespace {
+                guard !["Effect", "Type", "Protocol"].contains(effectNamespace),
+                    !transitions.contains(where: { $0.effectNamespace == effectNamespace })
                 else {
                     try reject(
-                        function,
-                        "Owned-only transitions cannot throw and must return Advance<Source, Destination, Effect, Failure>."
+                        function.name,
+                        "This transition's effect type would be Effect.\(effectNamespace), which is unavailable; rename the transition."
                     )
                 }
-                guard case .type(let advanced) = arguments[arguments.index(after: arguments.startIndex)].argument else {
-                    try reject(result, "Advance must name the destination phase payload type.")
+            }
+            let expectedEffect = effectNamespace.map { "Effect.\($0)" }
+            let startedNames = started.map(\.name).joined(separator: ", ")
+            var failureType = thrown
+            let shape: Schema.Transition.Shape
+            let destinationNode: TypeSyntax
+            if let generic = result.as(IdentifierTypeSyntax.self), generic.name.text == "Advance",
+                let arguments = generic.genericArgumentClause?.arguments, arguments.count == 4
+            {
+                let list = Array(arguments)
+                guard mode == .ownedOnly, case .type(let destination) = list[1].argument else {
+                    try reject(
+                        result,
+                        "Advance<Source, Destination, Effect, Failure> is the owned-only form; value transitions use typed throws."
+                    )
                 }
-                destinationType = payloadName(advanced, schema: declaration.name.text)
-                failureType = arguments.last?.argument.trimmedDescription
-            } else {
-                guard let result = function.signature.returnClause?.type.as(IdentifierTypeSyntax.self),
-                    result.name.text == "Change",
-                    let arguments = result.genericArgumentClause?.arguments, arguments.count == 2,
-                    let argument = arguments.first
-                else { try reject(function, "A value transition must return Change<Destination, Effect>.") }
-                guard case .type(let changed) = argument.argument else {
+                guard list[2].argument.trimmedDescription == expectedEffect ?? "Never" else {
+                    try reject(
+                        list[2],
+                        expectedEffect.map { "This transition starts \(startedNames); use \($0) as its effect type." }
+                            ?? "This transition starts no operation; use Never as its effect type."
+                    )
+                }
+                shape = .advance
+                destinationNode = destination
+                failureType = list[3].argument.trimmedDescription
+            } else if let generic = result.as(IdentifierTypeSyntax.self), generic.name.text == "Change",
+                let arguments = generic.genericArgumentClause?.arguments, arguments.count == 2
+            {
+                let list = Array(arguments)
+                guard case .type(let destination) = list[0].argument else {
                     try reject(result, "Change must name the destination phase payload type.")
                 }
-                destinationType = payloadName(changed, schema: declaration.name.text)
+                guard let expectedEffect else {
+                    try reject(
+                        result,
+                        "This transition starts no operation; return \(destination.trimmedDescription) directly."
+                    )
+                }
+                guard list[1].argument.trimmedDescription == expectedEffect else {
+                    try reject(
+                        list[1],
+                        "This transition starts \(startedNames); name its effects \(expectedEffect)."
+                    )
+                }
+                shape = .change
+                destinationNode = destination
+            } else {
+                if let expectedEffect {
+                    try reject(
+                        result,
+                        "This transition starts \(startedNames); return Change<\(result.trimmedDescription), \(expectedEffect)>."
+                    )
+                }
+                shape = .destination
+                destinationNode = result
             }
+            if mode == .ownedOnly, thrown != nil {
+                try reject(
+                    function,
+                    "Owned-only transitions cannot throw; return Advance<Source, Destination, Effect, Failure> to give the source back."
+                )
+            }
+            let destinationType = payloadName(destinationNode, schema: declaration.name.text)
             guard let to = phases.first(where: { $0.typeName == destinationType })?.caseName else {
                 try reject(
-                    function.signature.returnClause!.type,
+                    destinationNode,
                     "Destination '\(destinationType)' is not a phase payload type declared in this schema."
                 )
             }
@@ -711,23 +796,18 @@ private struct SchemaParser {
             guard Set(invalidates).isSubset(of: Set(scopes)) else {
                 try reject(metadata["invalidates"]!, "invalidates must reference declared Scope cases.")
             }
-            var starts: [String] = []
-            for reference in try metadata["starts"].map(typeReferences) ?? [] {
-                guard let started = operations.first(where: { $0.name == reference.name }) else {
-                    try reject(reference.node, "'\(reference.name)' is not a declared @Operation namespace.")
-                }
-                let boundScopes = [started.scope] + started.requires
-                guard started.activeIn.contains(to),
+            for (operation, reference) in zip(started, startReferences) {
+                let boundScopes = [operation.scope] + operation.requires
+                guard operation.activeIn.contains(to),
                     boundScopes.allSatisfy({ scope in
                         operations.first(where: { $0.scope == scope })?.activeIn.contains(to) ?? true
                     })
                 else {
                     try reject(
                         reference.node,
-                        "Started operation '\(started.name)' and every required scope must be eligible in destination '\(destinationType)'."
+                        "Started operation '\(operation.name)' and every required scope must be eligible in destination '\(destinationType)'."
                     )
                 }
-                starts.append(started.effect)
             }
             transitions.append(
                 Schema.Transition(
@@ -736,12 +816,54 @@ private struct SchemaParser {
                     to: to,
                     trigger: on,
                     invalidates: invalidates,
-                    starts: starts,
-                    payloadType: needsPayload ? parameters[1].type.trimmedDescription : nil,
-                    sourceType: authoredSource,
-                    returnType: function.signature.returnClause!.type.trimmedDescription,
-                    failureType: failureType
+                    starts: started.map(\.effect),
+                    payloadType: payloadType,
+                    sourceType: base.trimmedDescription,
+                    returnType: result.trimmedDescription,
+                    failureType: failureType,
+                    shape: shape,
+                    effectNamespace: effectNamespace
                 )
+            )
+        }
+        // A router chooses among the edges that share its source and trigger, so its result type
+        // can only be checked once every edge is known.
+        routes = try routes.map { route in
+            let function = members.compactMap { $0.decl.as(FunctionDeclSyntax.self) }
+                .first { $0.name.text == route.name }!
+            let result = function.signature.returnClause!.type
+            let choices = transitions.filter { $0.from == route.from && $0.trigger == route.trigger }.map(\.name)
+            let namespace = choices.isEmpty ? nil : companion(route.name)
+            if let namespace {
+                guard !["Route", "Type", "Protocol"].contains(namespace) else {
+                    try reject(
+                        function.name,
+                        "This router's choice type would be Route.\(namespace); rename the router."
+                    )
+                }
+                guard result.trimmedDescription == "Route.\(namespace)" else {
+                    try reject(
+                        result,
+                        "A router returns its choice among \(choices.joined(separator: ", ")): Route.\(namespace)."
+                    )
+                }
+            } else {
+                guard result.trimmedDescription == "Never", route.failureType != nil else {
+                    try reject(
+                        function,
+                        "A router with no edge to choose returns Never and throws a typed rejection."
+                    )
+                }
+            }
+            return Schema.Route(
+                name: route.name,
+                from: route.from,
+                trigger: route.trigger,
+                sourceType: route.sourceType,
+                payloadType: route.payloadType,
+                failureType: route.failureType,
+                namespace: namespace,
+                choices: choices
             )
         }
         var reserved: Set<String> = [
@@ -752,7 +874,7 @@ private struct SchemaParser {
             "ExecutionDisposition", "AcknowledgmentResult", "Command", "CommandBatch", "PendingCompletionID",
             "PendingCompletion", "DeliveryResult", "_StateMachineEngine", "_StateMachineLedger",
             "_TransitionSourceIsPhasePayload", "_TransitionReturnsDeclaredResult", "_TriggerPayloadMatchesDeclaration",
-            "_EffectPayloadIsOperationInput", "_RouterSourceIsObservedPhase", "_SharedModeRequiresSendable",
+            "_RouterSourceIsPhasePayload", "_SharedModeRequiresSendable",
             "_OperationFailureIsError", "_EffectIsCopyable", "_stateMachineWitnesses",
             "_stateMachineSnapshot",
             "_stateMachineAdmission", "_stateMachineBatch", "_stateMachinePrepare", "_stateMachineCompletion",
@@ -766,7 +888,7 @@ private struct SchemaParser {
             "RuntimeCompletionPolicy", "RuntimeSharedHost", "RuntimeMainActorHost", "RuntimeActorHost",
             "RuntimeHostDelivery", "RuntimeHostSubscriptionFailure", "RuntimeMainActorSubscription",
             "RuntimeSubscription", "Change", "Advance",
-            "PreparationFailure", "PlanRejection",
+            "PreparationFailure", "PlanRejection", "Effect", "Route",
         ]
         for operation in operations {
             for suffix in ["Work", "Completion", "SuccessCompletion", "FailureCompletion"] {
@@ -835,7 +957,6 @@ private struct SchemaParser {
             scopes: scopes,
             phases: phases,
             inputs: inputs,
-            effects: effects,
             operations: operations,
             transitions: transitions,
             routes: routes

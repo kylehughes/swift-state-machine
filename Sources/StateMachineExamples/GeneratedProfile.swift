@@ -52,11 +52,6 @@ nonisolated public enum GeneratedProfile: Sendable {
         case retry
         case audit(String)
     }
-    /// Ordered inert operation descriptions.
-    public enum Effect: Sendable {
-        case fetch(Fetch.Input)
-        case audit(Audit.Input)
-    }
     /// Typed request validation.
     public enum LoadRejection: Error { case wrongUser }
     /// The profile fetch operation.
@@ -87,60 +82,60 @@ nonisolated public enum GeneratedProfile: Sendable {
     /// Starts a fetch only for the initial user.
     @Transition(on: Input.load, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate static func begin(
-        _ source: borrowing Idle,
+        _ source: Idle,
         _ request: ProfileRequest
-    ) throws(LoadRejection) -> Change<Loading, Effect> {
+    ) throws(LoadRejection) -> Change<Loading, Effect.Begin> {
         guard source.userID == request.userID else { throw .wrongUser }
         return Change(Loading(request: request), effects: [.fetch(request)])
     }
     /// Cancels the active load epoch.
     @Transition(on: Input.cancel, invalidates: [Scope.load])
-    fileprivate static func cancel(_ source: borrowing Loading) -> Change<Idle, Effect> {
-        Change(Idle(userID: source.request.userID))
+    fileprivate static func cancel(_ source: Loading) -> Idle {
+        Idle(userID: source.request.userID)
     }
     /// Accepts a successful fetch.
     @Transition(onSuccess: Fetch.self)
-    fileprivate static func received(_ source: borrowing Loading, _ output: Fetch.Output) -> Change<Loaded, Effect> {
-        Change(Loaded(profile: output))
+    fileprivate static func received(_ source: Loading, _ output: Fetch.Output) -> Loaded {
+        Loaded(profile: output)
     }
     /// Accepts a failed fetch.
     @Transition(onFailure: Fetch.self)
-    fileprivate static func failed(_ source: borrowing Loading, _ failure: Fetch.Failure) -> Change<Failed, Effect> {
-        Change(Failed(request: source.request, failure: failure))
+    fileprivate static func failed(_ source: Loading, _ failure: Fetch.Failure) -> Failed {
+        Failed(request: source.request, failure: failure)
     }
     /// Rotates a dependency epoch without replacing the visible phase.
     @Transition(on: Input.authenticationChanged, invalidates: [Scope.authentication])
-    fileprivate static func authenticationChanged(_ source: borrowing Loading) -> Change<Loading, Effect> {
-        Change(copy source)
+    fileprivate static func authenticationChanged(_ source: Loading) -> Loading {
+        source
     }
     /// Starts a refresh only for the loaded user.
     @Transition(on: Input.refresh, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate static func refresh(
-        _ source: borrowing Loaded,
+        _ source: Loaded,
         _ request: ProfileRequest
-    ) throws(LoadRejection) -> Change<Loading, Effect> {
+    ) throws(LoadRejection) -> Change<Loading, Effect.Refresh> {
         guard source.profile.userID == request.userID else { throw .wrongUser }
         return Change(Loading(request: request), effects: [.fetch(request)])
     }
     /// Restarts the retained request.
     @Transition(on: Input.retry, invalidates: [Scope.load], starts: [Fetch.self])
-    fileprivate static func retry(_ source: borrowing Failed) -> Change<Loading, Effect> {
+    fileprivate static func retry(_ source: Failed) -> Change<Loading, Effect.Retry> {
         Change(Loading(request: source.request), effects: [.fetch(source.request)])
     }
     /// Starts an independent audit while the load scope remains eligible.
     @Transition(on: Input.audit, starts: [Audit.self])
-    fileprivate static func audit(_ source: borrowing Loading, _ input: String) -> Change<Loading, Effect> {
-        Change(copy source, effects: [.audit(input)])
+    fileprivate static func audit(_ source: Loading, _ input: String) -> Change<Loading, Effect.Audit> {
+        Change(source, effects: [.audit(input)])
     }
     /// Acknowledges audit success without changing profile data.
     @Transition(onSuccess: Audit.self)
-    fileprivate static func audited(_ source: borrowing Loading, _ output: Audit.Output) -> Change<Loading, Effect> {
-        Change(copy source)
+    fileprivate static func audited(_ source: Loading, _ output: Audit.Output) -> Loading {
+        source
     }
     /// Acknowledges audit failure without changing profile data.
     @Transition(onFailure: Audit.self)
     fileprivate static func auditFailed(
-        _ source: borrowing Loading,
+        _ source: Loading,
         _ failure: Audit.Failure
-    ) -> Change<Loading, Effect> { Change(copy source) }
+    ) -> Loading { source }
 }

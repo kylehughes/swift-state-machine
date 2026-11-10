@@ -7,10 +7,7 @@ fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {
 fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {
 }
 
-fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {
-}
-
-fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {
+fileprivate struct _RouterSourceIsPhasePayload<Value: ~Copyable> {
 }
 
 fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {
@@ -24,39 +21,65 @@ fileprivate struct _EffectIsCopyable<Value> {
 
 fileprivate static func _stateMachineWitnesses() {
     let _: _TransitionSourceIsPhasePayload<Idle> = _TransitionSourceIsPhasePayload<Idle>()
-    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect.Begin>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect.Begin>>()
     let _: _TriggerPayloadMatchesDeclaration<Int> = _TriggerPayloadMatchesDeclaration<Int>()
     let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
-    let _: _TransitionReturnsDeclaredResult<Change<Idle, Effect>> = _TransitionReturnsDeclaredResult<Change<Idle, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Idle> = _TransitionReturnsDeclaredResult<Idle>()
     let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
-    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Loading> = _TransitionReturnsDeclaredResult<Loading>()
     let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
-    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect.Note>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect.Note>>()
     let _: _TriggerPayloadMatchesDeclaration<String> = _TriggerPayloadMatchesDeclaration<String>()
     let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
-    let _: _TransitionReturnsDeclaredResult<Change<Loaded, Effect>> = _TransitionReturnsDeclaredResult<Change<Loaded, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Loaded> = _TransitionReturnsDeclaredResult<Loaded>()
     let _: _TriggerPayloadMatchesDeclaration<Fetch.Output> = _TriggerPayloadMatchesDeclaration<Fetch.Output>()
     let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
-    let _: _TransitionReturnsDeclaredResult<Change<Failed, Effect>> = _TransitionReturnsDeclaredResult<Change<Failed, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Failed> = _TransitionReturnsDeclaredResult<Failed>()
     let _: _TriggerPayloadMatchesDeclaration<Fetch.Failure> = _TriggerPayloadMatchesDeclaration<Fetch.Failure>()
     let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
-    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Loading> = _TransitionReturnsDeclaredResult<Loading>()
     let _: _TriggerPayloadMatchesDeclaration<Audit.Output> = _TriggerPayloadMatchesDeclaration<Audit.Output>()
     let _: _TransitionSourceIsPhasePayload<Loaded> = _TransitionSourceIsPhasePayload<Loaded>()
-    let _: _TransitionReturnsDeclaredResult<Change<Idle, Effect>> = _TransitionReturnsDeclaredResult<Change<Idle, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Idle> = _TransitionReturnsDeclaredResult<Idle>()
     let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
     let _: _TransitionSourceIsPhasePayload<Loaded> = _TransitionSourceIsPhasePayload<Loaded>()
-    let _: _TransitionReturnsDeclaredResult<Change<Loaded, Effect>> = _TransitionReturnsDeclaredResult<Change<Loaded, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Loaded> = _TransitionReturnsDeclaredResult<Loaded>()
     let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
-    let _: _EffectPayloadIsOperationInput<Fetch.Input> = _EffectPayloadIsOperationInput<Fetch.Input>();
     let _ = _OperationFailureIsError<Fetch.Failure>()
-    let _: _EffectPayloadIsOperationInput<Audit.Input> = _EffectPayloadIsOperationInput<Audit.Input>();
     let _ = _OperationFailureIsError<Audit.Failure>()
-    let _: _RouterSourceIsObservedPhase<Observed<Loaded>> = _RouterSourceIsObservedPhase<Observed<Loaded>>()
+    let _: _RouterSourceIsPhasePayload<Loaded> = _RouterSourceIsPhasePayload<Loaded>()
     let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
     let _ = _EffectIsCopyable<Effect>()
     let _ = _SharedModeRequiresSendable<Input>();
     let _ = _SharedModeRequiresSendable<Effect>()
+}
+
+/// Inert descriptions of the operations this workflow can start.
+public enum Effect: Sendable {
+    case fetch(Flow.Fetch.Input)
+    case audit(Flow.Audit.Input)
+    /// The operations `begin` may start.
+public enum Begin: Sendable {
+    case fetch(Flow.Fetch.Input)
+    /// The schema-wide effect this value describes.
+    public var effect: Flow.Effect {
+        switch self {
+        case .fetch(let input):
+            return .fetch(input)
+        }
+    }
+    }
+    /// The operations `note` may start.
+    public enum Note: Sendable {
+        case audit(Flow.Audit.Input)
+        /// The schema-wide effect this value describes.
+        public var effect: Flow.Effect {
+        switch self {
+        case .audit(let input):
+            return .audit(input)
+        }
+    }
+    }
 }
 
 /// Unique authority over one declared workflow phase.
@@ -73,50 +96,45 @@ public struct Owned<Phase: ~Copyable & Sendable>: ~Copyable, Sendable {
 public consuming func begin(_ input: Int) -> Advance<Self, Owned<Loading>, Effect, Problem> where Phase == Idle {
     do {
         let change = try Flow.begin(phase, input)
-        return .advanced(Owned<Loading>(change.next), effects: change.effects)
+        let effects = change.effects.map(\.effect)
+        return .advanced(Owned<Loading>(change.next), effects: effects)
     } catch {
         return .rejected(error, self)
     }
     }
-    /// Advances through the authored edge, preserving effect order.
-    public consuming func cancel() -> Change<Owned<Idle>, Effect> where Phase == Loading {
-        let change = Flow.cancel(phase)
-        return Change(Owned<Idle>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    public consuming func cancel() -> Owned<Idle> where Phase == Loading {
+        Owned<Idle>(Flow.cancel(phase))
     }
-    /// Advances through the authored edge, preserving effect order.
-    public consuming func sessionChanged() -> Change<Owned<Loading>, Effect> where Phase == Loading {
-        let change = Flow.sessionChanged(phase)
-        return Change(Owned<Loading>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    public consuming func sessionChanged() -> Owned<Loading> where Phase == Loading {
+        Owned<Loading>(Flow.sessionChanged(phase))
     }
     /// Advances through the authored edge, preserving effect order.
     public consuming func note(_ input: String) -> Change<Owned<Loading>, Effect> where Phase == Loading {
         let change = Flow.note(phase, input)
-        return Change(Owned<Loading>(change.next), effects: change.effects)
+        let effects = change.effects.map(\.effect)
+        return Change(Owned<Loading>(change.next), effects: effects)
     }
-    /// Advances through the authored edge, preserving effect order.
-    public consuming func received(_ input: Fetch.Output) -> Change<Owned<Loaded>, Effect> where Phase == Loading {
-        let change = Flow.received(phase, input)
-        return Change(Owned<Loaded>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    public consuming func received(_ input: Fetch.Output) -> Owned<Loaded> where Phase == Loading {
+        Owned<Loaded>(Flow.received(phase, input))
     }
-    /// Advances through the authored edge, preserving effect order.
-    public consuming func failed(_ input: Fetch.Failure) -> Change<Owned<Failed>, Effect> where Phase == Loading {
-        let change = Flow.failed(phase, input)
-        return Change(Owned<Failed>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    public consuming func failed(_ input: Fetch.Failure) -> Owned<Failed> where Phase == Loading {
+        Owned<Failed>(Flow.failed(phase, input))
     }
-    /// Advances through the authored edge, preserving effect order.
-    public consuming func audited(_ input: Audit.Output) -> Change<Owned<Loading>, Effect> where Phase == Loading {
-        let change = Flow.audited(phase, input)
-        return Change(Owned<Loading>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    public consuming func audited(_ input: Audit.Output) -> Owned<Loading> where Phase == Loading {
+        Owned<Loading>(Flow.audited(phase, input))
     }
-    /// Advances through the authored edge, preserving effect order.
-    public consuming func restart(_ input: Bool) -> Change<Owned<Idle>, Effect> where Phase == Loaded {
-        let change = Flow.restart(phase, input)
-        return Change(Owned<Idle>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    public consuming func restart(_ input: Bool) -> Owned<Idle> where Phase == Loaded {
+        Owned<Idle>(Flow.restart(phase, input))
     }
-    /// Advances through the authored edge, preserving effect order.
-    public consuming func keep(_ input: Bool) -> Change<Owned<Loaded>, Effect> where Phase == Loaded {
-        let change = Flow.keep(phase, input)
-        return Change(Owned<Loaded>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    public consuming func keep(_ input: Bool) -> Owned<Loaded> where Phase == Loaded {
+        Owned<Loaded>(Flow.keep(phase, input))
     }
 }
 
@@ -151,122 +169,131 @@ public struct Observed<Phase: Sendable>: Sendable {
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared where Phase == Idle {
-    let change: Change<Loading, Effect>
+    let change: Change<Loading, Effect.Begin>
     do {
         change = try Flow.begin(payload, input)
     } catch {
         throw .domain(error)
     }
     do {
-    let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
-        from: 0, to: 1, invalidates: [0],
-        allowed: [0], requiring: nil, claim: claim)
-    return Prepared(candidate)
+        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next),
+            effects: change.effects.map(\.effect),
+            from: 0, to: 1, invalidates: [0],
+            requiring: nil, claim: claim)
+        return Prepared(candidate)
     } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func cancel() throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let change: Change<Idle, Effect>
-        change = Flow.cancel(payload)
+        let next: Idle
+        next = Flow.cancel(payload)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .idle(change.next), effects: change.effects,
-            from: 1, to: 0, invalidates: [0],
-            allowed: [], requiring: nil, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .idle(next),
+                effects: [],
+                from: 1, to: 0, invalidates: [0],
+                requiring: nil, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func sessionChanged() throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let change: Change<Loading, Effect>
-        change = Flow.sessionChanged(payload)
+        let next: Loading
+        next = Flow.sessionChanged(payload)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
-            from: 1, to: 1, invalidates: [1],
-            allowed: [], requiring: nil, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .loading(next),
+                effects: [],
+                from: 1, to: 1, invalidates: [1],
+                requiring: nil, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func note(_ input: String) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let change: Change<Loading, Effect>
+        let change: Change<Loading, Effect.Note>
         change = Flow.note(payload, input)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
-            from: 1, to: 1, invalidates: [],
-            allowed: [1], requiring: nil, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next),
+                effects: change.effects.map(\.effect),
+                from: 1, to: 1, invalidates: [],
+                requiring: nil, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func received(_ completion: FetchSuccessCompletion) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let change: Change<Loaded, Effect>
-        change = Flow.received(payload, completion.value)
+        let next: Loaded
+        next = Flow.received(payload, completion.value)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .loaded(change.next), effects: change.effects,
-            from: 1, to: 2, invalidates: [],
-            allowed: [], requiring: completion.authority, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .loaded(next),
+                effects: [],
+                from: 1, to: 2, invalidates: [],
+                requiring: completion.authority, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func failed(_ completion: FetchFailureCompletion) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let change: Change<Failed, Effect>
-        change = Flow.failed(payload, completion.value)
+        let next: Failed
+        next = Flow.failed(payload, completion.value)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .failed(change.next), effects: change.effects,
-            from: 1, to: 3, invalidates: [],
-            allowed: [], requiring: completion.authority, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .failed(next),
+                effects: [],
+                from: 1, to: 3, invalidates: [],
+                requiring: completion.authority, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func audited(_ completion: AuditSuccessCompletion) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let change: Change<Loading, Effect>
-        change = Flow.audited(payload, completion.value)
+        let next: Loading
+        next = Flow.audited(payload, completion.value)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
-            from: 1, to: 1, invalidates: [],
-            allowed: [], requiring: completion.authority, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .loading(next),
+                effects: [],
+                from: 1, to: 1, invalidates: [],
+                requiring: completion.authority, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func restart(_ input: Bool) throws(PreparationFailure<Never>) -> Prepared where Phase == Loaded {
-        let change: Change<Idle, Effect>
-        change = Flow.restart(payload, input)
+        let next: Idle
+        next = Flow.restart(payload, input)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .idle(change.next), effects: change.effects,
-            from: 2, to: 0, invalidates: [],
-            allowed: [], requiring: nil, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .idle(next),
+                effects: [],
+                from: 2, to: 0, invalidates: [],
+                requiring: nil, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     public func keep(_ input: Bool) throws(PreparationFailure<Never>) -> Prepared where Phase == Loaded {
-        let change: Change<Loaded, Effect>
-        change = Flow.keep(payload, input)
+        let next: Loaded
+        next = Flow.keep(payload, input)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .loaded(change.next), effects: change.effects,
-            from: 2, to: 2, invalidates: [],
-            allowed: [], requiring: nil, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .loaded(next),
+                effects: [],
+                from: 2, to: 2, invalidates: [],
+                requiring: nil, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
@@ -332,6 +359,15 @@ public enum PreparationRejection: Error {
     /// Actual emitted effects violate metadata or immutable limits.
     case plan(PlanRejection)
     case begin(Problem)
+    case choose(Problem)
+}
+
+/// The edges each router may choose among.
+public enum Route { /// The edges `choose` may choose.
+    public enum Choose: Sendable {
+        case restart
+        case keep
+    }
 }
 
 /// A prepared candidate or typed routing rejection.
@@ -381,6 +417,7 @@ public struct FetchWork: Sendable {
     public func succeeded(_ value: Fetch.Output) -> FetchCompletion {
         .success(FetchSuccessCompletion(value: value, authority: authority))
     }
+
     /// Seals a failed terminal result for this exact work.
     public func failed(_ value: Fetch.Failure) -> FetchCompletion {
         .failure(FetchFailureCompletion(value: value, authority: authority))
@@ -428,6 +465,7 @@ public struct AuditWork: Sendable {
     public func succeeded(_ value: Audit.Output) -> AuditCompletion {
         .success(AuditSuccessCompletion(value: value, authority: authority))
     }
+
     /// Seals a failed terminal result for this exact work.
     public func failed(_ value: Audit.Failure) -> AuditCompletion {
 
@@ -538,7 +576,7 @@ fileprivate static var _stateMachineEligibility: [[Int]] {
 
 fileprivate static func _stateMachinePrepare(
     on record: _StateMachineEngine.Snapshot, next: Flow, effects: [Effect], from: Int, to: Int,
-    invalidates: [Int], allowed: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
+    invalidates: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
 ) throws(PlanRejection) -> _StateMachineEngine.Candidate {
     var edits: [_StateMachineEngine.ScopeEdit] = []
     for (scope, phases) in _stateMachineEligibility.enumerated() {
@@ -557,9 +595,6 @@ fileprivate static func _stateMachinePrepare(
         switch effect {
         case .fetch(let input):
             let _: Fetch.Input = input
-            guard allowed.contains(0) else {
-                throw .invalidPlan
-            }
             counts[0] += 1
             guard counts[0] <= 1 else {
                 throw .invalidPlan
@@ -568,9 +603,6 @@ fileprivate static func _stateMachinePrepare(
                 dependencies: [RuntimeScopeID(kind: 1)], policy: .latest), descriptor: effect))
         case .audit(let input):
             let _: Audit.Input = input
-            guard allowed.contains(1) else {
-                throw .invalidPlan
-            }
             counts[1] += 1
             guard counts[1] <= 2 else {
                 throw .invalidPlan
@@ -665,7 +697,40 @@ public static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparation
     case (.note, .loaded):
         return .rejected(.invalidPhase)
     case (.tick(let input), .loaded(let source)):
-        return Flow.route(source, input)
+        let selection: Route.Choose
+        do {
+            selection = try Flow.choose(source.value, input)
+        } catch {
+            return .rejected(.choose(error))
+        }
+        switch selection {
+        case .restart:
+            do {
+                return .prepared(try source.restart(input))
+            }
+            catch {
+                switch error {
+                case .plan(let reason):
+                    return .rejected(.plan(reason))
+                case .domain(let never):
+                    switch never {
+                    }
+                }
+            }
+        case .keep:
+            do {
+                return .prepared(try source.keep(input))
+            }
+            catch {
+                switch error {
+                case .plan(let reason):
+                    return .rejected(.plan(reason))
+                case .domain(let never):
+                    switch never {
+                    }
+                }
+            }
+        }
     case (.load, .failed):
         return .rejected(.invalidPhase)
     case (.cancel, .failed):
@@ -851,6 +916,14 @@ public struct Local: ~Copyable {
             return reconcile(id: id)
         }
     }
+    /// Delivers the sealed terminal result of one `Fetch` execution.
+public mutating func deliver(_ completion: FetchCompletion) -> DeliveryResult {
+    deliver(.fetch(completion))
+    }
+    /// Delivers the sealed terminal result of one `Audit` execution.
+    public mutating func deliver(_ completion: AuditCompletion) -> DeliveryResult {
+        deliver(.audit(completion))
+    }
     /// Claims one retained outcome before evaluating domain code.
     public mutating func reconcile(id: PendingCompletionID) -> DeliveryResult {
         switch ledger.claim(id, in: &engine) {
@@ -978,6 +1051,14 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
     /// Retains the first terminal outcome and validates current authority.
     public func deliver(_ completion: Completion) -> DeliveryResult {
         return Self.project(host.deliver(completion))
+    }
+    /// Delivers the sealed terminal result of one `Fetch` execution.
+public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
+    deliver(.fetch(completion))
+    }
+    /// Delivers the sealed terminal result of one `Audit` execution.
+    public func deliver(_ completion: AuditCompletion) -> DeliveryResult {
+        deliver(.audit(completion))
     }
     /// Reads immutable retained first-outcome diagnostics.
     public func pendingCompletions() -> [PendingCompletion] {
@@ -1109,6 +1190,14 @@ public final class Shared: Sendable {
     public func deliver(_ completion: Completion) -> DeliveryResult {
         return Self.project(host.deliver(completion))
     }
+    /// Delivers the sealed terminal result of one `Fetch` execution.
+public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
+    deliver(.fetch(completion))
+    }
+    /// Delivers the sealed terminal result of one `Audit` execution.
+    public func deliver(_ completion: AuditCompletion) -> DeliveryResult {
+        deliver(.audit(completion))
+    }
     /// Returns immutable first-outcome diagnostics.
     public func pendingCompletions() -> [PendingCompletion] {
         host.pendingCompletions()
@@ -1233,6 +1322,14 @@ public final class ActorHost: Sendable {
     /// Retains the first terminal outcome and validates current authority.
     public func deliver(_ completion: Completion) async -> DeliveryResult {
         return Self.project(await host.deliver(completion))
+    }
+    /// Delivers the sealed terminal result of one `Fetch` execution.
+public func deliver(_ completion: FetchCompletion) async -> DeliveryResult {
+    await deliver(.fetch(completion))
+    }
+    /// Delivers the sealed terminal result of one `Audit` execution.
+    public func deliver(_ completion: AuditCompletion) async -> DeliveryResult {
+        await deliver(.audit(completion))
     }
     /// Reads immutable retained first-outcome diagnostics.
     public func pendingCompletions() async -> [PendingCompletion] {

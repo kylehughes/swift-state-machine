@@ -9,19 +9,15 @@ nonisolated enum OperationWitness: Sendable {
     enum RequestFailure: Error { case rejected }
     enum Scope { case work }
     enum Input: Sendable { case begin }
-    enum Effect: Sendable { case fetch(Fetch.Input) }
     @Operation(scope: Scope.work, activeIn: [Loading.self], admission: .latest)
     enum Fetch { typealias Input = any Error; typealias Output = Int; typealias Failure = Never }
     @Transition(on: Input.begin, starts: [Fetch.self])
-    fileprivate static func begin(_ source: borrowing Idle) -> Change<Loading, Effect> {
+    fileprivate static func begin(_ source: Idle) -> Change<Loading, Effect.Begin> {
         Change(Loading(), effects: [.fetch(RequestFailure.rejected)])
     }
     @Transition(onSuccess: Fetch.self)
-    fileprivate static func received(_ source: borrowing Loading, _ value: Fetch.Output) -> Change<Idle, Effect> { Change(Idle()) }
+    fileprivate static func received(_ source: Loading, _ value: Fetch.Output) -> Idle { Idle() }
     @Route(onSuccess: Fetch.self)
-    fileprivate static func route(_ source: Observed<Loading>, _ completion: FetchSuccessCompletion) -> PreparationResult {
-        do { return .prepared(try source.received(completion)) }
-        catch { switch error { case .plan(let reason): return .rejected(.plan(reason)); case .domain(let never): switch never {} } }
-    }
+    fileprivate static func choose(_ source: Loading, _ value: Fetch.Output) -> Route.Choose { .received }
 }
 

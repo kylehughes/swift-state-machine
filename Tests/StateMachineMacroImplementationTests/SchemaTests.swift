@@ -17,15 +17,14 @@ struct SchemaTests {
             case loading(Loading)
             enum Scope { case load }
             enum Input { case start(Int); case cancel }
-            enum Effect { case fetch(Fetch.Input) }
             @Operation(scope: Scope.load, activeIn: [Loading.self], admission: .latest)
             enum Fetch { typealias Input = Int; typealias Output = String; typealias Failure = Never }
             @Transition(on: Input.start, starts: [Fetch.self])
-            static func begin(_ source: borrowing Idle, _ input: Int) throws(MyError) -> Change<Loading, Effect> { fatalError() }
+            static func begin(_ source: borrowing Idle, _ input: Int) throws(MyError) -> Change<Loading, Effect.Begin> { fatalError() }
             @Transition(on: Input.cancel, invalidates: [Scope.load])
-            static func cancel(_ source: borrowing Loading) -> Change<Idle, Effect> { fatalError() }
+            static func cancel(_ source: Loading) -> Idle { fatalError() }
             @Transition(onSuccess: Fetch.self)
-            static func received(_ source: borrowing Loading, _ input: Fetch.Output) -> Change<Idle, Effect> { fatalError() }
+            static func received(_ source: borrowing Loading, _ input: Fetch.Output) -> Idle { fatalError() }
         }
         """#
     private static func parse(_ text: String) throws -> Schema {
@@ -46,6 +45,8 @@ struct SchemaTests {
         #expect(result.transitions.map(\.trigger.kind) == [.input, .input, .success])
         #expect(result.transitions.map(\.trigger.name) == ["start", "cancel", "fetch"])
         #expect(result.transitions.first?.starts == ["fetch"])
+        #expect(result.transitions.map(\.effectNamespace) == ["Begin", nil, nil])
+        #expect(result.operations.map(\.effect) == ["fetch"])
         #expect(result.operations.first?.activeIn == ["loading"])
         #expect(result.transitions.first?.failureType == "MyError")
         #expect(result.operations.first?.inputType == "Int")
@@ -57,7 +58,39 @@ struct SchemaTests {
             ("generic schema", schema.replacingOccurrences(of: "enum Flow", with: "enum Flow<Value>")),
             ("aliased phase", schema.replacingOccurrences(of: "struct Idle {}", with: "typealias Idle = Loading")),
             ("input payload arity", schema.replacingOccurrences(of: "case start(Int)", with: "case start(Int, Int)")),
-            ("effect without payload", schema.replacingOccurrences(of: "case fetch(Fetch.Input)", with: "case fetch")),
+            (
+                "hand-written effect",
+                schema.replacingOccurrences(
+                    of: "struct Idle {}",
+                    with: "struct Idle {}\nenum Effect { case fetch(Int) }"
+                )
+            ),
+            (
+                "change without starts",
+                schema.replacingOccurrences(of: "Loading) -> Idle", with: "Loading) -> Change<Idle, Never>")
+            ),
+            (
+                "plain result with starts",
+                schema.replacingOccurrences(of: "-> Change<Loading, Effect.Begin>", with: "-> Loading")
+            ),
+            ("schema-wide effect", schema.replacingOccurrences(of: "Effect.Begin", with: "Effect")),
+            ("another edge's effect", schema.replacingOccurrences(of: "Effect.Begin", with: "Effect.Cancel")),
+            (
+                "advance in a value mode",
+                schema.replacingOccurrences(
+                    of: "throws(MyError) -> Change<Loading, Effect.Begin>",
+                    with: "-> Advance<Idle, Loading, Effect.Begin, MyError>"
+                )
+            ),
+            ("keyword effect case", schema.replacingOccurrences(of: "Fetch", with: "Default")),
+            ("effect case colliding with a command", schema.replacingOccurrences(of: "Fetch", with: "Cancel")),
+            ("uncapitalized operation", schema.replacingOccurrences(of: "Fetch", with: "fetch")),
+            (
+                "unavailable effect namespace",
+                schema.replacingOccurrences(of: "func begin(", with: "func effect(")
+                    .replacingOccurrences(of: "Effect.Begin", with: "Effect.Effect")
+            ),
+            ("consuming value source", schema.replacingOccurrences(of: "borrowing Idle", with: "consuming Idle")),
             (
                 "invalid invalidation",
                 schema.replacingOccurrences(of: "invalidates: [Scope.load]", with: "invalidates: [Scope.absent]")
@@ -118,8 +151,8 @@ struct SchemaTests {
             (
                 "unknown destination",
                 schema.replacingOccurrences(
-                    of: "throws(MyError) -> Change<Loading, Effect>",
-                    with: "-> Change<Missing, Effect>"
+                    of: "throws(MyError) -> Change<Loading,",
+                    with: "-> Change<Missing,"
                 )
             ),
             (
@@ -133,7 +166,6 @@ struct SchemaTests {
             ),
             ("untyped throws", schema.replacingOccurrences(of: "throws(MyError)", with: "throws")),
             ("async transition", schema.replacingOccurrences(of: "throws(MyError)", with: "async throws(MyError)")),
-            ("missing borrow", schema.replacingOccurrences(of: "borrowing Idle", with: "Idle")),
             ("reused phase", schema.replacingOccurrences(of: "case loading(Loading)", with: "case loading(Idle)")),
             ("malformed admission", schema.replacingOccurrences(of: ".latest", with: ".parallel(limit: 0)")),
             ("unknown trigger", schema.replacingOccurrences(of: "on: Input.start", with: "on: Input.absent")),
@@ -141,7 +173,7 @@ struct SchemaTests {
                 "missing completion route",
                 schema.replacingOccurrences(
                     of:
-                        "@Transition(onSuccess: Fetch.self)\n    static func received(_ source: borrowing Loading, _ input: Fetch.Output) -> Change<Idle, Effect> { fatalError() }",
+                        "@Transition(onSuccess: Fetch.self)\n    static func received(_ source: borrowing Loading, _ input: Fetch.Output) -> Idle { fatalError() }",
                     with: ""
                 )
             ),
@@ -167,7 +199,7 @@ struct SchemaTests {
                 "Source 'Missing' is not a phase payload type declared in this schema."
             ),
             (
-                Self.schema.replacingOccurrences(of: "Change<Loading, Effect>", with: "Change<Missing, Effect>"),
+                Self.schema.replacingOccurrences(of: "Change<Loading,", with: "Change<Missing,"),
                 "Destination 'Missing' is not a phase payload type declared in this schema."
             ),
             (
@@ -179,22 +211,20 @@ struct SchemaTests {
                 "'Missing' is not a declared @Operation namespace."
             ),
             (
-                Self.schema.replacingOccurrences(of: "case fetch(Fetch.Input)", with: "case fetch(Int)"),
-                "Exactly one Effect case must request this operation by carrying Fetch.Input."
+                Self.schema.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\nenum Effect {}"),
+                "Effect is generated from the @Operation namespaces; delete this declaration."
             ),
             (
-                Self.schema.replacingOccurrences(
-                    of: "case fetch(Fetch.Input)",
-                    with: "case fetch(Fetch.Input); case again(Fetch.Input)"
-                ),
-                "Exactly one Effect case must request this operation by carrying Fetch.Input."
+                Self.schema.replacingOccurrences(of: "-> Change<Loading, Effect.Begin>", with: "-> Loading"),
+                "This transition starts Fetch; return Change<Loading, Effect.Begin>."
             ),
             (
-                Self.schema.replacingOccurrences(
-                    of: "case fetch(Fetch.Input)",
-                    with: "case fetch(Fetch.Input); case stray(Int)"
-                ),
-                "Effect case 'stray' must request an @Operation namespace by carrying its Input alias, such as Fetch.Input."
+                Self.schema.replacingOccurrences(of: "Loading) -> Idle", with: "Loading) -> Change<Idle, Never>"),
+                "This transition starts no operation; return Idle directly."
+            ),
+            (
+                Self.schema.replacingOccurrences(of: "Effect.Begin", with: "Effect"),
+                "This transition starts Fetch; name its effects Effect.Begin."
             ),
             (
                 Self.schema.replacingOccurrences(of: "@Initial case idle", with: "case idle"),
@@ -222,9 +252,8 @@ struct SchemaTests {
                 @Initial case idle(Idle)
                 case done(Done)
                 enum Input { case finish }
-                enum Effect {}
                 @Transition(on: Input.finish)
-                static func finish(_ source: borrowing Flow.Idle) -> Change<Self.Done, Effect> { fatalError() }
+                static func finish(_ source: Flow.Idle) -> Self.Done { fatalError() }
             }
             """#
         let result = try Self.parse(scopeless)
@@ -256,9 +285,8 @@ struct SchemaTests {
                 @Initial case idle(Idle)
                 case finished(Finished)
                 enum Input { case finish }
-                enum Effect {}
                 @Transition(on: Input.finish)
-                static func finish(_ source: consuming Idle) -> Advance<Idle, Finished, Effect, MyFailure> { fatalError() }
+                static func finish(_ source: consuming Idle) -> Advance<Idle, Finished, Never, MyFailure> { fatalError() }
             }
             """#
         let result = try Self.parse(source)
@@ -271,18 +299,20 @@ struct SchemaTests {
     @Test func multipleEdgesRequireExactlyOneRouter() throws {
         let secondEdge = #"""
             @Transition(on: Input.start)
-            static func alternate(_ source: borrowing Idle, _ input: Int) -> Change<Loading, Effect> { fatalError() }
+            static func alternate(_ source: Idle, _ input: Int) -> Loading { fatalError() }
             """#
         let ambiguous = Self.schema.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\n" + secondEdge)
         #expect(throws: DiagnosticsError.self) { try Self.parse(ambiguous) }
         let router = #"""
             @Route(on: Input.start)
-            static func choose(_ source: Observed<Idle>, _ input: Int) -> PreparationResult { fatalError() }
+            static func choose(_ source: Idle, _ input: Int) -> Route.Choose { fatalError() }
             """#
         let routed = ambiguous.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\n" + router)
         let result = try Self.parse(routed)
         #expect(result.routes.count == 1)
         #expect(result.routes.first?.from == "idle")
+        #expect(result.routes.first?.namespace == "Choose")
+        #expect(result.routes.first?.choices == ["alternate", "begin"])
         #expect(result.transitions.count == 4)
         let duplicate = routed.replacingOccurrences(
             of: "struct Idle {}",
@@ -304,14 +334,16 @@ struct SchemaTests {
     @Test func routerMayExplicitlyRejectAnOutcomeWithoutMatchingEdges() throws {
         let source = Self.schema.replacingOccurrences(
             of:
-                "@Transition(onSuccess: Fetch.self)\n    static func received(_ source: borrowing Loading, _ input: Fetch.Output) -> Change<Idle, Effect> { fatalError() }",
+                "@Transition(onSuccess: Fetch.self)\n    static func received(_ source: borrowing Loading, _ input: Fetch.Output) -> Idle { fatalError() }",
             with:
-                "@Route(onSuccess: Fetch.self)\n    static func reject(_ source: Observed<Loading>, _ completion: FetchSuccessCompletion) -> PreparationResult { fatalError() }"
+                "@Route(onSuccess: Fetch.self)\n    static func reject(_ source: Loading, _ output: Fetch.Output) throws(MyError) -> Never { fatalError() }"
         )
         let result = try Self.parse(source)
         #expect(result.routes.count == 1)
         #expect(result.transitions.count == 2)
         #expect(result.routes.first?.trigger.kind == .success)
+        #expect(result.routes.first?.namespace == nil)
+        #expect(result.routes.first?.failureType == "MyError")
     }
 
     @Test func reservesAllGeneratedSupportNames() {
@@ -372,10 +404,50 @@ struct SchemaTests {
     @Test func unlabeledCasesMayNameTheirPayloadInternally() throws {
         let source = Self.schema.replacingOccurrences(of: "case idle(Idle)", with: "case idle(_ value: Idle)")
             .replacingOccurrences(of: "case start(Int)", with: "case start(_ value: Int)")
-            .replacingOccurrences(of: "case fetch(Fetch.Input)", with: "case fetch(_ request: Fetch.Input)")
         let parsed = try Self.parse(source)
         #expect(parsed.phases.first?.typeName == "Idle")
         #expect(parsed.inputs.first?.payloadType == "Int")
+    }
+
+    @Test func effectCasesLowerTheLeadingCapitalRunOfTheOperationName() throws {
+        for (operation, effect) in [("URLLoad", "urlLoad"), ("A", "a"), ("SecondOperation", "secondOperation")] {
+            let source = Self.schema.replacingOccurrences(of: "Fetch", with: operation)
+            #expect(try Self.parse(source).operations.first?.effect == effect)
+        }
+    }
+
+    @Test func ownedOnlyAcceptsPlainChangeAndAdvanceResults() throws {
+        let source = #"""
+            @StateMachine(mode: .ownedOnly)
+            enum Resource {
+                struct Idle: ~Copyable {}
+                struct Finished: ~Copyable {}
+                @Initial case idle(Idle)
+                case finished(Finished)
+                enum Scope { case work }
+                enum Input { case finish, log, check }
+                @Operation(scope: Scope.work, activeIn: [Finished.self], admission: .latest)
+                enum Audit { typealias Input = Int; typealias Output = Int; typealias Failure = Never }
+                @Transition(on: Input.finish)
+                static func finish(_ source: consuming Idle) -> Finished { fatalError() }
+                @Transition(on: Input.log, starts: [Audit.self])
+                static func log(_ source: consuming Idle) -> Change<Finished, Effect.Log> { fatalError() }
+                @Transition(on: Input.check, starts: [Audit.self])
+                static func check(_ source: consuming Idle) -> Advance<Idle, Finished, Effect.Check, MyFailure> { fatalError() }
+                @Transition(onSuccess: Audit.self)
+                static func audited(_ source: consuming Finished, _ output: Audit.Output) -> Finished { fatalError() }
+            }
+            """#
+        let result = try Self.parse(source)
+        #expect(result.transitions.map(\.effectNamespace) == [nil, "Log", "Check", nil])
+        #expect(result.transitions.map(\.failureType) == [nil, nil, "MyFailure", nil])
+        let throwing = source.replacingOccurrences(
+            of: "Idle) -> Finished {",
+            with: "Idle) throws(MyFailure) -> Finished {"
+        )
+        #expect(throws: DiagnosticsError.self) { try Self.parse(throwing) }
+        let borrowed = source.replacingOccurrences(of: "consuming Idle) -> Finished", with: "Idle) -> Finished")
+        #expect(throws: DiagnosticsError.self) { try Self.parse(borrowed) }
     }
 
     @Test func caseNamesFollowSwiftIdentifierGrammar() throws {

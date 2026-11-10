@@ -22,10 +22,6 @@ nonisolated private enum OwnedValueContract: Sendable {
         case checked(String)
         case silent
     }
-    enum Effect: Sendable, Equatable {
-        case audit(Audit.Input)
-        case publish(Publish.Input)
-    }
     enum Rejection: Error { case emptyLabel }
     @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
     enum Audit {
@@ -40,7 +36,7 @@ nonisolated private enum OwnedValueContract: Sendable {
         typealias Failure = Never
     }
     @Transition(on: Input.finish, starts: [Audit.self, Publish.self])
-    fileprivate static func finish(_ source: borrowing Ready, _ label: String) -> Change<Finished, Effect> {
+    fileprivate static func finish(_ source: Ready, _ label: String) -> Change<Finished, Effect.Finish> {
         Change(
             Finished(identifier: source.identifier, history: source.history, label: label),
             effects: [.audit(source.identifier), .publish(label)]
@@ -48,28 +44,33 @@ nonisolated private enum OwnedValueContract: Sendable {
     }
     @Transition(on: Input.checked, starts: [Audit.self, Publish.self])
     fileprivate static func checked(
-        _ source: borrowing Ready,
+        _ source: Ready,
         _ label: String
-    ) throws(Rejection) -> Change<Finished, Effect> {
+    ) throws(Rejection) -> Change<Finished, Effect.Checked> {
         guard !label.isEmpty else { throw .emptyLabel }
-        return finish(source, label)
+        return Change(
+            Finished(identifier: source.identifier, history: source.history, label: label),
+            effects: [.audit(source.identifier), .publish(label)]
+        )
     }
     @Transition(onSuccess: Audit.self)
-    fileprivate static func audited(_ source: borrowing Finished, _ output: Audit.Output) -> Change<Finished, Effect> {
-        Change(copy source)
+    fileprivate static func audited(_ source: Finished, _ output: Audit.Output) -> Finished {
+        source
     }
     @Transition(onSuccess: Publish.self)
     fileprivate static func published(
-        _ source: borrowing Finished,
+        _ source: Finished,
         _ output: Publish.Output
-    ) -> Change<Finished, Effect> {
-        Change(copy source)
+    ) -> Finished {
+        source
     }
     @Transition(on: Input.silent)
-    fileprivate static func silent(_ source: borrowing Ready) -> Change<Finished, Effect> {
-        Change(Finished(identifier: source.identifier, history: source.history, label: "silent"))
+    fileprivate static func silent(_ source: Ready) -> Finished {
+        Finished(identifier: source.identifier, history: source.history, label: "silent")
     }
 }
+
+extension OwnedValueContract.Effect: Equatable {}
 
 @StateMachine(mode: .ownedOnly)
 nonisolated private enum OwnedResourceContract: ~Copyable {
@@ -91,10 +92,6 @@ nonisolated private enum OwnedResourceContract: ~Copyable {
     case finished(Finished)
     enum Scope { case effects }
     enum Input { case finish(String) }
-    enum Effect: Equatable {
-        case audit(Audit.Input)
-        case publish(Publish.Input)
-    }
     enum Rejection: Error { case emptyLabel }
     @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
     enum Audit {
@@ -112,21 +109,21 @@ nonisolated private enum OwnedResourceContract: ~Copyable {
     fileprivate static func audited(
         _ source: consuming Finished,
         _ output: Audit.Output
-    ) -> Advance<Finished, Finished, Effect, Never> {
+    ) -> Advance<Finished, Finished, Never, Never> {
         .advanced(source, effects: [])
     }
     @Transition(onSuccess: Publish.self)
     fileprivate static func published(
         _ source: consuming Finished,
         _ output: Publish.Output
-    ) -> Advance<Finished, Finished, Effect, Never> {
+    ) -> Advance<Finished, Finished, Never, Never> {
         .advanced(source, effects: [])
     }
     @Transition(on: Input.finish, starts: [Audit.self, Publish.self])
     fileprivate static func finish(
         _ source: consuming Ready,
         _ label: String
-    ) -> Advance<Ready, Finished, Effect, Rejection> {
+    ) -> Advance<Ready, Finished, Effect.Finish, Rejection> {
         guard !label.isEmpty else { return .rejected(.emptyLabel, source) }
         let identifier = source.resource.identifier
         return .advanced(
@@ -135,6 +132,8 @@ nonisolated private enum OwnedResourceContract: ~Copyable {
         )
     }
 }
+
+extension OwnedResourceContract.Effect: Equatable {}
 
 @Suite struct OwnedResultContractTests {
     @Test func generatedSharedSuccessPreservesCompleteResult_RT037() async {
@@ -192,12 +191,11 @@ nonisolated private enum OwnedResourceContract: ~Copyable {
 
     @Test func generatedSharedEmptySuccessPreservesDestination_RT037() {
         let owner = OwnedValueContract.owned(.init(identifier: 31, history: ["empty": []]))
-        let result = owner.silent()
+        let finished = owner.silent()
         #expect(
-            result.next.withValue { $0 }
+            finished.withValue { $0 }
                 == OwnedValueContract.Finished(identifier: 31, history: ["empty": []], label: "silent")
         )
-        #expect(result.effects.isEmpty)
     }
 
     @Test(arguments: [false, true])

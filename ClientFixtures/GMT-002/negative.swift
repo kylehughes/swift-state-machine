@@ -8,10 +8,9 @@ nonisolated enum Counter: Sendable {
     @Initial case idle(Idle)
     case done(Done)
     enum Input: Sendable { case finish(Int) }
-    enum Effect: Sendable {}
     @Transition(on: Input.finish)
-    fileprivate static func finish(_ source: borrowing Idle, _ value: Int) -> Change<Int, Effect> {
-        Change(value + source.value.count)
+    fileprivate static func finish(_ source: Idle, _ value: Int) -> Int {
+        value + source.value.count
     }
 }
 

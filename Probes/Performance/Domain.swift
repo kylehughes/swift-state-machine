@@ -16,7 +16,6 @@ nonisolated enum PerformanceFlow: Sendable {
         case start(Int)
         case cancel
     }
-    enum Effect: Sendable { case work(Work.Input) }
     @Operation(scope: Scope.work, activeIn: [Ready.self], admission: .parallel(limit: 16))
     enum Work {
         typealias Input = Int
@@ -24,28 +23,28 @@ nonisolated enum PerformanceFlow: Sendable {
         typealias Failure = Never
     }
     @Transition(on: Input.bump)
-    fileprivate static func bump(_ source: borrowing Ready, _ salt: UInt64) -> Change<Ready, Effect> {
-        var next = copy source
+    fileprivate static func bump(_ source: Ready, _ salt: UInt64) -> Ready {
+        var next = source
         // The historical source still owns its Array, so this write exercises CoW.
         let index = Int(salt % UInt64(next.bytes.count))
         next.bytes[index] &+= 1
         next.changes += 1
-        return Change(next)
+        return next
     }
     @Transition(on: Input.start, starts: [Work.self])
-    fileprivate static func start(_ source: borrowing Ready, _ id: Int) -> Change<Ready, Effect> {
-        var next = copy source
+    fileprivate static func start(_ source: Ready, _ id: Int) -> Change<Ready, Effect.Start> {
+        var next = source
         next.bytes[id % next.bytes.count] &+= 1
         next.changes += 1
         return Change(next, effects: [.work(id)])
     }
     @Transition(on: Input.cancel, invalidates: [Scope.work])
-    fileprivate static func cancel(_ source: borrowing Ready) -> Change<Ready, Effect> { Change(copy source) }
+    fileprivate static func cancel(_ source: Ready) -> Ready { source }
     @Transition(onSuccess: Work.self)
-    fileprivate static func completed(_ source: borrowing Ready, _ id: Work.Output) -> Change<Ready, Effect> {
-        var next = copy source
+    fileprivate static func completed(_ source: Ready, _ id: Work.Output) -> Ready {
+        var next = source
         next.completions += 1
-        return Change(next)
+        return next
     }
 }
 

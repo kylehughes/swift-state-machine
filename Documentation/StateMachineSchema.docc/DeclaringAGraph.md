@@ -17,13 +17,12 @@ nonisolated enum Approval: Sendable {
     case approved(Approved)
 
     enum Input: Sendable { case approve }
-    enum Effect: Sendable {}
 
     @Transition(on: Input.approve)
     fileprivate static func approve(
-        _ source: borrowing Draft
-    ) -> Change<Approved, Effect> {
-        Change(Approved(title: source.title))
+        _ source: Draft
+    ) -> Approved {
+        Approved(title: source.title)
     }
 }
 
@@ -173,7 +172,6 @@ nonisolated enum MessageFlow: Sendable {
 
     enum Scope { case publication }
     enum Input: Sendable { case send }
-    enum Effect: Sendable { case publish(Publication.Input) }
 
     @Operation(scope: Scope.publication, activeIn: [Ready.self], admission: .latest)
     enum Publication {
@@ -183,13 +181,13 @@ nonisolated enum MessageFlow: Sendable {
     }
 
     @Transition(on: Input.send, starts: [Publication.self])
-    fileprivate static func send(_ source: borrowing Ready) -> Change<Ready, Effect> {
+    fileprivate static func send(_ source: Ready) -> Change<Ready, Effect.Send> {
         Change(Ready(message: source.message), effects: [.publish(source.message)])
     }
 
     @Transition(onSuccess: Publication.self)
-    fileprivate static func published(_ source: borrowing Ready, _ output: Publication.Output) -> Change<Sent, Effect> {
-        Change(Sent(message: source.message))
+    fileprivate static func published(_ source: Ready, _ output: Publication.Output) -> Sent {
+        Sent(message: source.message)
     }
 }
 ```

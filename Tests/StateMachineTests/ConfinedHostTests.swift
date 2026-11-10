@@ -382,7 +382,7 @@ import Testing
             guard effects.count == 1, case .fetch(let input) = effects[0] else { throw Failure.unexpected }
             #expect(input == request)
             let completed = loading.received(profile)
-            ownedName = completed.next.withValue { $0.profile.name }
+            ownedName = completed.withValue { $0.profile.name }
         case .rejected: throw Failure.unexpected
         }
 

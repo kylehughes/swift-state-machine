@@ -8,11 +8,10 @@ nonisolated private enum PlatformWorkflow: Sendable {
     struct Idle: Sendable { let value: Int }
     @Initial case idle(Idle)
     enum Input: Sendable { case edit(Int) }
-    enum Effect: Sendable {}
 
     @Transition(on: Input.edit)
-    fileprivate static func edit(_ source: borrowing Idle, _ value: Int) -> Change<Idle, Effect> {
-        Change(Idle(value: value))
+    fileprivate static func edit(_ source: Idle, _ value: Int) -> Idle {
+        Idle(value: value)
     }
 }
 

@@ -36,8 +36,6 @@ nonisolated public enum GeneratedNote {
         case edit(String)
         case cancel
     }
-    /// Inert typed work descriptions.
-    public enum Effect: ~Sendable { case save(Save.Input) }
     /// One confined operation; no Sendable conformance is imposed on its input or outcome.
     @Operation(scope: Scope.save, activeIn: [Saving.self], admission: .latest)
     public enum Save {
@@ -49,23 +47,23 @@ nonisolated public enum GeneratedNote {
         public typealias Failure = Never
     }
     @Transition(on: Input.save, starts: [Save.self])
-    fileprivate static func begin(_ source: borrowing Draft) -> Change<Saving, Effect> {
+    fileprivate static func begin(_ source: Draft) -> Change<Saving, Effect.Begin> {
         Change(Saving(text: source.text), effects: [.save(Draft(text: source.text))])
     }
     @Transition(onSuccess: Save.self)
-    fileprivate static func received(_ source: borrowing Saving, _ output: Save.Output) -> Change<Saved, Effect> {
-        Change(output)
+    fileprivate static func received(_ source: Saving, _ output: Save.Output) -> Saved {
+        output
     }
     @Transition(on: Input.edit)
-    fileprivate static func edit(_ source: borrowing Draft, _ text: String) -> Change<Draft, Effect> {
-        Change(Draft(text: text))
+    fileprivate static func edit(_ source: Draft, _ text: String) -> Draft {
+        Draft(text: text)
     }
     @Transition(on: Input.edit, invalidates: [Scope.save])
-    fileprivate static func replace(_ source: borrowing Saving, _ text: String) -> Change<Draft, Effect> {
-        Change(Draft(text: text))
+    fileprivate static func replace(_ source: Saving, _ text: String) -> Draft {
+        Draft(text: text)
     }
     @Transition(on: Input.cancel, invalidates: [Scope.save])
-    fileprivate static func cancel(_ source: borrowing Saving) -> Change<Draft, Effect> {
-        Change(Draft(text: source.text))
+    fileprivate static func cancel(_ source: Saving) -> Draft {
+        Draft(text: source.text)
     }
 }

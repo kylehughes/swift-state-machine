@@ -27,13 +27,12 @@ nonisolated enum Approval: Sendable {
     case approved(Approved)
 
     enum Input: Sendable { case approve }
-    enum Effect: Sendable {}
 
     @Transition(on: Input.approve)
     fileprivate static func approve(
-        _ source: borrowing Draft
-    ) -> Change<Approved, Effect> {
-        Change(Approved(title: source.title))
+        _ source: Draft
+    ) -> Approved {
+        Approved(title: source.title)
     }
 }
 

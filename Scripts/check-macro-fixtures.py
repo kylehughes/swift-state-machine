@@ -34,15 +34,15 @@ def generate_source(phases, edges, name):
     lines.append("    enum Input: Sendable {")
     for group in range((edges + phases - 1) // phases):
         lines.append(f"        case event{group}")
-    lines.extend(["    }", "    enum Effect: Sendable {}"])
+    lines.append("    }")
     for edge in range(edges):
         source = edge % phases
         destination = (source + 1) % phases
         group = edge // phases
         lines.extend([
             f"    @Transition(on: Input.event{group})",
-            f"    fileprivate static func step{edge}(_ source: borrowing Phase{source}) -> Change<Phase{destination}, Effect> {{",
-            f"        Change(Phase{destination}(value: source.value + 1))",
+            f"    fileprivate static func step{edge}(_ source: Phase{source}) -> Phase{destination} {{",
+            f"        Phase{destination}(value: source.value + 1)",
             "    }",
         ])
     lines.extend(["}", ""])

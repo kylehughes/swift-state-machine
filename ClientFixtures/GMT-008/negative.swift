@@ -9,10 +9,9 @@ nonisolated enum Counter: Sendable {
     case done(Done)
     final class NonSendable { var value = 0 }
     enum Input { case finish(Int); case unsafe(NonSendable) }
-    enum Effect: Sendable {}
     @Transition(on: Input.finish)
-    fileprivate static func finish(_ source: borrowing Idle, _ value: Int) -> Change<Done, Effect> {
-        Change(Done(value: value + source.value.count))
+    fileprivate static func finish(_ source: Idle, _ value: Int) -> Done {
+        Done(value: value + source.value.count)
     }
 }
 

@@ -16,7 +16,7 @@ struct Generator {
     func declaration(_ source: String) -> DeclSyntax { DeclSyntax(stringLiteral: source) }
 
     func members() throws -> [DeclSyntax] {
-        var result = [witnesses(), owned()]
+        var result = [witnesses(), effects(), owned()]
         if schema.mode != .ownedOnly {
             result += [values(), operations(), preparation(), local(), managed(mainActor: true)]
             if schema.mode == .shared { result += [shared(), managed(mainActor: false)] }
@@ -26,57 +26,53 @@ struct Generator {
         }
     }
 
+    /// The effect type an authored edge names, or `Never` when it starts nothing.
+    func authoredEffect(_ edge: Schema.Transition) -> String {
+        edge.effectNamespace.map { "Effect.\($0)" } ?? "Never"
+    }
+
     func witnesses() -> String {
+        func triggerPayload(_ trigger: Schema.Trigger) -> String {
+            switch trigger.kind {
+            case .input: schema.inputs.first { $0.caseName == trigger.name }!.payloadType!
+            case .success: "\(operation(trigger.name).name).Output"
+            case .failure: "\(operation(trigger.name).name).Failure"
+            }
+        }
         let edges = schema.transitions
             .map { edge in
                 let before = phase(edge.from)
                 let result: String
-                if schema.mode == .ownedOnly {
-                    result = "Advance<\(before), \(phase(edge.to)), Effect, \(edge.failureType ?? "Never")>"
-                } else {
-                    result = "Change<\(phase(edge.to)), Effect>"
+                switch edge.shape {
+                case .destination: result = phase(edge.to)
+                case .change: result = "Change<\(phase(edge.to)), \(authoredEffect(edge))>"
+                case .advance:
+                    result =
+                        "Advance<\(before), \(phase(edge.to)), \(authoredEffect(edge)), \(edge.failureType ?? "Never")>"
                 }
                 var lines = [
                     "let _: _TransitionSourceIsPhasePayload<\(before)> = _TransitionSourceIsPhasePayload<\(edge.sourceType)>()",
                     "let _: _TransitionReturnsDeclaredResult<\(result)> = _TransitionReturnsDeclaredResult<\(edge.returnType)>()",
                 ]
                 if let payload = edge.payloadType {
-                    let expected: String
-                    if edge.trigger.kind == .input {
-                        expected = schema.inputs.first { $0.caseName == edge.trigger.name }!.payloadType!
-                    } else {
-                        expected =
-                            "\(operation(edge.trigger.name).name).\(edge.trigger.kind == .success ? "Output" : "Failure")"
-                    }
                     lines.append(
-                        "let _: _TriggerPayloadMatchesDeclaration<\(expected)> = _TriggerPayloadMatchesDeclaration<\(payload)>()"
+                        "let _: _TriggerPayloadMatchesDeclaration<\(triggerPayload(edge.trigger))> = _TriggerPayloadMatchesDeclaration<\(payload)>()"
                     )
                 }
                 return lines.joined(separator: "\n")
             }
             .joined(separator: "\n")
         let operationWitnesses = schema.operations
-            .map { op in
-                let payload = schema.effects.first { $0.caseName == op.effect }!.payloadType!
-                return
-                    "let _: _EffectPayloadIsOperationInput<\(op.name).Input> = _EffectPayloadIsOperationInput<\(payload)>(); let _ = _OperationFailureIsError<\(op.name).Failure>()"
-            }
+            .map { "let _ = _OperationFailureIsError<\($0.name).Failure>()" }
             .joined(separator: "\n")
         let routeWitnesses = schema.routes
             .map { route in
                 var lines = [
-                    "let _: _RouterSourceIsObservedPhase<Observed<\(phase(route.from))>> = _RouterSourceIsObservedPhase<\(route.sourceType)>()"
+                    "let _: _RouterSourceIsPhasePayload<\(phase(route.from))> = _RouterSourceIsPhasePayload<\(route.sourceType)>()"
                 ]
                 if let payload = route.payloadType {
-                    let expected: String
-                    if route.trigger.kind == .input {
-                        expected = schema.inputs.first { $0.caseName == route.trigger.name }!.payloadType!
-                    } else {
-                        expected =
-                            "\(operation(route.trigger.name).name)\(route.trigger.kind == .success ? "Success" : "Failure")Completion"
-                    }
                     lines.append(
-                        "let _: _TriggerPayloadMatchesDeclaration<\(expected)> = _TriggerPayloadMatchesDeclaration<\(payload)>()"
+                        "let _: _TriggerPayloadMatchesDeclaration<\(triggerPayload(route.trigger))> = _TriggerPayloadMatchesDeclaration<\(payload)>()"
                     )
                 }
                 return lines.joined(separator: "\n")
@@ -86,8 +82,7 @@ struct Generator {
             fileprivate struct _TransitionSourceIsPhasePayload<Value: ~Copyable> {}
             fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {}
             fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {}
-            fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {}
-            fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {}
+            fileprivate struct _RouterSourceIsPhasePayload<Value: ~Copyable> {}
             fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {}
             fileprivate struct _OperationFailureIsError<Value: Error> {}
             fileprivate struct _EffectIsCopyable<Value> {}
@@ -101,6 +96,44 @@ struct Generator {
             """
     }
 
+    /// The schema-wide effect vocabulary and one narrowed vocabulary per edge that starts work.
+    func effects() -> String {
+        let conformance: String
+        switch schema.mode {
+        case .shared: conformance = ": Sendable"
+        case .isolated: conformance = ": ~Sendable"
+        case .ownedOnly: conformance = ""
+        }
+        // Names are schema-qualified because a per-edge type such as `Effect.Save` would otherwise
+        // shadow an operation namespace of the same name.
+        func cases(_ operations: [Schema.Operation]) -> String {
+            operations.map { "case \($0.effect)(\(name).\($0.name).Input)" }.joined(separator: "\n")
+        }
+        let narrowed = schema.transitions
+            .compactMap { edge -> String? in
+                guard let namespace = edge.effectNamespace else { return nil }
+                let started = edge.starts.map(operation)
+                let lowering = started.map { "case .\($0.effect)(let input): return .\($0.effect)(input)" }
+                    .joined(separator: "\n")
+                return """
+                    /// The operations `\(edge.name)` may start.
+                    \(access)enum \(namespace)\(conformance) {
+                        \(cases(started))
+                        /// The schema-wide effect this value describes.
+                        \(access)var effect: \(name).Effect { switch self { \(lowering) } }
+                    }
+                    """
+            }
+            .joined(separator: "\n")
+        return """
+            /// Inert descriptions of the operations this workflow can start.
+            \(access)enum Effect\(conformance) {
+                \(cases(schema.operations))
+                \(narrowed)
+            }
+            """
+    }
+
     func owned() -> String {
         let methods = schema.transitions
             .map { edge in
@@ -109,35 +142,55 @@ struct Generator {
                 let payload = edge.payloadType.map { "_ input: \($0)" } ?? ""
                 let argument = edge.payloadType == nil ? "" : ", input"
                 let failure = edge.failureType ?? "Never"
-                if schema.mode == .ownedOnly {
+                let call = "\(name).\(edge.name)(phase\(argument))"
+                let starts = edge.effectNamespace != nil
+                let effect = starts ? "Effect" : "Never"
+                switch edge.shape {
+                case .advance:
                     return """
                         /// Consumes the predecessor and preserves it on authored rejection.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, Effect, \(failure)> where Phase == \(before) {
-                            switch \(name).\(edge.name)(phase\(argument)) {
-                            case .advanced(let next, let effects): return .advanced(Owned<\(after)>(next), effects: effects)
+                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, \(effect), \(failure)> where Phase == \(before) {
+                            switch \(call) {
+                            case .advanced(let next, let effects): return .advanced(Owned<\(after)>(next), effects: \(starts ? "effects.map(\\.effect)" : "effects"))
                             case .rejected(let failure, let original): return .rejected(failure, Owned<\(before)>(original))
                             }
                         }
                         """
-                }
-                if edge.failureType != nil {
+                case .change where edge.failureType != nil:
                     return """
                         /// Advances through the authored edge or returns the original predecessor.
                         \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, Effect, \(failure)> where Phase == \(before) {
                             do {
-                                let change = try \(name).\(edge.name)(phase\(argument))
-                                return .advanced(Owned<\(after)>(change.next), effects: change.effects)
+                                let change = try \(call)
+                                let effects = change.effects.map(\\.effect)
+                                return .advanced(Owned<\(after)>(change.next), effects: effects)
                             } catch { return .rejected(error, self) }
                         }
                         """
+                case .change:
+                    return """
+                        /// Advances through the authored edge, preserving effect order.
+                        \(access)consuming func \(edge.name)(\(payload)) -> Change<Owned<\(after)>, Effect> where Phase == \(before) {
+                            let change = \(call)
+                            let effects = change.effects.map(\\.effect)
+                            return Change(Owned<\(after)>(change.next), effects: effects)
+                        }
+                        """
+                case .destination where edge.failureType != nil:
+                    return """
+                        /// Advances through the authored edge or returns the original predecessor.
+                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, Never, \(failure)> where Phase == \(before) {
+                            do { return .advanced(Owned<\(after)>(try \(call)), effects: []) } catch { return .rejected(error, self) }
+                        }
+                        """
+                case .destination:
+                    return """
+                        /// Advances through the authored edge, which starts no operation.
+                        \(access)consuming func \(edge.name)(\(payload)) -> Owned<\(after)> where Phase == \(before) {
+                            Owned<\(after)>(\(call))
+                        }
+                        """
                 }
-                return """
-                    /// Advances through the authored edge, preserving effect order.
-                    \(access)consuming func \(edge.name)(\(payload)) -> Change<Owned<\(after)>, Effect> where Phase == \(before) {
-                        let change = \(name).\(edge.name)(phase\(argument))
-                        return Change(Owned<\(after)>(change.next), effects: change.effects)
-                    }
-                    """
             }
             .joined(separator: "\n")
         return """
@@ -164,8 +217,19 @@ struct Generator {
                 "case .\($0.caseName)(let payload): return .\($0.caseName)(Observed(payload: payload, record: record, claim: claim))"
             }
             .joined(separator: "\n")
-        let edgeFailures = schema.transitions.compactMap { edge in edge.failureType.map { "case \(edge.name)(\($0))" } }
+        let edgeFailures =
+            (schema.transitions.compactMap { edge in edge.failureType.map { "case \(edge.name)(\($0))" } }
+            + schema.routes.compactMap { route in route.failureType.map { "case \(route.name)(\($0))" } })
             .joined(separator: "\n")
+        let choices = schema.routes
+            .compactMap { route -> String? in
+                guard let namespace = route.namespace else { return nil }
+                let cases = route.choices.map { "case \($0)" }.joined(separator: "\n")
+                return "/// The edges `\(route.name)` may choose.\n\(access)enum \(namespace)\(sendable) { \(cases) }"
+            }
+            .joined(separator: "\n")
+        let routeNamespace =
+            choices.isEmpty ? "" : "/// The edges each router may choose among.\n\(access)enum Route { \(choices) }"
         let methods = schema.transitions.map(observedMethod).joined(separator: "\n")
         return """
             fileprivate typealias _StateMachineEngine = \(engine)
@@ -213,6 +277,7 @@ struct Generator {
                 case plan(PlanRejection)
                 \(edgeFailures)
             }
+            \(routeNamespace)
             /// A prepared candidate or typed routing rejection.
             \(access)enum PreparationResult: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
                 case prepared(Prepared)
@@ -260,20 +325,21 @@ struct Generator {
             ticket = "completion.authority"
         }
         let call = "\(edge.failureType == nil ? "" : "try ")\(name).\(edge.name)(payload\(argument))"
-        let prepare = """
-            do {
-                let candidate = try _stateMachinePrepare(on: record, next: .\(edge.to)(change.next), effects: change.effects,
-                    from: \(index(edge.from)), to: \(index(edge.to)), invalidates: \(scopeIndices(edge.invalidates)),
-                    allowed: \(operationIndices(edge.starts)), requiring: \(ticket), claim: claim)
-                return Prepared(candidate)
-            } catch { throw .plan(error) }
-            """
+        let starts = edge.effectNamespace != nil
+        let result = starts ? "change" : "next"
+        let resultType = starts ? "Change<\(after), \(authoredEffect(edge))>" : after
         return """
             /// Prepares the declared edge with phase and operation authority preserved.
             \(access)func \(edge.name)(\(parameter)) throws(PreparationFailure<\(failure)>) -> Prepared where Phase == \(before) {
-                let change: Change<\(after), Effect>
-                \(edge.failureType == nil ? "change = \(call)" : "do { change = \(call) } catch { throw .domain(error) }")
-                \(prepare)
+                let \(result): \(resultType)
+                \(edge.failureType == nil ? "\(result) = \(call)" : "do { \(result) = \(call) } catch { throw .domain(error) }")
+                do {
+                    let candidate = try _stateMachinePrepare(on: record, next: .\(edge.to)(\(starts ? "change.next" : "next")),
+                        effects: \(starts ? "change.effects.map(\\.effect)" : "[]"),
+                        from: \(index(edge.from)), to: \(index(edge.to)), invalidates: \(scopeIndices(edge.invalidates)),
+                        requiring: \(ticket), claim: claim)
+                    return Prepared(candidate)
+                } catch { throw .plan(error) }
             }
             """
     }
@@ -288,11 +354,6 @@ struct Generator {
     func index(_ phase: String) -> Int { schema.phases.firstIndex { $0.caseName == phase }! }
     func scopeIndices(_ scopes: [String]) -> String {
         "[" + scopes.map { String(schema.scopes.firstIndex(of: $0)!) }.joined(separator: ", ") + "]"
-    }
-    func operationIndices(_ effects: [String]) -> String {
-        "["
-            + effects.map { effect in String(schema.operations.firstIndex { $0.effect == effect }!) }
-            .joined(separator: ", ") + "]"
     }
 
     func operations() -> String {
@@ -310,6 +371,7 @@ struct Generator {
                     \(access)func succeeded(_ value: \(op.name).Output) -> \(op.name)Completion {
                         .success(\(op.name)SuccessCompletion(value: value, authority: authority))
                     }
+                    \(["Void", "()"].contains(op.outputType) ? "/// Seals a successful terminal result that carries no value.\n\(access)func succeeded() -> \(op.name)Completion { succeeded(()) }" : "")
                     /// Seals a failed terminal result for this exact work.
                     \(access)func failed(_ value: \(op.name).Failure) -> \(op.name)Completion {
                         \(op.failureType == "Never" ? "" : ".failure(\(op.name)FailureCompletion(value: value, authority: authority))")
@@ -416,7 +478,6 @@ struct Generator {
                 return """
                     case .\(op.effect)(let input):
                         let _: \(op.name).Input = input
-                        guard allowed.contains(\(i)) else { throw .invalidPlan }
                         counts[\(i)] += 1
                         guard counts[\(i)] <= \(op.admission.maxNewIntents) else { throw .invalidPlan }
                         starts.append(.init(RuntimeOperation(kind: \(i), scope: RuntimeScopeID(kind: \(scope)),
@@ -465,7 +526,7 @@ struct Generator {
             fileprivate static var _stateMachineEligibility: [[Int]] { [\(eligibility)] }
             fileprivate static func _stateMachinePrepare(
                 on record: _StateMachineEngine.Snapshot, next: \(name), effects: [Effect], from: Int, to: Int,
-                invalidates: [Int], allowed: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
+                invalidates: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
             ) throws(PlanRejection) -> _StateMachineEngine.Candidate {
                 var edits: [_StateMachineEngine.ScopeEdit] = []
                 for (scope, phases) in _stateMachineEligibility.enumerated() {
@@ -492,26 +553,37 @@ struct Generator {
     }
 
     func dispatch(from: String, trigger: Schema.Trigger, source: String, payload: String?) -> String? {
-        if let route = schema.routes.first(where: {
-            $0.from == from && $0.trigger.kind == trigger.kind && $0.trigger.name == trigger.name
-        }) {
-            return "return \(name).\(route.name)(\(source)\(payload.map { ", " + $0 } ?? ""))"
+        func prepare(_ edge: Schema.Transition) -> String {
+            let call = "try \(source).\(edge.name)(\(payload ?? ""))"
+            let domain: String
+            if edge.failureType != nil {
+                domain = "case .domain(let error): return .rejected(.\(edge.name)(error))"
+            } else {
+                domain = "case .domain(let never): switch never {}"
+            }
+            return """
+                do { return .prepared(\(call)) }
+                catch { switch error { case .plan(let reason): return .rejected(.plan(reason)) \(domain) } }
+                """
         }
-        guard
-            let edge = schema.transitions.first(where: {
-                $0.from == from && $0.trigger.kind == trigger.kind && $0.trigger.name == trigger.name
-            })
-        else { return nil }
-        let call = "try \(source).\(edge.name)(\(payload ?? ""))"
-        let domain: String
-        if edge.failureType != nil {
-            domain = "case .domain(let error): return .rejected(.\(edge.name)(error))"
-        } else {
-            domain = "case .domain(let never): switch never {}"
+        let edges = schema.transitions.filter { $0.from == from && $0.trigger == trigger }
+        guard let route = schema.routes.first(where: { $0.from == from && $0.trigger == trigger }) else {
+            return edges.first.map(prepare)
         }
+        // A router sees plain values only; the sealed completion goes to the edge it selects.
+        let value = payload.map { trigger.kind == .input ? $0 : "\($0).value" }
+        let call = "\(name).\(route.name)(\(source).value\(value.map { ", " + $0 } ?? ""))"
+        guard let namespace = route.namespace else {
+            return "do { try \(call) } catch { return .rejected(.\(route.name)(error)) }"
+        }
+        let selection =
+            route.failureType == nil
+            ? "let selection: Route.\(namespace) = \(call)"
+            : "let selection: Route.\(namespace)\ndo { selection = try \(call) } catch { return .rejected(.\(route.name)(error)) }"
+        let cases = edges.map { "case .\($0.name): \(prepare($0))" }.joined(separator: "\n")
         return """
-            do { return .prepared(\(call)) }
-            catch { switch error { case .plan(let reason): return .rejected(.plan(reason)) \(domain) } }
+            \(selection)
+            switch selection { \(cases) }
             """
     }
 
@@ -598,6 +670,7 @@ struct Generator {
                 }
                 """)
             }
+            \(operationDeliveries(prefix: "mutating ", asynchronous: "", awaiting: ""))
             /// Claims one retained outcome before evaluating domain code.
             \(access)mutating func reconcile(id: PendingCompletionID) -> DeliveryResult {
                 switch ledger.claim(id, in: &engine) {
@@ -701,6 +774,7 @@ struct Generator {
                 }
                 /// Retains the first terminal outcome and validates current authority.
                 \(access)func deliver(_ completion: Completion)\(asynchronous) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(\(awaiting)host.deliver(completion))") }
+                \(operationDeliveries(prefix: "", asynchronous: asynchronous, awaiting: awaiting))
                 /// Reads immutable retained first-outcome diagnostics.
                 \(access)func pendingCompletions()\(asynchronous) -> [PendingCompletion] { \(awaiting)host.pendingCompletions() }
                 /// Explicitly claims a fresh preparation attempt for a retained outcome.
@@ -779,6 +853,7 @@ struct Generator {
                 \(access)func commit(_ prepared: consuming Prepared) -> CommitResult { _stateMachineAdmission(host.commit(prepared.candidate)) }
                 /// Retains and attempts delivery of the first typed terminal outcome.
                 \(access)func deliver(_ completion: Completion) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(host.deliver(completion))") }
+                \(operationDeliveries(prefix: "", asynchronous: "", awaiting: ""))
                 /// Returns immutable first-outcome diagnostics.
                 \(access)func pendingCompletions() -> [PendingCompletion] { host.pendingCompletions() }
                 /// Claims one fresh preparation for a retained outcome.
@@ -807,6 +882,20 @@ struct Generator {
                 }
             }
             """
+    }
+
+    /// One `deliver` overload per operation, so a sealed completion needs no schema-wide wrapping.
+    private func operationDeliveries(prefix: String, asynchronous: String, awaiting: String) -> String {
+        schema.operations
+            .map { op in
+                """
+                /// Delivers the sealed terminal result of one `\(op.name)` execution.
+                \(access)\(prefix)func deliver(_ completion: \(op.name)Completion)\(asynchronous) -> DeliveryResult {
+                    \(awaiting)deliver(.\(op.effect)(completion))
+                }
+                """
+            }
+            .joined(separator: "\n")
     }
 
     /// The initially active scope identifiers in declaration order.

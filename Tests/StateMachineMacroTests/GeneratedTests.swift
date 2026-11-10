@@ -9,10 +9,9 @@ nonisolated enum Counter: Sendable {
     @Initial case idle(Idle)
     case done(Done)
     enum Input: Sendable { case finish(Int) }
-    enum Effect: Sendable {}
     @Transition(on: Input.finish)
-    fileprivate static func finish(_ source: borrowing Idle, _ value: Int) -> Change<Done, Effect> {
-        Change(Done(value: value + source.value.count))
+    fileprivate static func finish(_ source: Idle, _ value: Int) -> Done {
+        Done(value: value + source.value.count)
     }
 }
 
@@ -42,8 +41,8 @@ nonisolated enum Counter: Sendable {
 
 @Test func generatedOwnedAdvancesWithNestedGenericPayload() {
     let owner = Counter.owned(Counter.Idle(value: ["a": [1, nil]]))
-    let change = owner.finish(8)
-    #expect(change.next.withValue { $0.value } == 9)
+    let done = owner.finish(8)
+    #expect(done.withValue { $0.value } == 9)
 }
 
 @StateMachine(mode: .isolated)
@@ -57,10 +56,9 @@ nonisolated enum IsolatedCounter {
     @Initial case idle(Idle)
     case done(Done)
     enum Input { case finish }
-    enum Effect {}
     @Transition(on: Input.finish)
-    fileprivate static func finish(_ source: borrowing Idle) -> Change<Done, Effect> {
-        Change(Done(text: source.text))
+    fileprivate static func finish(_ source: Idle) -> Done {
+        Done(text: source.text)
     }
 }
 
@@ -71,10 +69,9 @@ nonisolated enum UniqueCounter: ~Copyable {
     @Initial case idle(Idle)
     case done(Done)
     enum Input { case finish(Bool) }
-    enum Effect {}
     enum Rejection: Error { case declined }
     @Transition(on: Input.finish)
-    fileprivate static func finish(_ source: consuming Idle, _ accept: Bool) -> Advance<Idle, Done, Effect, Rejection> {
+    fileprivate static func finish(_ source: consuming Idle, _ accept: Bool) -> Advance<Idle, Done, Never, Rejection> {
         if accept { return .advanced(Done(value: source.value), effects: []) }
         return .rejected(.declined, source)
     }

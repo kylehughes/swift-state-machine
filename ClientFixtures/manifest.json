@@ -221,6 +221,26 @@
     "scope": "deterministic reserved Snapshot case diagnostic"
   },
   {
+    "id": "GMT-005-forbidden-effect",
+    "pattern": "has no member 'audit'",
+    "scope": "an edge's effect type holds only the operations in its starts list, so an undeclared effect is a type-checking error"
+  },
+  {
+    "id": "GMT-005-return-shape",
+    "pattern": "return Change<Loading, Effect.Begin>",
+    "scope": "an edge that starts operations cannot return a bare destination; the macro names the required result"
+  },
+  {
+    "id": "GMT-005-plain-edge-effect",
+    "pattern": "starts no operation",
+    "scope": "an edge without a starts list cannot return a Change carrying effects"
+  },
+  {
+    "id": "GMT-005-router-choice",
+    "pattern": "has no member 'begin'",
+    "scope": "a router's choice type holds only the edges sharing its source and trigger, so another trigger's edge is a type-checking error"
+  },
+  {
     "id": "GMT-002-reference",
     "pattern": "has no member 'finsh'",
     "scope": "schema metadata is a compiler-resolved reference; a misspelled case is a type-checking error at the attribute"

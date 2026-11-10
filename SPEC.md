@@ -519,9 +519,9 @@ This document defines the domain-facing surface and the schema-to-runtime bounda
 
 Generic schema parameters and constraints MAY be preserved if the compiler spike verifies the complete generated surface. If unsupported in the first release, that limitation MUST be documented; do not emit partially working generic schemas. Metadata for generic definitions MUST NOT depend on unsupported generic static stored properties.
 
-`MACRO-103`: Nested `Input` and `Effect` are closed enums. Input cases have zero or one unlabeled payload. Each Effect case has exactly one payload spelled `<Operation>.Input`; that spelling binds the case to exactly one operation namespace, and each operation is requested by exactly one case. The binding is carried by the payload rather than by an `@Operation` argument because an attribute on the namespace cannot reference an Effect case whose payload names that namespace without a circular reference. Empty enums represent no inputs/effects.
+`MACRO-103`: Nested `Input` is a closed enum whose cases have zero or one unlabeled payload; an empty enum represents no inputs. `Effect` is generated, never authored: it has exactly one case per `@Operation` namespace, carrying that namespace's `Input`, named by lower-casing the leading capital run of the namespace name (`Fetch` to `fetch`, `URLLoad` to `urlLoad`). A namespace whose case name would be a keyword, a duplicate, or a generated member name is rejected. For each edge with a nonempty `starts` list the macro also generates a nested `Effect.<Edge>` enum, named by capitalizing the edge function's name, containing exactly the cases of the started operations and a lowering to `Effect`.
 
-Schema metadata names declarations by reference. The accepted spellings are `Input.<case>` for an input trigger, `Scope.<case>` for a scope, and `<Type>.self` for a phase payload or an operation namespace. The compiler resolves each reference, so an undeclared name is a type-checking error at the attribute. Expansion reads the same spelling lexically, rejects a reference of the wrong kind, and lowers it to generated primitive tags. An edge's endpoints are not metadata: its source phase is the payload type of its source parameter (or of a router's `Observed<Source>`), and its destination phase is the payload type named by its `Change` or `Advance` result. These signature types MAY be qualified with `Self.` or the schema name. A trigger is exactly one of `on: Input.<case>`, `onSuccess: <Operation>.self`, or `onFailure: <Operation>.self`. String literals, implicit-member, qualified or computed references, arbitrary attribute expressions, and overloaded edge names are unsupported.
+Schema metadata names declarations by reference. The accepted spellings are `Input.<case>` for an input trigger, `Scope.<case>` for a scope, and `<Type>.self` for a phase payload or an operation namespace. The compiler resolves each reference, so an undeclared name is a type-checking error at the attribute. Expansion reads the same spelling lexically, rejects a reference of the wrong kind, and lowers it to generated primitive tags. An edge's endpoints are not metadata: its source phase is the payload type of its source parameter (a router names it the same way), and its destination phase is its result when that is a phase payload, or the payload type named by its `Change` or `Advance` result. These signature types MAY be qualified with `Self.` or the schema name. A trigger is exactly one of `on: Input.<case>`, `onSuccess: <Operation>.self`, or `onFailure: <Operation>.self`. String literals, implicit-member, qualified or computed references, arbitrary attribute expressions, and overloaded edge names are unsupported.
 
 The following example shows the required shape. Omitted bodies and payload fields are intentional specification placeholders.
 
@@ -546,9 +546,6 @@ nonisolated public enum ProfileFlow: Sendable {
         case authenticationChanged(AuthenticationChange)
     }
 
-    public enum Effect: Sendable {
-        case fetch(Fetch.Input)
-    }
 
     @Operation(scope: Scope.load, requires: [Scope.authentication], activeIn: [Loading.self], admission: .latest)
     public enum Fetch {
@@ -559,34 +556,34 @@ nonisolated public enum ProfileFlow: Sendable {
 
     @Transition(on: Input.load, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate nonisolated static func begin(
-        _ source: borrowing Idle, _ input: ProfileRequest
-    ) throws(LoadRejection) -> Change<Loading, Effect> { /* ... */ }
+        _ source: Idle, _ input: ProfileRequest
+    ) throws(LoadRejection) -> Change<Loading, Effect.Begin> { /* ... */ }
 
     @Transition(on: Input.cancel, invalidates: [Scope.load])
     fileprivate nonisolated static func cancel(
-        _ source: borrowing Loading
-    ) -> Change<Idle, Effect> { /* ... */ }
+        _ source: Loading
+    ) -> Idle { /* ... */ }
 
     @Transition(onSuccess: Fetch.self)
     fileprivate nonisolated static func received(
-        _ source: borrowing Loading, _ output: Fetch.Output
-    ) -> Change<Loaded, Effect> { /* ... */ }
+        _ source: Loading, _ output: Fetch.Output
+    ) -> Loaded { /* ... */ }
 
     @Transition(onFailure: Fetch.self)
     fileprivate nonisolated static func failed(
-        _ source: borrowing Loading, _ error: Fetch.Failure
-    ) -> Change<Failed, Effect> { /* ... */ }
+        _ source: Loading, _ error: Fetch.Failure
+    ) -> Failed { /* ... */ }
 
     @Transition(on: Input.authenticationChanged, invalidates: [Scope.authentication])
     fileprivate nonisolated static func authenticationChanged(
-        _ source: borrowing Loading, _ change: AuthenticationChange
-    ) -> Change<Loading, Effect> { /* update session-bearing root data */ }
+        _ source: Loading, _ change: AuthenticationChange
+    ) -> Loading { /* update session-bearing root data */ }
 }
 ```
 
 `MACRO-104`: `@Initial`, `@Transition`, `@Operation`, and `@Route` are metadata markers; the root macro generates supporting members beside the original declarations. In particular, generate `FetchWork` and `FetchCompletion` as members of `ProfileFlow`. Do not depend on rewriting the existing nested `Fetch` enum. Generated names MUST be deterministic, reserved, and diagnosed on collision.
 
-`MACRO-105`: In value modes, a transition is a synchronous static function with an explicitly borrowed source, an optional trigger payload, and `Change<Destination, Effect>` as its result. It MAY use typed throws. The support type has the following shape, with checked conditional Sendable conformance where its stored values permit:
+`MACRO-105`: In value modes, a transition is a synchronous static function with a source parameter that is unannotated or explicitly `borrowing`, and an optional trigger payload. An edge with no `starts` list returns its destination phase payload directly. An edge with a `starts` list returns `Change<Destination, Effect.<Edge>>`, so an effect for an operation outside that list cannot be written. The wrong result shape for the declared `starts` is rejected at expansion with the required shape named. It MAY use typed throws. The support type has the following shape, with checked conditional Sendable conformance where its stored values permit:
 
 ```swift
 public struct Change<Next, Intent> {
@@ -598,7 +595,7 @@ public struct Change<Next, Intent> {
 
 Change contains no executable callbacks. Async functions, untyped throws, inout source mutation, variadic parameters, and method-level generic edge signatures are unsupported in this grammar.
 
-Each edge has exactly one destination. Branching is expressed by explicit routers selecting several declared edges. Attribute `starts` is the set of operations whose effects the edge may emit, not a promise to emit them. Omission means no effects are allowed. `invalidates` lists declared scopes to revoke if the edge commits.
+Each edge has exactly one destination. Branching is expressed by explicit routers selecting several declared edges. Attribute `starts` is the set of operations whose effects the edge may emit, not a promise to emit them; it determines the cases of the edge's generated effect type. Omission means the edge returns a bare destination and can emit no effect. `invalidates` lists declared scopes to revoke if the edge commits.
 
 ### 3. Generated values and ownership
 
@@ -687,7 +684,7 @@ All user transition code, routing, validation, payload examination, and metadata
 
 ### 5. Operation capabilities
 
-`TYPE-105`: Each `@Operation` namespace declares exactly three explicit aliases: Input, Output, and Failure. Failure conforms to Error; `.shared` requires all three types to satisfy its checked isolation requirements. The effect case binds one-to-one to the operation. The namespace is metadata, not an executor.
+`TYPE-105`: Each `@Operation` namespace declares exactly three explicit aliases: Input, Output, and Failure. Failure conforms to Error; `.shared` requires all three types to satisfy its checked isolation requirements. Each operation has exactly one generated effect case (`MACRO-103`). The namespace is metadata, not an executor.
 
 `API-109`: For operation Fetch, generate the following sealed values:
 
@@ -736,7 +733,7 @@ Work and completion are intentionally Copyable and Sendable in shared mode. This
 
 The parallel limit bounds logical active authority, not physical concurrent tasks. A cancelled worker can stop counting in its policy group while still executing. Separately, global execution reservations count queued/running work, cancelled work that has not finished, and retained terminal results awaiting reconciliation. Revocation alone never frees a reservation. Release requires terminal disposition of both execution and retained delivery obligations; admission uses the prospective post-commit accounting defined by the runtime contract.
 
-`ROUTE-102`: Macro validation checks declared metadata, not possible function-body results. Generated preparation lowers the actual emitted array to concrete descriptors and primitive kind/count metadata outside the lock, rejecting permanent plan defects. Commit rechecks trusted plan metadata and validates actual kinds against `starts`, eligibility, multiplicity, policy, and available capacity/queue bounds. Failure publishes nothing and starts/cancels no work. Declaring `starts: ["fetch"]` does not prove a body emits only fetch or emits it once.
+`ROUTE-102`: The kinds an edge may emit are fixed by its generated effect type, so emitting an operation outside `starts` is a type-checking error rather than a plan defect. How many times a body emits each kind is not statically known. Generated preparation lowers the actual emitted array to concrete descriptors and primitive kind/count metadata outside the lock, rejecting permanent plan defects such as excess multiplicity. Commit rechecks trusted plan metadata and validates eligibility, multiplicity, policy, and available capacity/queue bounds. Failure publishes nothing and starts/cancels no work. Declaring `starts: [Fetch.self]` does not prove a body emits fetch exactly once.
 
 `ROUTE-103`: Leaving a scope's eligible phase set revokes its activation. Explicit `invalidates` revokes scopes even when the visible phase stays unchanged. Prospectively apply invalidations and terminal retirement before checking new admissions; publish the complete result only after every check succeeds. An emitted operation and all its required scopes must be eligible in the destination phase. Domain authors MUST declare semantic dependencies; the macro cannot infer them from arbitrary field mutations.
 
@@ -765,20 +762,20 @@ Cancellation invalidates admission before late results can commit. Physical canc
 
 `ROUTE-104`: Generate `prepare(_:on:) -> PreparationResult` for dynamic Input routing. A missing input/source edge returns an explicit invalid-phase rejection. It MUST NOT silently ignore the input. Direct methods expose typed PreparationFailure; dynamic dispatch preserves domain failures in a generated closed PreparationRejection enum with cases for throwing edges, plan failures, and structural routing failures.
 
-`ROUTE-105`: Exactly one edge for a `(source, trigger)` pair permits generated dispatch. Multiple edges require one explicit `@Route()` function. A router accepts the matching observed phase plus its typed input or sealed outcome and returns PreparationResult. For example:
+`ROUTE-105`: Exactly one edge for a `(source, trigger)` pair permits generated dispatch. Multiple edges require one explicit `@Route()` function. A router is a selector: it accepts the source phase payload plus the plain trigger payload (the input payload, or the operation's Output or Failure value) and returns the generated `Route.<Router>` enum, which has one case per edge sharing that source and trigger. Generated dispatch then calls the selected edge with the sealed outcome, so a router can neither prepare a transition itself nor select another trigger's edge. A router MAY use typed throws to decline; the failure becomes a `PreparationRejection` case named for the router. A router with no edge to choose returns `Never` and must throw. For example:
 
 ```swift
 @Route(onSuccess: Fetch.self)
 fileprivate nonisolated static func routeFetched(
-    _ source: Observed<Loading>,
-    _ completion: FetchSuccessCompletion
-) -> PreparationResult {
-    // Inspect completion.value and select a declared edge.
-    // Every selected completion method still requires completion.
+    _ source: Loading,
+    _ profile: Fetch.Output
+) throws(Unusable) -> Route.RouteFetched {
+    // Inspect the plain value and select a declared completion edge,
+    // or throw to leave the retained outcome for reconciliation.
 }
 ```
 
-Routes are synchronous, effect-free trusted domain functions. They cannot authorize a transition by returning a plain model. Every operation outcome/source combination in `activeIn` MUST have an unambiguous route, except an explicitly declared `Failure = Never` case. Routers may explicitly reject an otherwise well-typed outcome.
+Routes are synchronous, effect-free trusted domain functions. They cannot authorize a transition: they return only a choice among declared edges. Every operation outcome/source combination in `activeIn` MUST have an unambiguous route, except an explicitly declared `Failure = Never` case. Routers may explicitly reject an otherwise well-typed outcome.
 
 `ROUTE-106`: Terminal delivery prepares against a current snapshot and commits with full root-revision validation plus operation authority. MainActor/actor owners normally perform preparation and commit in one isolated turn without an intervening await. Shared owners may encounter intervening commits.
 
@@ -849,15 +846,15 @@ public enum Advance<Before: ~Copyable, After: ~Copyable, Intent, Failure: Error>
 
 For value graphs, the generated owned method borrows its payload while invoking the authored preparation function. On success it consumes/replaces the predecessor and returns the successor plus inert intents. On typed validation failure it returns the original Owned predecessor. An infallible edge uses a compiler-verified Never-failure specialization or equivalent success-only envelope.
 
-For owned-only graphs, the authored function itself consumes the payload and returns `Advance<Source, Destination, Effect, Failure>`. The generated wrapper lifts the two payload alternatives into Owned wrappers. A throwing consuming function that loses the predecessor is not an acceptable substitute. Owned paths do not run hosted admission-plan validation after losing Source. Their inert-intent validation is an explicit caller/trusted-domain responsibility; no newly added wrapper failure may discard the recoverable predecessor.
+For owned-only graphs, the authored function itself consumes the payload. An infallible edge returns the destination payload, or `Change<Destination, Effect.<Edge>>` when it starts operations; a fallible edge returns `Advance<Source, Destination, Effect, Failure>`, whose effect argument is `Never` or `Effect.<Edge>`. The generated wrapper lifts the two payload alternatives into Owned wrappers. A throwing consuming function that loses the predecessor is not an acceptable substitute. Owned paths do not run hosted admission-plan validation after losing Source. Their inert-intent validation is an explicit caller/trusted-domain responsibility; no newly added wrapper failure may discard the recoverable predecessor.
 
 Owned completion-shaped edges MAY take ordinary output values: the caller owns that workflow. They do not claim the hosted operation-provenance guarantee. Owned effects remain inert descriptions for explicit caller execution; they do not mint hosted Work authority. Ownership is affine: dropping a value is permitted and does not prove an external operation ran.
 
 ### 10. Diagnostics and acceptance obligations
 
-`MACRO-106`: Reject unsupported reference spellings, references of the wrong kind, duplicate/reserved names, unsupported placements/signatures, a missing or repeated initial marker, source or destination types that are not phase payloads, aliased/reused phase types, wrong payload arity, effect cases that request no operation, undeclared scopes, malformed admission limits, ambiguous routes, and mode-incompatible host requests. Diagnose declared starts that are ineligible in the destination phase. Report the offending declaration and corrective requirement.
+`MACRO-106`: Reject unsupported reference spellings, references of the wrong kind, duplicate/reserved names, unsupported placements/signatures, a missing or repeated initial marker, source or destination types that are not phase payloads, aliased/reused phase types, wrong payload arity, a hand-written `Effect`, operation names that generate an unusable effect case, a result shape that disagrees with `starts`, a router result that is not its generated choice type, undeclared scopes, malformed admission limits, ambiguous routes, and mode-incompatible host requests. Diagnose declared starts that are ineligible in the destination phase. Report the offending declaration and corrective requirement.
 
-`MACRO-107`: Emit compiler witnesses for source/input/destination types, Change effect types, operation aliases, router signatures, ownership, isolation, Copyable, and Sendable requirements. SwiftSyntax text inspection MUST NOT pretend to resolve arbitrary semantic type equality or inspect imported implementations. Diagnostics and witnesses complement each other.
+`MACRO-107`: Emit compiler witnesses for source/input/destination types, per-edge result and effect types, operation aliases, router signatures, ownership, isolation, Copyable, and Sendable requirements. SwiftSyntax text inspection MUST NOT pretend to resolve arbitrary semantic type equality or inspect imported implementations. Diagnostics and witnesses complement each other.
 
 `MACRO-108`: Terminal phases and unused edges are legal. Unreachable-from-initial phases receive at most an opt-in warning because restoration may enter them. Malformed references and type violations remain errors. Publish a measured supported graph-size range; include a representative 128-phase/512-edge expansion/compiler stress fixture. Do not invent a compiler limit or an unsupported build-time performance target.
 

@@ -22,11 +22,9 @@ nonisolated public enum Counter: Sendable {
     case done(Done)
     /// Closed dynamic inputs.
     public enum Input: Sendable { case finish(Int) }
-    /// No managed operations are declared in this graph.
-    public enum Effect: Sendable {}
     /// Computes the declared successor synchronously from a borrowed predecessor.
     @Transition(on: Input.finish)
-    fileprivate static func finish(_ source: borrowing Idle, _ value: Int) -> Change<Done, Effect> {
-        Change(Done(value + source.value.count))
+    fileprivate static func finish(_ source: Idle, _ value: Int) -> Done {
+        Done(value + source.value.count)
     }
 }

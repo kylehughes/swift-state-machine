@@ -7,10 +7,7 @@ fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {
 fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {
 }
 
-fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {
-}
-
-fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {
+fileprivate struct _RouterSourceIsPhasePayload<Value: ~Copyable> {
 }
 
 fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {
@@ -24,18 +21,33 @@ fileprivate struct _EffectIsCopyable<Value> {
 
 fileprivate static func _stateMachineWitnesses() {
     let _: _TransitionSourceIsPhasePayload<Draft> = _TransitionSourceIsPhasePayload<Draft>()
-    let _: _TransitionReturnsDeclaredResult<Change<Saving, Effect>> = _TransitionReturnsDeclaredResult<Change<Saving, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Change<Saving, Effect.Save>> = _TransitionReturnsDeclaredResult<Change<Saving, Effect.Save>>()
     let _: _TransitionSourceIsPhasePayload<Draft> = _TransitionSourceIsPhasePayload<Draft>()
-    let _: _TransitionReturnsDeclaredResult<Change<Draft, Effect>> = _TransitionReturnsDeclaredResult<Change<Draft, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Draft> = _TransitionReturnsDeclaredResult<Draft>()
     let _: _TriggerPayloadMatchesDeclaration<String> = _TriggerPayloadMatchesDeclaration<String>()
     let _: _TransitionSourceIsPhasePayload<Saving> = _TransitionSourceIsPhasePayload<Saving>()
-    let _: _TransitionReturnsDeclaredResult<Change<Draft, Effect>> = _TransitionReturnsDeclaredResult<Change<Draft, Effect>>()
+    let _: _TransitionReturnsDeclaredResult<Draft> = _TransitionReturnsDeclaredResult<Draft>()
     let _: _TriggerPayloadMatchesDeclaration<Save.Output> = _TriggerPayloadMatchesDeclaration<Save.Output>()
-    let _: _EffectPayloadIsOperationInput<Save.Input> = _EffectPayloadIsOperationInput<Save.Input>();
     let _ = _OperationFailureIsError<Save.Failure>()
 
     let _ = _EffectIsCopyable<Effect>()
 
+}
+
+/// Inert descriptions of the operations this workflow can start.
+internal enum Effect: ~Sendable {
+    case save(Note.Save.Input)
+    /// The operations `save` may start.
+internal enum Save: ~Sendable {
+    case save(Note.Save.Input)
+    /// The schema-wide effect this value describes.
+    internal var effect: Note.Effect {
+        switch self {
+        case .save(let input):
+            return .save(input)
+        }
+    }
+    }
 }
 
 /// Unique authority over one declared workflow phase.
@@ -51,17 +63,16 @@ internal struct Owned<Phase: ~Copyable>: ~Copyable {
     /// Advances through the authored edge, preserving effect order.
 internal consuming func save() -> Change<Owned<Saving>, Effect> where Phase == Draft {
     let change = Note.save(phase)
-    return Change(Owned<Saving>(change.next), effects: change.effects)
+    let effects = change.effects.map(\.effect)
+    return Change(Owned<Saving>(change.next), effects: effects)
     }
-    /// Advances through the authored edge, preserving effect order.
-    internal consuming func edit(_ input: String) -> Change<Owned<Draft>, Effect> where Phase == Draft {
-        let change = Note.edit(phase, input)
-        return Change(Owned<Draft>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    internal consuming func edit(_ input: String) -> Owned<Draft> where Phase == Draft {
+        Owned<Draft>(Note.edit(phase, input))
     }
-    /// Advances through the authored edge, preserving effect order.
-    internal consuming func saved(_ input: Save.Output) -> Change<Owned<Draft>, Effect> where Phase == Saving {
-        let change = Note.saved(phase, input)
-        return Change(Owned<Draft>(change.next), effects: change.effects)
+    /// Advances through the authored edge, which starts no operation.
+    internal consuming func saved(_ input: Save.Output) -> Owned<Draft> where Phase == Saving {
+        Owned<Draft>(Note.saved(phase, input))
     }
 }
 
@@ -96,40 +107,43 @@ internal struct Observed<Phase> {
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 internal func save() throws(PreparationFailure<Never>) -> Prepared where Phase == Draft {
-    let change: Change<Saving, Effect>
+    let change: Change<Saving, Effect.Save>
     change = Note.save(payload)
     do {
-    let candidate = try _stateMachinePrepare(on: record, next: .saving(change.next), effects: change.effects,
-        from: 0, to: 1, invalidates: [],
-        allowed: [0], requiring: nil, claim: claim)
-    return Prepared(candidate)
+        let candidate = try _stateMachinePrepare(on: record, next: .saving(change.next),
+            effects: change.effects.map(\.effect),
+            from: 0, to: 1, invalidates: [],
+            requiring: nil, claim: claim)
+        return Prepared(candidate)
     } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     internal func edit(_ input: String) throws(PreparationFailure<Never>) -> Prepared where Phase == Draft {
-        let change: Change<Draft, Effect>
-        change = Note.edit(payload, input)
+        let next: Draft
+        next = Note.edit(payload, input)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .draft(change.next), effects: change.effects,
-            from: 0, to: 0, invalidates: [],
-            allowed: [], requiring: nil, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .draft(next),
+                effects: [],
+                from: 0, to: 0, invalidates: [],
+                requiring: nil, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
     /// Prepares the declared edge with phase and operation authority preserved.
     internal func saved(_ completion: SaveSuccessCompletion) throws(PreparationFailure<Never>) -> Prepared where Phase == Saving {
-        let change: Change<Draft, Effect>
-        change = Note.saved(payload, completion.value)
+        let next: Draft
+        next = Note.saved(payload, completion.value)
         do {
-        let candidate = try _stateMachinePrepare(on: record, next: .draft(change.next), effects: change.effects,
-            from: 1, to: 0, invalidates: [],
-            allowed: [], requiring: completion.authority, claim: claim)
-        return Prepared(candidate)
-    } catch {
+            let candidate = try _stateMachinePrepare(on: record, next: .draft(next),
+                effects: [],
+                from: 1, to: 0, invalidates: [],
+                requiring: completion.authority, claim: claim)
+            return Prepared(candidate)
+        } catch {
         throw .plan(error)
     }
     }
@@ -234,6 +248,7 @@ internal struct SaveWork {
     internal func succeeded(_ value: Save.Output) -> SaveCompletion {
         .success(SaveSuccessCompletion(value: value, authority: authority))
     }
+
     /// Seals a failed terminal result for this exact work.
     internal func failed(_ value: Save.Failure) -> SaveCompletion {
 
@@ -338,7 +353,7 @@ fileprivate static var _stateMachineEligibility: [[Int]] {
 
 fileprivate static func _stateMachinePrepare(
     on record: _StateMachineEngine.Snapshot, next: Note, effects: [Effect], from: Int, to: Int,
-    invalidates: [Int], allowed: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
+    invalidates: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
 ) throws(PlanRejection) -> _StateMachineEngine.Candidate {
     var edits: [_StateMachineEngine.ScopeEdit] = []
     for (scope, phases) in _stateMachineEligibility.enumerated() {
@@ -357,9 +372,6 @@ fileprivate static func _stateMachinePrepare(
         switch effect {
         case .save(let input):
             let _: Save.Input = input
-            guard allowed.contains(0) else {
-                throw .invalidPlan
-            }
             counts[0] += 1
             guard counts[0] <= 1 else {
                 throw .invalidPlan
@@ -541,6 +553,10 @@ internal struct Local: ~Copyable {
             return reconcile(id: id)
         }
     }
+    /// Delivers the sealed terminal result of one `Save` execution.
+internal mutating func deliver(_ completion: SaveCompletion) -> DeliveryResult {
+    deliver(.save(completion))
+    }
     /// Claims one retained outcome before evaluating domain code.
     internal mutating func reconcile(id: PendingCompletionID) -> DeliveryResult {
         switch ledger.claim(id, in: &engine) {
@@ -657,6 +673,10 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
     /// Retains the first terminal outcome and validates current authority.
     internal func deliver(_ completion: Completion) -> DeliveryResult {
         return Self.project(host.deliver(completion))
+    }
+    /// Delivers the sealed terminal result of one `Save` execution.
+internal func deliver(_ completion: SaveCompletion) -> DeliveryResult {
+    deliver(.save(completion))
     }
     /// Reads immutable retained first-outcome diagnostics.
     internal func pendingCompletions() -> [PendingCompletion] {

@@ -494,6 +494,54 @@ import Testing
 }
 
 extension RuntimeDeliveryLedgerTests {
+    /// Generated routers can only select an edge of the delivered operation, so the ledger is the
+    /// one place that still has to refuse a substituted candidate.
+    @Test func terminalCandidateCannotSubstituteAnInputPlanOrAnotherOperation() throws {
+        var core = try engine()
+        var ledger = Ledger()
+        let works = try start(&core, kinds: [1, 2])
+        let fetch = try #require(works.first)
+        let audit = try #require(works.last)
+        let id = try retain(101, ticket: fetch.ticket, ledger: &ledger, core: &core)
+        let inputAttempt = try claim(id, ledger: &ledger, core: &core)
+        let inputPlan = try Core.prepare(
+            on: inputAttempt.snapshot,
+            next: 50,
+            plan: .init(finishingClaims: [inputAttempt.claim])
+        )
+        guard
+            case .pending(id, .reconciliationRequired) = ledger.finish(
+                inputAttempt,
+                preparation: .success(inputPlan),
+                in: &core
+            )
+        else { throw TestFailure.admission }
+        #expect(ledger.pending.first?.lastRejection == .preparation(.plan(.invalidPlan)))
+        let otherAttempt = try claim(id, ledger: &ledger, core: &core)
+        let otherPlan = try Core.prepare(
+            on: otherAttempt.snapshot,
+            next: 51,
+            requiring: [audit.ticket],
+            plan: .init(retire: [audit.ticket], finishingClaims: [otherAttempt.claim])
+        )
+        guard
+            case .pending(id, .reconciliationRequired) = ledger.finish(
+                otherAttempt,
+                preparation: .success(otherPlan),
+                in: &core
+            )
+        else { throw TestFailure.admission }
+        let pending = try #require(ledger.pending.first)
+        #expect(pending.lastRejection == .preparation(.plan(.invalidPlan)))
+        #expect(pending.attempts == 2)
+        #expect(pending.outcome == 101)
+        // Neither rejected candidate changed the root or consumed the other operation's authority.
+        #expect(core.snapshot.model == 1)
+        #expect(core.isActive(fetch.ticket))
+        #expect(core.isActive(audit.ticket))
+        #expect(core.drain(limit: 10).isEmpty)
+    }
+
     @Test(arguments: [false, true])
     func terminalCandidateMustRequireAndRetireItsOwnClaimedTicket(missingRequirement: Bool) throws {
         var core = try engine()

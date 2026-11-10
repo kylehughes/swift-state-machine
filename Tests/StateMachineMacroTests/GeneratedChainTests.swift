@@ -15,10 +15,6 @@ nonisolated private enum ChainFlow: Sendable {
     case done(Done)
     enum Scope { case first, second }
     enum Input: Sendable { case begin }
-    enum Effect: Sendable {
-        case firstOperation(FirstOperation.Input)
-        case secondOperation(SecondOperation.Input)
-    }
     @Operation(scope: Scope.first, activeIn: [First.self], admission: .latest)
     enum FirstOperation {
         typealias Input = Int
@@ -32,22 +28,22 @@ nonisolated private enum ChainFlow: Sendable {
         typealias Failure = Never
     }
     @Transition(on: Input.begin, starts: [FirstOperation.self])
-    fileprivate static func begin(_ source: borrowing Idle) -> Change<First, Effect> {
+    fileprivate static func begin(_ source: Idle) -> Change<First, Effect.Begin> {
         Change(First(value: source.value), effects: [.firstOperation(source.value)])
     }
     @Transition(onSuccess: FirstOperation.self, starts: [SecondOperation.self])
     fileprivate static func firstReceived(
-        _ source: borrowing First,
+        _ source: First,
         _ value: FirstOperation.Output
-    ) -> Change<Second, Effect> {
+    ) -> Change<Second, Effect.FirstReceived> {
         Change(Second(value: value), effects: [.secondOperation(value)])
     }
     @Transition(onSuccess: SecondOperation.self)
     fileprivate static func secondReceived(
-        _ source: borrowing Second,
+        _ source: Second,
         _ value: SecondOperation.Output
-    ) -> Change<Done, Effect> {
-        Change(Done(value: value))
+    ) -> Done {
+        Done(value: value)
     }
 }
 
