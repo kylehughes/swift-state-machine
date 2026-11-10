@@ -15,9 +15,43 @@ struct Schema {
         let payloadType: String?
     }
 
+    enum Mode: String {
+        case shared
+        case isolated
+        case ownedOnly
+    }
+
+    enum Access: String {
+        case `public`
+        case package
+        case `internal`
+        case `fileprivate`
+        case `private`
+    }
+
     struct Trigger: Hashable {
-        let kind: String
+        enum Kind: String, Hashable {
+            case input
+            case success
+            case failure
+        }
+
+        let kind: Kind
         let name: String
+    }
+
+    enum Admission: Equatable {
+        case latest
+        case rejectWhenActive
+        case parallel(limit: Int)
+
+        /// The most starts of one operation that a single plan may contain.
+        var maxNewIntents: Int {
+            switch self {
+            case .latest, .rejectWhenActive: 1
+            case .parallel(let limit): limit
+            }
+        }
     }
 
     struct Operation {
@@ -26,8 +60,7 @@ struct Schema {
         let scope: String
         let requires: [String]
         let activeIn: [String]
-        let admission: String
-        let maxNewIntents: Int
+        let admission: Admission
         let inputType: String
         let outputType: String
         let failureType: String
@@ -55,8 +88,8 @@ struct Schema {
     }
 
     let name: String
-    let access: String
-    let mode: String
+    let access: Access
+    let mode: Mode
     let initial: String
     let scopes: [String]
     let phases: [Phase]
@@ -211,19 +244,19 @@ private struct SchemaParser {
             guard inputs.contains(where: { $0.caseName == name }) else {
                 try reject(expression, "'\(name)' is not a declared Input case.")
             }
-            return Schema.Trigger(kind: "input", name: name)
+            return Schema.Trigger(kind: .input, name: name)
         }
         let name = try typeReference(expression)
         guard let operation = operations.first(where: { $0.name == name }) else {
             try reject(expression, "'\(name)' is not a declared @Operation namespace.")
         }
-        return Schema.Trigger(kind: label == "onSuccess" ? "success" : "failure", name: operation.effect)
+        return Schema.Trigger(kind: label == "onSuccess" ? .success : .failure, name: operation.effect)
     }
 
     private func describe(_ trigger: Schema.Trigger, operations: [Schema.Operation]) -> String {
-        guard trigger.kind != "input" else { return "on: Input.\(trigger.name)" }
+        guard trigger.kind != .input else { return "on: Input.\(trigger.name)" }
         let name = operations.first { $0.effect == trigger.name }?.name ?? trigger.name
-        return "\(trigger.kind == "success" ? "onSuccess" : "onFailure"): \(name).self"
+        return "\(trigger.kind == .success ? "onSuccess" : "onFailure"): \(name).self"
     }
 
     private func marker(_ attributes: AttributeListSyntax, named name: String) throws -> AttributeSyntax? {
@@ -276,7 +309,7 @@ private struct SchemaParser {
         return result
     }
 
-    private func admission(_ expression: ExprSyntax) throws -> (expression: String, maxNewIntents: Int) {
+    private func admission(_ expression: ExprSyntax) throws -> Schema.Admission {
         if let call = expression.as(FunctionCallExprSyntax.self) {
             guard try member(call.calledExpression) == "parallel", call.arguments.count == 1,
                 let argument = call.arguments.first, argument.label?.text == "limit",
@@ -286,13 +319,13 @@ private struct SchemaParser {
             else {
                 try reject(expression, "Use .parallel(limit: N) with a positive decimal integer representable as Int.")
             }
-            return (".parallel(limit: \(limit))", limit)
+            return .parallel(limit: limit)
         }
-        let name = try member(expression)
-        guard ["latest", "rejectWhenActive"].contains(name) else {
-            try reject(expression, "Admission must be .latest, .rejectWhenActive, or .parallel(limit: N).")
+        switch try member(expression) {
+        case "latest": return .latest
+        case "rejectWhenActive": return .rejectWhenActive
+        default: try reject(expression, "Admission must be .latest, .rejectWhenActive, or .parallel(limit: N).")
         }
-        return (".\(name)", 1)
     }
 
     private func validateFunction(_ function: FunctionDeclSyntax, route: Bool) throws {
@@ -328,8 +361,7 @@ private struct SchemaParser {
             try reject(declaration, "Use an unescaped Swift schema identifier.")
         }
         let root = try arguments(attribute, required: ["mode"])
-        let mode = try member(root["mode"]!)
-        guard ["shared", "isolated", "ownedOnly"].contains(mode) else {
+        guard let mode = Schema.Mode(rawValue: try member(root["mode"]!)) else {
             try reject(attribute, "Mode must be .shared, .isolated, or .ownedOnly.")
         }
         let members = declaration.memberBlock.members
@@ -484,8 +516,7 @@ private struct SchemaParser {
                     scope: scope,
                     requires: dependencies,
                     activeIn: activeIn,
-                    admission: policy.expression,
-                    maxNewIntents: policy.maxNewIntents,
+                    admission: policy,
                     inputType: types["Input"]!,
                     outputType: types["Output"]!,
                     failureType: types["Failure"]!
@@ -523,7 +554,7 @@ private struct SchemaParser {
                 try reject(function, "Use an unescaped Swift transition or router identifier.")
             }
             let isRoute = routeAttribute != nil
-            if isRoute && mode == "ownedOnly" {
+            if isRoute && mode == .ownedOnly {
                 try reject(
                     attribute,
                     "@Route requires hosted observations and is unavailable in .ownedOnly; select consuming edges in the caller."
@@ -551,14 +582,14 @@ private struct SchemaParser {
             let input = inputs.first { $0.caseName == on.name }
             let operation = operations.first { $0.effect == on.name }
             let parameters = Array(function.signature.parameterClause.parameters)
-            let needsPayload = on.kind != "input" || input?.payloadType != nil
+            let needsPayload = on.kind != .input || input?.payloadType != nil
             guard parameters.count == (needsPayload ? 2 : 1) else {
                 try reject(
                     function,
                     "This trigger requires \(needsPayload ? "source and trigger payload parameters" : "only a source parameter")."
                 )
             }
-            let expectedOwnership = mode == "ownedOnly" ? "consuming" : "borrowing"
+            let expectedOwnership = mode == .ownedOnly ? "consuming" : "borrowing"
             let sourceType: String
             var authoredSource = parameters[0].type.trimmedDescription
             if isRoute {
@@ -593,7 +624,7 @@ private struct SchemaParser {
                     "Source '\(sourceType)' is not a phase payload type declared in this schema."
                 )
             }
-            if on.kind != "input", let operation, !operation.activeIn.contains(from) {
+            if on.kind != .input, let operation, !operation.activeIn.contains(from) {
                 try reject(attribute, "Completion edges must start in an operation's activeIn phase.")
             }
             if isRoute {
@@ -610,7 +641,7 @@ private struct SchemaParser {
             }
             var failureType = function.signature.effectSpecifiers?.throwsClause?.type?.trimmedDescription
             let destinationType: String
-            if mode == "ownedOnly" {
+            if mode == .ownedOnly {
                 guard function.signature.effectSpecifiers?.throwsClause == nil,
                     let result = function.signature.returnClause?.type.as(IdentifierTypeSyntax.self),
                     result.name.text == "Advance",
@@ -711,7 +742,7 @@ private struct SchemaParser {
                 "The schema name is reserved or shadowed by a direct member; choose a distinct domain name."
             )
         }
-        if mode != "ownedOnly",
+        if mode != .ownedOnly,
             let phase = phases.first(where: { ["record", "model", "ordinal", "isClosed"].contains($0.caseName) })
         {
             try reject(
@@ -740,7 +771,8 @@ private struct SchemaParser {
         }
         for operation in operations {
             for phase in operation.activeIn {
-                for kind in ["success", "failure"] where kind != "failure" || operation.failureType != "Never" {
+                for kind in [Schema.Trigger.Kind.success, .failure]
+                where kind != .failure || operation.failureType != "Never" {
                     let on = Schema.Trigger(kind: kind, name: operation.effect)
                     guard
                         transitions.contains(where: { $0.from == phase && $0.trigger == on })
@@ -748,17 +780,13 @@ private struct SchemaParser {
                     else {
                         try reject(
                             declaration,
-                            "Operation '\(operation.name)' needs a \(kind) edge or router in active phase case '\(phase)'."
+                            "Operation '\(operation.name)' needs a \(kind.rawValue) edge or router in active phase case '\(phase)'."
                         )
                     }
                 }
             }
         }
-        let access =
-            declaration.modifiers.first {
-                ["public", "package", "internal", "fileprivate", "private"].contains($0.name.text)
-            }?
-            .name.text ?? "internal"
+        let access = declaration.modifiers.lazy.compactMap { Schema.Access(rawValue: $0.name.text) }.first ?? .internal
         return Schema(
             name: declaration.name.text,
             access: access,

@@ -7,19 +7,19 @@ struct Generator {
     let schema: Schema
     var name: String { schema.name }
     var access: String {
-        let declared = schema.access == "private" ? "fileprivate" : schema.access
-        return declared.isEmpty ? "" : declared + " "
+        let declared = schema.access == .private ? Schema.Access.fileprivate : schema.access
+        return declared.rawValue + " "
     }
-    var sendable: String { schema.mode == "shared" ? ": Sendable" : "" }
+    var sendable: String { schema.mode == .shared ? ": Sendable" : "" }
     var initialType: String { schema.phases.first { $0.caseName == schema.initial }!.typeName }
     var engine: String { "RuntimeState<\(name), Effect>" }
     func declaration(_ source: String) -> DeclSyntax { DeclSyntax(stringLiteral: source) }
 
     func members() throws -> [DeclSyntax] {
         var result = [witnesses(), owned()]
-        if schema.mode != "ownedOnly" {
+        if schema.mode != .ownedOnly {
             result += [values(), operations(), preparation(), local(), managed(mainActor: true)]
-            if schema.mode == "shared" { result += [shared(), managed(mainActor: false)] }
+            if schema.mode == .shared { result += [shared(), managed(mainActor: false)] }
         }
         return result.flatMap { source in
             Parser.parse(source: source).statements.compactMap { $0.item.as(DeclSyntax.self) }
@@ -31,7 +31,7 @@ struct Generator {
             .map { edge in
                 let before = phase(edge.from)
                 let result: String
-                if schema.mode == "ownedOnly" {
+                if schema.mode == .ownedOnly {
                     result = "Advance<\(before), \(phase(edge.to)), Effect, \(edge.failureType ?? "Never")>"
                 } else {
                     result = "Change<\(phase(edge.to)), Effect>"
@@ -42,11 +42,11 @@ struct Generator {
                 ]
                 if let payload = edge.payloadType {
                     let expected: String
-                    if edge.trigger.kind == "input" {
+                    if edge.trigger.kind == .input {
                         expected = schema.inputs.first { $0.caseName == edge.trigger.name }!.payloadType!
                     } else {
                         expected =
-                            "\(operation(edge.trigger.name).name).\(edge.trigger.kind == "success" ? "Output" : "Failure")"
+                            "\(operation(edge.trigger.name).name).\(edge.trigger.kind == .success ? "Output" : "Failure")"
                     }
                     lines.append("let _: _AtomicTypeWitness<\(expected)> = _AtomicTypeWitness<\(payload)>()")
                 }
@@ -67,11 +67,11 @@ struct Generator {
                 ]
                 if let payload = route.payloadType {
                     let expected: String
-                    if route.trigger.kind == "input" {
+                    if route.trigger.kind == .input {
                         expected = schema.inputs.first { $0.caseName == route.trigger.name }!.payloadType!
                     } else {
                         expected =
-                            "\(operation(route.trigger.name).name)\(route.trigger.kind == "success" ? "Success" : "Failure")Completion"
+                            "\(operation(route.trigger.name).name)\(route.trigger.kind == .success ? "Success" : "Failure")Completion"
                     }
                     lines.append("let _: _AtomicTypeWitness<\(expected)> = _AtomicTypeWitness<\(payload)>()")
                 }
@@ -88,7 +88,7 @@ struct Generator {
                 \(operationWitnesses)
                 \(routeWitnesses)
                 let _ = _AtomicCopyableWitness<Effect>()
-                \(schema.mode == "shared" ? "let _ = _AtomicSendableWitness<Input>(); let _ = _AtomicSendableWitness<Effect>()" : "")
+                \(schema.mode == .shared ? "let _ = _AtomicSendableWitness<Input>(); let _ = _AtomicSendableWitness<Effect>()" : "")
             }
             """
     }
@@ -101,7 +101,7 @@ struct Generator {
                 let payload = edge.payloadType.map { "_ input: \($0)" } ?? ""
                 let argument = edge.payloadType == nil ? "" : ", input"
                 let failure = edge.failureType ?? "Never"
-                if schema.mode == "ownedOnly" {
+                if schema.mode == .ownedOnly {
                     return """
                         /// Consumes the predecessor and preserves it on authored rejection.
                         \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, Effect, \(failure)> where Phase == \(before) {
@@ -134,7 +134,7 @@ struct Generator {
             .joined(separator: "\n")
         return """
             /// Unique authority over one declared workflow phase.
-            \(access)struct Owned<Phase: ~Copyable\(schema.mode == "shared" ? " & Sendable" : "")>: ~Copyable\(schema.mode == "shared" ? ", Sendable" : "") {
+            \(access)struct Owned<Phase: ~Copyable\(schema.mode == .shared ? " & Sendable" : "")>: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
                 fileprivate let phase: Phase
                 fileprivate init(_ phase: consuming Phase) { self.phase = phase }
                 /// Borrows the payload without copying a unique resource.
@@ -147,7 +147,7 @@ struct Generator {
     }
 
     func values() -> String {
-        let bound = schema.mode == "shared" ? ": Sendable" : ""
+        let bound = schema.mode == .shared ? ": Sendable" : ""
         let cases = schema.phases.map { "case \($0.caseName)(Observed<\($0.typeName)>)" }.joined(separator: "\n")
         let recordCases = schema.phases.map { "case .\($0.caseName)(let value): return value.record" }
             .joined(separator: "\n")
@@ -193,7 +193,7 @@ struct Generator {
                 switch record.model { \(observationCases) }
             }
             /// A sealed inert candidate consumed by admission.
-            \(access)struct Prepared: ~Copyable\(schema.mode == "shared" ? ", Sendable" : "") {
+            \(access)struct Prepared: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
                 fileprivate let candidate: _AtomicEngine.Candidate
                 fileprivate init(_ candidate: _AtomicEngine.Candidate) { self.candidate = candidate }
             }
@@ -206,7 +206,7 @@ struct Generator {
                 \(edgeFailures)
             }
             /// A prepared candidate or typed routing rejection.
-            \(access)enum PreparationResult: ~Copyable\(schema.mode == "shared" ? ", Sendable" : "") {
+            \(access)enum PreparationResult: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
                 case prepared(Prepared)
                 case rejected(PreparationRejection)
             }
@@ -241,13 +241,13 @@ struct Generator {
         let argument: String
         let parameter: String
         let ticket: String
-        if edge.trigger.kind == "input" {
+        if edge.trigger.kind == .input {
             parameter = edge.payloadType.map { "_ input: \($0)" } ?? ""
             argument = edge.payloadType == nil ? "" : ", input"
             ticket = "nil"
         } else {
             let op = operation(edge.trigger.name)
-            parameter = "_ completion: \(op.name)\(edge.trigger.kind == "success" ? "Success" : "Failure")Completion"
+            parameter = "_ completion: \(op.name)\(edge.trigger.kind == .success ? "Success" : "Failure")Completion"
             argument = ", completion.value"
             ticket = "completion.authority"
         }
@@ -268,6 +268,14 @@ struct Generator {
                 \(prepare)
             }
             """
+    }
+    /// The runtime admission policy expression for a declared admission.
+    func policy(_ admission: Schema.Admission) -> String {
+        switch admission {
+        case .latest: ".latest"
+        case .rejectWhenActive: ".rejectWhenActive"
+        case .parallel(let limit): ".parallel( \(limit))"
+        }
     }
     func index(_ phase: String) -> Int { schema.phases.firstIndex { $0.caseName == phase }! }
     func scopeIndices(_ scopes: [String]) -> String {
@@ -397,13 +405,13 @@ struct Generator {
                 let scope = schema.scopes.firstIndex(of: op.scope)!
                 let dependencies = op.requires.map { "RuntimeScopeID(kind: \(schema.scopes.firstIndex(of: $0)!))" }
                     .joined(separator: ", ")
-                let admission = op.admission.replacingOccurrences(of: "limit:", with: "")
+                let admission = policy(op.admission)
                 return """
                     case .\(op.effect)(let input):
                         let _: \(op.name).Input = input
                         guard allowed.contains(\(i)) else { throw .invalidPlan }
                         counts[\(i)] += 1
-                        guard counts[\(i)] <= \(op.maxNewIntents) else { throw .invalidPlan }
+                        guard counts[\(i)] <= \(op.admission.maxNewIntents) else { throw .invalidPlan }
                         starts.append(.init(RuntimeOperation(kind: \(i), scope: RuntimeScopeID(kind: \(scope)),
                             dependencies: [\(dependencies)], policy: \(admission)), descriptor: effect))
                     """
@@ -412,7 +420,7 @@ struct Generator {
         let inputCases = schema.phases
             .flatMap { p in
                 schema.inputs.map { input -> String in
-                    let trigger = Schema.Trigger(kind: "input", name: input.caseName)
+                    let trigger = Schema.Trigger(kind: .input, name: input.caseName)
                     let dispatch =
                         dispatch(
                             from: p.caseName,
@@ -432,9 +440,10 @@ struct Generator {
             .flatMap { op in
                 schema.phases.flatMap { phase in
                     let p = phase.caseName
-                    return ["success", "failure"]
-                        .map { kind -> String in
-                            let trigger = Schema.Trigger(kind: kind, name: op.effect)
+                    return [Schema.Trigger.Kind.success, .failure]
+                        .map { outcome -> String in
+                            let kind = outcome.rawValue
+                            let trigger = Schema.Trigger(kind: outcome, name: op.effect)
                             let dispatch =
                                 dispatch(from: p, trigger: trigger, source: "source", payload: "completion")
                             guard let dispatch else {

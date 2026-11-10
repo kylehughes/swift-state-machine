@@ -43,7 +43,7 @@ struct SchemaTests {
         #expect(result.transitions.count == 3)
         #expect(result.transitions.map(\.from) == ["idle", "loading", "loading"])
         #expect(result.transitions.map(\.to) == ["loading", "idle", "idle"])
-        #expect(result.transitions.map(\.trigger.kind) == ["input", "input", "success"])
+        #expect(result.transitions.map(\.trigger.kind) == [.input, .input, .success])
         #expect(result.transitions.map(\.trigger.name) == ["start", "cancel", "fetch"])
         #expect(result.transitions.first?.starts == ["fetch"])
         #expect(result.operations.first?.activeIn == ["loading"])
@@ -235,7 +235,7 @@ struct SchemaTests {
 
     @Test func acceptsPositiveBoundedAdmission() throws {
         let result = try Self.parse(Self.schema.replacingOccurrences(of: ".latest", with: ".parallel(limit: 2)"))
-        #expect(result.operations.first?.admission == ".parallel(limit: 2)")
+        #expect(result.operations.first?.admission == .parallel(limit: 2))
     }
 
     @Test func payloadFieldsMayUseGenericContainers() throws {
@@ -262,7 +262,7 @@ struct SchemaTests {
             }
             """#
         let result = try Self.parse(source)
-        #expect(result.mode == "ownedOnly")
+        #expect(result.mode == .ownedOnly)
         #expect(result.transitions.first?.from == "idle")
         #expect(result.transitions.first?.to == "finished")
         #expect(result.transitions.first?.failureType == "MyFailure")
@@ -311,7 +311,7 @@ struct SchemaTests {
         let result = try Self.parse(source)
         #expect(result.routes.count == 1)
         #expect(result.transitions.count == 2)
-        #expect(result.routes.first?.trigger.kind == "success")
+        #expect(result.routes.first?.trigger.kind == .success)
     }
 
     @Test func reservesAllGeneratedSupportNames() {
