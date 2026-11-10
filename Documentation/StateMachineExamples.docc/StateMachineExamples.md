@@ -13,8 +13,8 @@ fetch's dependency authority. A late result cannot regain that authority merely
 because the visible request looks the same.
 
 ``GeneratedProfile`` declares that graph with the schema macro. ``ProfileEditor``
-uses its `MainActor` host for synchronous screen input and managed results. The
-editor's presentation observes complete snapshots; disposal ends observation
+wraps a `StateMachinePresentation` over its `MainActor` host for synchronous
+screen input and managed results. The presentation observes complete snapshots; disposal ends observation
 and the screen's work authority, while shutdown also waits for driver termination.
 
 ``ResourceWorkflow`` carries a noncopyable resource through a consuming edge.

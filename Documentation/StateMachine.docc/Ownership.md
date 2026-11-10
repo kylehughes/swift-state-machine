@@ -28,9 +28,10 @@ either result disposes of the value it contains.
 
 Switch on `.rejected(let failure, let original)` to inspect the error and retry
 with the recovered owner, or `.advanced(let next, let effects)` to continue from
-the successor. An infallible edge returns `Change`: retain its `effects`, then
-pass its `next` to another consuming edge. That transfer does not permit using
-the same successor again.
+the successor. An infallible edge that starts operations returns `Change`:
+retain its `effects`, then pass its `next` to another consuming edge. An edge
+that starts nothing returns the successor owner directly. Either transfer
+leaves no way to use the same successor again.
 
 Effects are descriptions. Constructing ``Change`` or ``Advance`` does not
 execute them. The caller or host decides when accepted work runs.

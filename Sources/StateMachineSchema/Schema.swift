@@ -21,8 +21,12 @@ nonisolated public enum StateMachineAdmission: Sendable {
 /// Expands a closed lexical enum schema into sealed ownership surfaces.
 ///
 /// Phases are the enum's cases, each carrying a distinct nested payload type; `@Initial` marks the
-/// starting phase. Invalidation scopes are the cases of an optional nested `Scope` enum. Other
-/// metadata is a reference the compiler resolves: `Input.load`, `Scope.load`, `Loading.self`.
+/// starting phase. Inputs are the cases of a nested `Input` enum, and invalidation scopes are the
+/// cases of an optional nested `Scope` enum. Other metadata is a reference the compiler resolves:
+/// `Input.load`, `Scope.load`, `Loading.self`.
+///
+/// The expansion generates `Effect`, with one case per `@Operation` namespace, the owners the
+/// mode permits, and the typed work and completion values for each operation.
 ///
 /// Schema, case, operation and edge names use unescaped Swift identifiers.
 /// Generated facade names and required support-type spellings are reserved in the schema.
@@ -38,8 +42,10 @@ public macro Initial() = #externalMacro(module: "StateMachineMacros", type: "Met
 
 /// Describes one synchronous authored transition taken when an input arrives.
 ///
-/// The edge's endpoints are its signature: the first parameter's type is the source phase payload
-/// and the returned `Change` or `Advance` names the destination phase payload.
+/// The edge's endpoints are its signature. The first parameter is the source phase payload. An
+/// edge that starts no operation returns the destination phase payload itself. An edge with a
+/// `starts` list returns `Change<Destination, Effect.<Edge>>`, where the generated `Effect.<Edge>`
+/// holds only the listed operations, so no other effect can be emitted.
 ///
 /// - Parameters:
 ///   - on: The triggering case, written `Input.<case>`.
@@ -71,8 +77,9 @@ public macro Transition(onFailure: Any.Type, invalidates: [Any] = [], starts: [A
 
 /// Declares one operation's typed aliases and its lifetime metadata.
 ///
-/// The namespace is the operation's identity. Exactly one `Effect` case requests it, by carrying
-/// the namespace's `Input` alias: `case fetch(Fetch.Input)`.
+/// The namespace is the operation's identity and declares `Input`, `Output` and `Failure`
+/// aliases. The generated `Effect` gains one case for it, named by lower-casing the namespace's
+/// leading capitals: `Fetch` is requested with `.fetch(input)`.
 ///
 /// - Parameters:
 ///   - scope: The primary scope whose authority the operation holds, written `Scope.<case>`.
@@ -87,21 +94,29 @@ public macro Operation(
     admission: StateMachineAdmission
 ) = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
-/// Selects an explicit typed preparation when an input has several legal edges.
+/// Chooses among the edges that share a source phase and an input.
 ///
-/// The source phase is the router's `Observed<Source>` parameter.
+/// A router takes the source phase payload and the input's payload, and returns the generated
+/// `Route.<Router>` enum, which has one case per candidate edge. It may use typed throws to
+/// decline. A router with no candidate edge returns `Never` and throws.
 ///
 /// - Parameter on: The triggering case, written `Input.<case>`.
 @attached(peer)
 public macro Route(on: Any) = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
-/// Selects an explicit typed preparation when an operation's success has several legal edges.
+/// Chooses among the edges that share a source phase and an operation's success.
+///
+/// The router receives the operation's `Output` value; the selected edge receives the sealed
+/// completion.
 ///
 /// - Parameter onSuccess: The completing operation, written `<Operation>.self`.
 @attached(peer)
 public macro Route(onSuccess: Any.Type) = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
-/// Selects an explicit typed preparation when an operation's failure has several legal edges.
+/// Chooses among the edges that share a source phase and an operation's failure.
+///
+/// The router receives the operation's `Failure` value; the selected edge receives the sealed
+/// completion.
 ///
 /// - Parameter onFailure: The completing operation, written `<Operation>.self`.
 @attached(peer)

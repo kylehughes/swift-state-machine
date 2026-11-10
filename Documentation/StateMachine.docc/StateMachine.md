@@ -52,6 +52,12 @@ supports non-`Sendable` copyable value data within that actor.
 - ``RuntimeWork``
 - ``RuntimeTicket``
 
+### Hosting and observation
+
+- ``StateMachineSnapshot``
+- ``StateMachineReceipt``
+- ``MainActorStateMachineHost``
+
 ### Managed delivery
 
 - ``RuntimeSharedHost``

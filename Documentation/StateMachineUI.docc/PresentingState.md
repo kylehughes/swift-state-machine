@@ -2,20 +2,22 @@
 
 Keep one complete snapshot observable and give its owner an explicit lifetime.
 
-The `ProfileEditor` example in `StateMachineExamples` combines a generated
-`MainActorHost` with ``SnapshotPresentation``. It owns its drivers and observation
-registration. Creating it starts no request:
+``StateMachinePresentation`` wraps a generated `MainActorHost`. It is an
+`ObservableObject`, so it works at the iOS 16 baseline. Pass the host to its
+initializer, read ``StateMachinePresentation/snapshot`` from a view, and call
+``StateMachinePresentation/send(_:)`` from actions:
 
 ```swift
+import StateMachine
 import StateMachineExamples
 import StateMachineUI
 import SwiftUI
 
 @MainActor
-func makeProfileEditor() throws -> ProfileEditor {
+func makePresentation() throws -> StateMachinePresentation<GeneratedProfile.MainActorHost> {
     let user = try UserID("taylor")
-    return try ProfileEditor(
-        request: ProfileRequest(userID: user),
+    let host = GeneratedProfile.MainActorHost(
+        .init(userID: user),
         drivers: .init(
             fetch: { request in
                 .success(Profile(userID: request.userID, name: "Taylor"))
@@ -23,71 +25,77 @@ func makeProfileEditor() throws -> ProfileEditor {
             audit: { _ in .failure(.unavailable) }
         )
     )
+    return try StateMachinePresentation(host)
 }
 
 @MainActor
 struct ProfileScreen: View {
-    let editor: ProfileEditor
-    @ObservedObject private var presentation: SnapshotPresentation<GeneratedProfile.Snapshot>
+    @ObservedObject var presentation: StateMachinePresentation<GeneratedProfile.MainActorHost>
+    let request: ProfileRequest
     @State private var inputFailure: String?
-
-    init(editor: ProfileEditor) {
-        self.editor = editor
-        presentation = editor.presentation
-    }
 
     var body: some View {
         VStack {
             switch presentation.snapshot {
             case .idle:
-                Button("Load profile") { send { try editor.load() } }
+                Button("Load profile") { send(.load(request)) }
             case .loading:
                 ProgressView("Loading profile")
-                Button("Cancel") { send { try editor.cancel() } }
+                Button("Cancel") { send(.cancel) }
             case .loaded(let loaded):
                 Text(loaded.value.profile.name)
             case .failed(let failed):
                 Text("Request failed: \(failed.value.failure.rawValue)")
-                Button("Retry") { send { try editor.retry() } }
+                Button("Retry") { send(.retry) }
             }
             if let inputFailure { Text(inputFailure) }
         }
-        .onDisappear { editor.dispose() }
+        .onDisappear { presentation.close() }
     }
 
-    private func send(_ action: () throws -> GeneratedProfile.CommitResult) {
+    private func send(_ input: GeneratedProfile.Input) {
         do {
-            switch try action() {
-            case .committed:
-                inputFailure = nil
-            case .rejected(let reason, _):
-                inputFailure = "Input was not accepted: \(reason)"
-            }
+            try presentation.send(input)
+            inputFailure = nil
         } catch {
-            inputFailure = "Input was rejected: \(error)"
+            inputFailure = "Input was not accepted: \(error)"
         }
     }
 }
 ```
 
-Retain the editor for this screen's lifetime and construct a new one when
-returning after disposal. This example ends that lifetime in `onDisappear`;
-an application that keeps work alive across navigation should put ownership
-in the longer-lived feature instead.
+Creating the presentation starts no request. Keep it for the screen's lifetime,
+for example in a `@StateObject` or in the object that owns the feature, and
+create a new one when returning after `close()`. This example ends that
+lifetime in `onDisappear`; an application that keeps work alive across
+navigation should put ownership in the longer-lived feature instead.
+
+``ObservableStateMachinePresentation`` is the `@Observable` counterpart for apps
+that target iOS 17, macOS 14, or later. It has the same initializer and members,
+and a view reads its `snapshot` without `@ObservedObject`.
+
+The `ProfileEditor` example in `StateMachineExamples` wraps this pattern in a
+screen-scoped object with named actions such as `load()`, `retry()`, and
+`cancel()`.
 
 ## Accept input and publish without suspension
 
-`ProfileEditor.load()` synchronously sends the input and applies the accepted
-receipt to its presentation. Driver work runs afterward. When a result returns,
-the host checks its operation authority, prepares the completion from a fresh
-snapshot, and checks that snapshot's revision at commit. Cancelling or changing
+`send(_:)` routes, prepares, and admits the input in the current `MainActor`
+turn, then publishes the accepted snapshot before it returns. Driver work runs
+afterward. When a result returns, the host checks its operation authority,
+prepares the completion from a fresh snapshot, and checks that snapshot's
+revision at commit. Snapshots that arrive later, such as an operation's result,
+reach the presentation through the host's subscription. Cancelling or changing
 the account can revoke operation authority and make a late response stale.
 
-Observe the complete `snapshot` instead of maintaining independently published
-phase fields. ``SnapshotPresentation/apply(_:)`` accepts strictly increasing
-revisions. It can therefore apply an immediate receipt before asynchronous
-observation reaches the same revision, without regressing when that delayed
-observation arrives.
+`send(_:)` throws `SendRejection`. The `.preparation` case means the input has
+no edge from the current phase or the edge declined it. The `.commit` case means
+the owner refused the prepared change, for example because it is closed.
+
+Observe the complete `snapshot` rather than maintaining independently published
+phase fields. The presentation applies only strictly increasing revisions, so it
+can show an immediate receipt before asynchronous observation reaches the same
+revision, without regressing when that delayed observation arrives.
 
 One presentation belongs to one owner history. A restored or forked owner starts
 at revision zero, so create a new presentation for it rather than feeding those
@@ -95,16 +103,27 @@ revisions into the original presentation's watermark.
 
 ## Separate observation from running work
 
-``SnapshotPresentation/stopObserving()`` removes only the registration.
-`ProfileEditor.dispose()` also closes the screen's work authority and applies
-its terminal snapshot. Closed historical loading data cannot authorize another
-request.
+``StateMachinePresentation/stopObserving()`` removes only the registration and
+leaves the owner open. ``StateMachinePresentation/close()`` stops observing,
+closes the owner's work authority, and publishes its terminal snapshot. Closed
+historical loading data cannot authorize another request.
 
 Cancellation is cooperative. A driver can continue running after the screen
-disappears, and its handle remains tracked until actual termination. Await
-`ProfileEditor.shutdown()` when the surrounding task needs that termination
-and delivery cleanup to finish. A driver that never returns can prevent the
-wait from finishing; disposal itself is synchronous.
+disappears, and its handle remains tracked until actual termination. Await the
+host's `shutdown()` through ``StateMachinePresentation/host`` when the
+surrounding task needs that termination and delivery cleanup to finish. A driver
+that never returns can prevent the wait from finishing; `close()` itself is
+synchronous.
+
+## Present an owner without a hosting protocol
+
+``SnapshotPresentation`` is the lower-level piece. It publishes snapshots of any
+type, given a closure that reads a snapshot's revision. Register an owner's
+subscription with ``SnapshotPresentation/observe(_:)``, or apply snapshots
+yourself. Use it for owners that do not conform to
+`MainActorStateMachineHost`. ``SnapshotPresentation/apply(_:)`` accepts
+strictly increasing revisions, and ``SnapshotPresentation/stopObserving()``
+removes only the registration.
 
 ## Bridge a shared host
 

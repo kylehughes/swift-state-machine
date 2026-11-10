@@ -741,7 +741,7 @@ The parallel limit bounds logical active authority, not physical concurrent task
 
 Invalidating any bound dependency revokes the operation and records cancellation even if its primary scope remains active. The example therefore supports authentication invalidation while Loading: Fetch requires authentication, and the authenticationChanged self-edge invalidates that scope. The old fetch cannot commit; subsequent work binds the new epoch. Validate all dependency names and reject duplicate/redundant dependencies or inconsistent primary-scope eligibility.
 
-`API-112`: Generate a typed shared-mode Drivers value, with one field per operation:
+`API-112`: Generate a typed shared-mode Drivers value, with one field per operation: Drivers return `Result` rather than using typed throws: in the pinned toolchain a closure passed to a `throws(Failure)` parameter is inferred as throwing `any Error` unless it is explicitly annotated, which would require an annotation on every throwing driver closure.
 
 ```swift
 public struct Drivers: Sendable {
