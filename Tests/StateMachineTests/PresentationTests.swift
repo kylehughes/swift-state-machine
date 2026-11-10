@@ -1,3 +1,4 @@
+import Combine
 import Observation
 import StateMachine
 import StateMachineExamples
@@ -79,5 +80,97 @@ import os
         #expect(!model.isObserving)
         await model.host.shutdown()
         #expect(model.host.isQuiescent)
+    }
+}
+
+@MainActor @Suite(.timeLimit(.minutes(1))) struct SequencePresentationTests {
+    private typealias Host = RuntimeSharedHost<Int, Int, RuntimeTicket, Never>
+    private typealias Engine = Host.Engine
+
+    /// A one-shot event a test awaits instead of inferring progress from scheduling.
+    private struct Signal: Sendable {
+        private let stream: AsyncStream<Void>
+        private let continuation: AsyncStream<Void>.Continuation
+
+        init() { (stream, continuation) = AsyncStream<Void>.makeStream() }
+        func raise() { continuation.yield(()) }
+        func wait() async {
+            var iterator = stream.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+    }
+
+    private func host() throws -> Host {
+        Host(
+            manual: 0,
+            scopes: [],
+            limits: try RuntimeLimits(),
+            ticket: { $0 },
+            prepare: { _ in .failure(.plan(.invalidPlan)) }
+        )
+    }
+
+    private func advance(_ owner: Host) throws {
+        _ = owner.commit(try Engine.prepare(on: owner.snapshot(), next: owner.snapshot().model + 1))
+    }
+
+    @Test func generatedSnapshotsNeedNoRevisionProjection() throws {
+        let owner = GeneratedProfile.Shared(
+            .init(userID: try UserID("kyle")),
+            drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        )
+        let presentation = SnapshotPresentation(owner.snapshot())
+        let closed = owner.close()
+        #expect(presentation.apply(closed.snapshot))
+        #expect(!presentation.apply(owner.snapshot()))
+        #expect(presentation.snapshot.isClosed)
+    }
+
+    @Test func publishesASharedOwnersSnapshotsUntilItCloses() async throws {
+        let owner = try host()
+        let presentation = SnapshotPresentation(owner.snapshot(), revision: \.revision)
+        presentation.observe(try owner.snapshots())
+        #expect(presentation.isObserving)
+        let ended = Signal()
+        var published: [UInt64] = []
+        let snapshots = presentation.$snapshot.dropFirst().sink { published.append($0.revision) }
+        let observing = presentation.$isObserving.dropFirst().sink { if !$0 { ended.raise() } }
+        try advance(owner)
+        let closed = owner.close()
+        // Completion edge: the sequence delivered the closed snapshot and then ended.
+        await ended.wait()
+        #expect(presentation.snapshot.isClosed && presentation.snapshot.revision == closed.revision)
+        #expect(zip(published, published.dropFirst()).allSatisfy { $0 < $1 })
+        #expect(published.last == closed.revision)
+        #expect(!presentation.isObserving)
+        snapshots.cancel()
+        observing.cancel()
+    }
+
+    @Test func stoppingDiscardsLaterSnapshotsAndAReplacementKeepsObserving() async throws {
+        let owner = try host()
+        let presentation = SnapshotPresentation(owner.snapshot(), revision: \.revision)
+        // Each `observe` first stops the previous observation, then starts its own.
+        let expected = [false, true, false, false, true, false]
+        var observing: [Bool] = []
+        let ended = Signal()
+        let history = presentation.$isObserving.dropFirst()
+            .sink {
+                observing.append($0)
+                if observing.count == expected.count { ended.raise() }
+            }
+        let detached = Signal()
+        presentation.observe(try owner.snapshots({ $0 }, onDetach: { detached.raise() }))
+        try advance(owner)
+        presentation.stopObserving()
+        // Cleanup edge: the stopped consumer has removed its registration.
+        await detached.wait()
+        #expect(presentation.snapshot.revision == 0)
+        presentation.observe(try owner.snapshots())
+        let closed = owner.close()
+        await ended.wait()
+        #expect(observing == expected)
+        #expect(presentation.snapshot.revision == closed.revision)
+        history.cancel()
     }
 }

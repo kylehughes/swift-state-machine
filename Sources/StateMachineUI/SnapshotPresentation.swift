@@ -14,6 +14,7 @@ import StateMachine
     private let revision: @MainActor (Snapshot) -> UInt64
     private var watermark: UInt64
     private var subscription: RuntimeMainActorSubscription?
+    private var observation: Task<Void, Never>?
 
     /// Creates a historical projection without subscribing or starting work.
     public init(_ initial: Snapshot, revision: @escaping @MainActor (Snapshot) -> UInt64) {
@@ -21,6 +22,7 @@ import StateMachine
         watermark = revision(initial)
         self.revision = revision
     }
+    deinit { observation?.cancel() }
     /// Applies a newer complete snapshot synchronously; delayed delivery cannot regress the model.
     @discardableResult public func apply(_ next: Snapshot) -> Bool {
         let nextRevision = revision(next)
@@ -48,12 +50,36 @@ import StateMachine
             throw error
         }
     }
+    /// Replaces observation ownership with a sequence from a shared or actor owner.
+    ///
+    /// Each snapshot is applied on the main actor through the revision check. `isObserving`
+    /// becomes `false` when the sequence ends; `snapshot` keeps the last value applied.
+    public func observe(_ snapshots: RuntimeSnapshots<Snapshot>) where Snapshot: Sendable {
+        stopObserving()
+        isObserving = true
+        observation = Task { [weak self] in
+            for await next in snapshots {
+                // `stopObserving` cancels on the main actor, so a value that was already
+                // in flight is discarded here and never applied after the stop.
+                guard !Task.isCancelled, let self else { return }
+                self.apply(next)
+            }
+            if !Task.isCancelled { self?.isObserving = false }
+        }
+    }
     /// Removes this presentation's registration synchronously.
     public func stopObserving() {
         subscription?.cancel()
         subscription = nil
+        observation?.cancel()
+        observation = nil
         isObserving = false
     }
+}
+
+extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
+    /// Creates a historical projection of a generated snapshot without subscribing or starting work.
+    public convenience init(_ initial: Snapshot) { self.init(initial, revision: { $0.revision }) }
 }
 
 /// A capacity-one bridge from Sendable background snapshots to MainActor presentation.
