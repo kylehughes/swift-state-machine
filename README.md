@@ -156,8 +156,60 @@ The bundled `ProfileEditor` wraps a `StateMachinePresentation` over a generated
 same profile graph as the other examples. Disposing the editor removes
 observation and closes its work authority. The [UI guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineui/presentingstate)
 shows a SwiftUI screen and explains the separate lifetime of a running driver.
-`SnapshotPresentation` and `MainActorSnapshotIngress` are the lower-level pieces
-for owners that do not conform to `MainActorStateMachineHost`.
+
+#### Observe from UIKit
+
+A UIKit screen can iterate the host's snapshot sequence in a task. The task
+inherits `MainActor` from the method that creates it, and cancelling it ends the
+sequence and removes the registration. Creating the sequence throws, so the task
+catches:
+
+```swift
+@MainActor
+final class ProfileViewController: UIViewController {
+    private let host: GeneratedProfile.MainActorHost
+    private var observation: Task<Void, Never>?
+
+    // init(host:) omitted
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        observation = Task {
+            do {
+                for await snapshot in try self.host.snapshots() {
+                    self.render(snapshot)
+                }
+            } catch {
+                // Subscriber capacity is exhausted.
+            }
+        }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        observation?.cancel()
+        observation = nil
+    }
+
+    private func render(_ snapshot: GeneratedProfile.Snapshot) { /* update views */ }
+}
+```
+
+A loop sees an accepted input on a later turn. Code that needs the result in the
+same turn uses the receipt from `send`, or a presentation.
+
+For Combine, `$snapshot` on `StateMachinePresentation` is the publisher:
+
+```swift
+let cancellable = presentation.$snapshot.sink { render($0) }
+```
+
+`$snapshot` does not complete. `$isObserving` becoming `false` signals the end.
+
+`MainActorHost.snapshots()` returns a `MainActorSnapshots`, which is iterated on
+the main actor and can carry snapshots that are not `Sendable`. `for await` works
+on every supported OS. Operators such as `map` and `prefix` on it need a
+deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or visionOS 2.
 
 ## Manage shared state and asynchronous work
 
@@ -197,9 +249,50 @@ do {
 
 Retain `machine` and `subscription` for the feature's lifetime. Copies of
 `Shared` refer to the same owner. Shared callbacks run outside the storage lock
-and are not confined to `MainActor`. A subscription delivers increasing revisions
-and coalesces pending snapshots to the latest value. Effects and execution
-acknowledgments do not coalesce.
+and are not confined to `MainActor`.
+
+The same snapshots are available as an asynchronous sequence. Creating it
+registers one observer, and iterating never throws:
+
+```swift
+for await snapshot in try machine.snapshots() {
+    if case .loaded(let loaded) = snapshot {
+        print(loaded.value.profile.name)
+    }
+}
+```
+
+`ActorHost` uses `try await actor.snapshots()`. Creating a sequence or
+subscription throws `SubscriptionFailure.capacityExceeded` when subscriber
+capacity is exhausted.
+
+Observation is latest-value for every owner. The sequence keeps one pending
+snapshot. The first element is the snapshot current at registration unless a
+newer one replaced it, revisions strictly increase, and a slow consumer skips
+intermediate snapshots. This is state observation, not an event log. Effects and
+execution acknowledgments never coalesce. The closed snapshot is always
+delivered before the sequence ends, and a sequence is single-pass: a second
+iterator ends immediately. The sequence does not keep the owner alive. If the
+owner is released without closing, the sequence ends and no element has
+`isClosed == true`.
+
+To show a shared or actor owner on `MainActor`, create a `SnapshotPresentation`
+from its current snapshot and observe the sequence:
+
+```swift
+@MainActor
+func present(_ machine: GeneratedProfile.Shared) throws -> SnapshotPresentation<GeneratedProfile.Snapshot> {
+    let presentation = SnapshotPresentation(machine.snapshot())
+    presentation.observe(try machine.snapshots())
+    return presentation
+}
+```
+
+The presentation applies each snapshot on `MainActor`, sets `isObserving` to
+`false` when the sequence ends, and publishes through `$snapshot`.
+`stopObserving()` ends the observation. `MainActorSnapshotIngress` is the
+lower-level piece for owners that deliver `Sendable` snapshots through a
+callback.
 
 `send` makes exactly one attempt. It prepares the change from the current
 snapshot and commits it, and acceptance atomically installs the complete model,
@@ -232,8 +325,10 @@ produces `planTooLarge` and needs an application decision.
 
 ### End a lifetime
 
-Call `subscription.cancel()` to unsubscribe. An already claimed callback may
-finish. Call `machine.close()` to end admission and revoke work authority;
+Call `subscription.cancel()` to unsubscribe. Cancelling the task that consumes
+a snapshot sequence ends the sequence and removes its registration; releasing the
+sequence does the same. An already claimed callback may finish. Call
+`machine.close()` to end admission and revoke work authority;
 cancellation remains cooperative. `shutdown()` also waits for actual task
 termination and delivery cleanup. On `MainActorHost` and `ActorHost`,
 `shutdownAndWait(deadline:)` stops waiting at its deadline and reports whether

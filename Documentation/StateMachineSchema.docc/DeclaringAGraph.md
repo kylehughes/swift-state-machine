@@ -179,13 +179,28 @@ revision. Use that explicit path when a caller needs to separate preparation
 from admission. A rejected commit changes neither model data nor operation
 authority.
 
+Each hosted owner except `Local` also offers `snapshots()`, which registers an
+observer and returns a single-pass asynchronous sequence of complete snapshots.
+Creating it throws `SubscriptionFailure` when subscriber capacity is exhausted;
+iterating never throws. `ActorHost.snapshots()` is `async`.
+
+```swift
+@MainActor
+func watch(_ host: Lookup.MainActorHost) async throws {
+    for await snapshot in try host.snapshots() {
+        print(snapshot.revision)
+    }
+}
+```
+
 To show a hosted graph in SwiftUI, wrap a `MainActorHost` in
 `StateMachinePresentation`, described in the `StateMachineUI` documentation.
 
 The runtime types behind the generated owners are available through aliases
 inside the schema: `Subscription`, `MainActorSubscription`,
-`SubscriptionFailure`, `CompletionPolicy`, `PendingStatus`, `Configuration`, and
-`LocalConfiguration`.
+`SubscriptionFailure`, `MainActorSnapshots`, `Snapshots`, `CompletionPolicy`,
+`PendingStatus`, `Configuration`, and `LocalConfiguration`. `Snapshots` exists in
+`shared` mode only.
 
 Actor isolation does not prevent two snapshots from sharing a mutable reference.
 Use value storage, immutable objects, or detached projections when a graph

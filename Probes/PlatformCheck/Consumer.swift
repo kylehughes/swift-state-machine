@@ -74,3 +74,40 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
     await owner.shutdown()
     return receipt.revision
 }
+
+/// Links the snapshot sequences of every hosted owner and the presentation that observes one.
+@MainActor public func stateMachineSequencePlatformCheck() async throws -> UInt64 {
+    let note = GeneratedNote.MainActorHost(
+        .init(text: "platform-sequence"),
+        drivers: .init(save: { .success(.init(text: $0.text)) })
+    )
+    var last: UInt64 = 0
+    for await snapshot in try note.snapshots() {
+        last = snapshot.revision
+        if !snapshot.isClosed { _ = note.close() }
+    }
+    let user = try UserID("platform-sequence")
+    let shared = GeneratedProfile.Shared(
+        .init(userID: user),
+        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+    )
+    let presentation = SnapshotPresentation(shared.snapshot())
+    presentation.observe(try shared.snapshots())
+    for await snapshot in try shared.snapshots() {
+        last += snapshot.revision
+        if !snapshot.isClosed { _ = shared.close() }
+    }
+    presentation.stopObserving()
+    let actor = GeneratedProfile.ActorHost(
+        .init(userID: user),
+        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+    )
+    for await snapshot in try await actor.snapshots() {
+        last += snapshot.revision
+        if !snapshot.isClosed { _ = await actor.close() }
+    }
+    await note.shutdown()
+    await shared.shutdown()
+    await actor.shutdown()
+    return last
+}

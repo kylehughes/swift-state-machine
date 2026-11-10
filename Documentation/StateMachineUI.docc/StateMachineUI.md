@@ -15,12 +15,14 @@ The presentation owns an observation registration. The enclosing screen or
 service owns the live machine and decides when its work scope ends. Removing
 observation and closing work authority are separate operations.
 
-``SnapshotPresentation`` is the lower-level piece for owners that do not conform
-to `MainActorStateMachineHost`. Use ``MainActorSnapshotIngress`` when
-`Sendable` snapshots arrive from a shared host outside `MainActor`. It retains
-only the newest pending snapshot and schedules one responsible delivery task per
-active group of offers. Effect commands stay with the host and never pass
-through this coalescing bridge.
+``SnapshotPresentation`` presents shared and actor owners, and any other owner
+that does not conform to `MainActorStateMachineHost`. It observes the owner's
+snapshot sequence and applies each snapshot on `MainActor`. Use
+``MainActorSnapshotIngress`` as the lower-level bridge when `Sendable` snapshots
+arrive from a host outside `MainActor` through a callback. It retains only the
+newest pending snapshot and schedules one responsible delivery task per active
+group of offers. Effect commands stay with the host and never pass through this
+coalescing bridge.
 
 ## Topics
 
@@ -30,7 +32,7 @@ through this coalescing bridge.
 - ``StateMachinePresentation``
 - ``ObservableStateMachinePresentation``
 
-### Present any snapshot
+### Present any snapshot or sequence
 
 - ``SnapshotPresentation``
 

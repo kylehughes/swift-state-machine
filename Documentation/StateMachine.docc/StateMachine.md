@@ -57,6 +57,8 @@ supports non-`Sendable` copyable value data within that actor.
 - ``StateMachineSnapshot``
 - ``StateMachineReceipt``
 - ``MainActorStateMachineHost``
+- ``RuntimeSnapshots``
+- ``RuntimeMainActorSnapshots``
 
 ### Managed delivery
 

@@ -109,4 +109,6 @@ Managed defaults allow 256 queued batches, 64 effect descriptions per plan,
 256 execution reservations, and 128 subscriptions. Use
 ``RuntimeManagedConfiguration`` to validate explicit bounds. Observations use
 one pending latest value per subscriber plus reserved terminal delivery;
-coalescing observations never discards accepted effect commands.
+coalescing observations never discards accepted effect commands. The
+asynchronous-sequence form, `snapshots()`, follows the same latest-value rule and
+registers one subscriber.

@@ -426,7 +426,7 @@ First-class dynamic child orchestration is optional convenience in v1, but the u
 
 ### 9. UI and application integration
 
-`UI-001`: The baseline adapter supports iOS 16 with a MainActor-isolated observable object and a copyable snapshot projection. The runtime does not require SwiftUI; UIKit consumers can use the same snapshot subscription API. The UI module provides a generic presentation over any MainActor owner that conforms to the runtime's small host protocol (`snapshot`, `send`, `subscribe`, `close`); generated MainActor owners conform. It publishes the accepted snapshot of an input in the same turn as `send` and applies later deliveries through the owner's subscription.
+`UI-001`: The baseline adapter supports iOS 16 with a MainActor-isolated observable object and a copyable snapshot projection. The runtime does not require SwiftUI; UIKit consumers can use the same snapshot subscription API. The UI module provides a generic presentation over any MainActor owner that conforms to the runtime's small host protocol (`snapshot`, `send`, `subscribe`, `close`); generated MainActor owners conform. It publishes the accepted snapshot of an input in the same turn as `send` and applies later deliveries through the owner's subscription. A presentation can also observe a shared or actor owner through its snapshot sequence.
 
 `UI-002`: The UI owner retains the live machine privately. UI state contains copyable observations/model projections, not a raw lock, a mutable root pointer, or a noncopyable live authority embedded in a copying view value.
 
@@ -1104,15 +1104,15 @@ If the owner is already closed at that ordering point, return a terminal observa
 
 **OBS-002 — Monotonic delivery.** Each subscriber has one serial delivery path and a last-offered/applied ordinal. Never offer a revision at or below its established watermark. Do not independently dispatch initial and later callbacks onto concurrent executors. An observer may read or submit a new transition because callback execution is outside the critical section.
 
-**OBS-003 — Latest-value default.** UI observation uses a capacity-one latest-value mailbox. A newer observation may replace an older pending observation, including the captured initial value before consumption. Thus the first delivered value may be newer than the registration point; it can never be older or arrive after a newer delivered value.
+**OBS-003 — Latest-value default.** UI observation uses a capacity-one latest-value mailbox. A newer observation may replace an older pending observation, including the captured initial value before consumption. Thus the first delivered value may be newer than the registration point; it can never be older or arrive after a newer delivered value. The asynchronous-sequence form applies this latest-value policy for every owner, including owners whose callback form delivers every batch.
 
 Only pending snapshots coalesce. Effect records, task lifecycle acknowledgments, and accepted transition receipts do not coalesce. This API is a state observation stream, not a complete event log. A lossless audit stream is outside the baseline and requires an explicit overflow/backpressure policy.
 
 **OBS-004 — Deferred mailbox release.** Replacing a mailbox value, removing a subscriber, resuming a continuation, yielding a stream element, and finishing a stream follow LOCK-004 and LOCK-006. Retain displaced boxes under the lock and perform destruction/resumption outside it. Avoid allocating an unbounded delivery task for every snapshot; at most one delivery loop owns a subscriber mailbox.
 
-**OBS-005 — Unsubscribe.** Subscription cancellation removes its live registration and marks its mailbox closed. Already executing observer code may finish; no new observer invocation begins after the delivery loop has observed that closed generation. It is not synchronous interruption of user code. Release observer closures and captured values outside the core lock.
+**OBS-005 — Unsubscribe.** Subscription cancellation removes its live registration and marks its mailbox closed. Already executing observer code may finish; no new observer invocation begins after the delivery loop has observed that closed generation. It is not synchronous interruption of user code. Release observer closures and captured values outside the core lock. The asynchronous-sequence form is single-pass: the first iterator is the consumer and a later iterator ends immediately. Cancelling its consuming task ends the sequence and removes the registration on the consumer's task.
 
-**OBS-006 — Terminal observation.** Closing offers the final snapshot and then terminates the subscription. The final snapshot may replace an older pending value, but it cannot be silently removed by termination. Use a terminal envelope containing that snapshot, or a stream implementation that drains its final buffered element before ending.
+**OBS-006 — Terminal observation.** Closing offers the final snapshot and then terminates the subscription. The final snapshot may replace an older pending value, but it cannot be silently removed by termination. Use a terminal envelope containing that snapshot, or a stream implementation that drains its final buffered element before ending. A sequence whose owner is released without closing ends with no closed element, so consumers distinguish that end from closure by the last element's `isClosed`.
 
 Expose lifecycle alongside model data. A closed snapshot can retain the last loading payload; that is historical data and does not assert that work remains authorized. The iOS 16 UI adapter performs consumption and publication on MainActor and uses this same monotonic contract.
 
@@ -1131,7 +1131,7 @@ Close has guaranteed queue and revision capacity because those resources are res
 
 After its linearization point, new ordinary commits return closed and no fresh operation authority is issued. Reads return final data. Queued starts are skipped when the runner observes revocation. Work that crossed a prelaunch race remains registered and receives cancellation.
 
-**LIFE-002 — Terminal drain.** Process the terminal record after all earlier accepted batches have received their launch/publication decisions. Cancel all still-running owned work, discard remaining pending delivery state, and finish subscriptions with their final snapshot. The runner MUST remain alive to reap canceled tasks; processing the terminal record alone is not complete shutdown.
+**LIFE-002 — Terminal drain.** Process the terminal record after all earlier accepted batches have received their launch/publication decisions. Cancel all still-running owned work, discard remaining pending delivery state, and finish subscriptions with their final snapshot. The runner MUST remain alive to reap canceled tasks; processing the terminal record alone is not complete shutdown. An owner released without closing finishes its subscriptions without a closed snapshot.
 
 **LIFE-003 — Flush.** flush(through:) accepts a receipt from this owner and waits until processedThrough reaches its ordinal. It covers snapshot offering and effect launch/skip decisions, not execution completion or completion of user observer callbacks. A long-lived effect must not make ordinary flush impossible. Reject a foreign receipt; resolve waiters outside the core lock.
 
@@ -1492,7 +1492,7 @@ Across policies, decoding, I/O, and one-time external input acquisition are not 
 
 **Operations:** Capture initial/later observations and stream termination through the production subscription path. Gate the delivery loop to permit latest-value replacement of the pending initial snapshot.
 
-**Assertions:** Registration and initial snapshot selection share one coherent ordering point. Queued older revisions cannot be delivered after a newer initial value. Latest-value coalescing may replace the pending initial value, so the first delivered revision may be newer than the registration snapshot but never older. Delivered ordinals strictly increase without duplicate/regressing offers. A subscription created after close receives the final closed snapshot followed by termination outside the lock, without a live registration or dependence on another terminal drain. A subscription registered before close receives the final snapshot before ending unless explicitly unsubscribed; termination cannot silently discard that last value.
+**Assertions:** Registration and initial snapshot selection share one coherent ordering point. Queued older revisions cannot be delivered after a newer initial value. Latest-value coalescing may replace the pending initial value, so the first delivered revision may be newer than the registration snapshot but never older. Delivered ordinals strictly increase without duplicate/regressing offers. A subscription created after close receives the final closed snapshot followed by termination outside the lock, without a live registration or dependence on another terminal drain. A subscription registered before close receives the final snapshot before ending unless explicitly unsubscribed; termination cannot silently discard that last value. The sequence form of each owner (`MainActorHost`, `ActorHost`, `Shared`) satisfies the same assertions: it throws `SubscriptionFailure` at creation only, never during iteration; its closed snapshot is delivered before the sequence ends; and a sequence created after close yields the closed snapshot and ends.
 
 #### RT-026 — Slow subscriber and coalescing
 
@@ -1500,7 +1500,7 @@ Across policies, decoding, I/O, and one-time external input acquisition are not 
 
 **Operations:** Resume the subscriber and drain the runner.
 
-**Assertions:** Per-subscriber delivered sequence numbers never regress. The capacity-one UI mailbox coalesces pending snapshots to the newest value, but every committed effect command remains accounted for. A slow observer does not silently cancel or erase work. At most one delivery loop owns that mailbox; snapshot throughput does not create one unbounded delivery task per update. Memory growth/backpressure matches the declared count bounds.
+**Assertions:** Per-subscriber delivered sequence numbers never regress. The capacity-one UI mailbox coalesces pending snapshots to the newest value, but every committed effect command remains accounted for. A slow observer does not silently cancel or erase work. At most one delivery loop owns that mailbox; snapshot throughput does not create one unbounded delivery task per update. Memory growth/backpressure matches the declared count bounds. The sequence form of each owner retains one pending snapshot, so a slow consumer skips intermediate snapshots, observes strictly increasing revisions, and still receives the closed snapshot before the sequence ends.
 
 #### RT-027 — Queue capacity, plan size, and reserved close capacity
 

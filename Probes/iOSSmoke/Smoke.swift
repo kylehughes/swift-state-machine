@@ -58,6 +58,7 @@ nonisolated private struct ResultFile: Encodable {
             try await actorAndLocal()
             try await persistence()
             try await terminalSubscription()
+            try await snapshotSequence()
             try ownedResource()
         } catch { failure = String(describing: error) }
         let result = ResultFile(
@@ -367,6 +368,36 @@ nonisolated private struct ResultFile: Encodable {
                 "revisions": String(describing: revisions), "finishes": String(finishes),
                 "subscribers": String(owner.subscriberCount),
             ]
+        )
+    }
+    private func snapshotSequence() async throws {
+        let owner = GeneratedNote.MainActorHost(
+            .init(text: "sequence"),
+            drivers: .init(save: { .success(.init(text: $0.text)) })
+        )
+        let label = UILabel()
+        var revisions: [UInt64] = []
+        for await snapshot in try owner.snapshots() {
+            revisions.append(snapshot.revision)
+            switch snapshot {
+            case .draft(let draft):
+                label.text = draft.value.text
+                if snapshot.revision == 0 {
+                    _ = try owner.send(.edit("sequence edited"))
+                } else if !snapshot.isClosed {
+                    _ = owner.close()
+                }
+            case .saving, .saved: break
+            }
+        }
+        try require(
+            revisions == [0, 1, 2] && label.text == "sequence edited" && owner.subscriberCount == 0,
+            "Snapshot sequence did not follow the owner to its closed snapshot"
+        )
+        await owner.shutdown()
+        passed(
+            "SNAPSHOT-SEQUENCE",
+            ["revisions": String(describing: revisions), "label": label.text ?? ""]
         )
     }
     private func ownedResource() throws {

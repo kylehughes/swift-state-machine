@@ -261,6 +261,16 @@
     "scope": "G5 normal-import generated confined host boundary"
   },
   {
+    "id": "GHOST-IsolatedSequence",
+    "pattern": "main actor-isolated|MainActor",
+    "scope": "G5 normal-import confined snapshot sequence iterated off the main actor"
+  },
+  {
+    "id": "GHOST-IsolatedSnapshots",
+    "pattern": "no member|not a member type",
+    "scope": "G5 isolated mode emits no Sendable snapshot sequence"
+  },
+  {
     "id": "GHOST-IsolatedMode",
     "pattern": "no member|not a member type",
     "scope": "G5 normal-import generated confined host boundary"

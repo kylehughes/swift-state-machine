@@ -115,26 +115,131 @@ surrounding task needs that termination and delivery cleanup to finish. A driver
 that never returns can prevent the wait from finishing; `close()` itself is
 synchronous.
 
+## Drive a UIKit view
+
+A view controller can iterate the host's snapshot sequence in a task. Creating the sequence throws
+`SubscriptionFailure` when subscriber capacity is exhausted; iterating never
+throws. A task created in a `@MainActor` method runs on the main actor, and
+cancelling it ends the sequence and removes the registration:
+
+```swift
+import StateMachine
+import StateMachineExamples
+import UIKit
+
+@MainActor
+final class ProfileViewController: UIViewController {
+    private let host: GeneratedProfile.MainActorHost
+    private var observation: Task<Void, Never>?
+
+    init(host: GeneratedProfile.MainActorHost) {
+        self.host = host
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        observation = Task {
+            do {
+                for await snapshot in try self.host.snapshots() {
+                    self.render(snapshot)
+                }
+            } catch {
+                self.showUnavailable()
+            }
+        }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        observation?.cancel()
+        observation = nil
+    }
+
+    private func render(_ snapshot: GeneratedProfile.Snapshot) { /* update views */ }
+    private func showUnavailable() { /* update views */ }
+}
+```
+
+The sequence delivers the latest snapshot, not every snapshot: a loop that is
+busy skips intermediate snapshots and sees strictly increasing revisions. The
+closed snapshot is always delivered before the sequence ends. The sequence also
+ends when the host is released without closing; in that case no element has
+`isClosed == true`. A loop sees an accepted input on a later turn, so code that
+needs the result in the same turn uses the receipt from `send`, or a
+presentation.
+
+The sequence of a `MainActorHost` is iterated on the main actor. Using
+`for await` works on every supported OS. Operators such as `map` and `prefix`
+need a deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or visionOS 2.
+
+For Combine, `$snapshot` on a ``StateMachinePresentation`` is the publisher.
+It does not complete; `$isObserving` becoming `false` signals the end:
+
+```swift
+import Combine
+
+@MainActor
+func bind(
+    _ presentation: StateMachinePresentation<GeneratedProfile.MainActorHost>,
+    to render: @escaping @MainActor (GeneratedProfile.Snapshot) -> Void
+) -> AnyCancellable {
+    presentation.$snapshot.sink { render($0) }
+}
+```
+
+Retain the returned `AnyCancellable` for as long as the view observes.
+
 ## Present an owner without a hosting protocol
 
-``SnapshotPresentation`` is the lower-level piece. It publishes snapshots of any
-type, given a closure that reads a snapshot's revision. Register an owner's
-subscription with ``SnapshotPresentation/observe(_:)``, or apply snapshots
+``SnapshotPresentation`` publishes snapshots of any type. For a generated
+snapshot, create it from the owner's current snapshot. For another type, also
+pass a closure that reads a snapshot's revision. Register an owner's
+subscription with `observe(_:)`, or apply snapshots
 yourself. Use it for owners that do not conform to
 `MainActorStateMachineHost`. ``SnapshotPresentation/apply(_:)`` accepts
 strictly increasing revisions, and ``SnapshotPresentation/stopObserving()``
 removes only the registration.
 
-## Bridge a shared host
+## Bridge a shared or actor host
 
-Shared-host callbacks may arrive outside `MainActor`. Pass their `Sendable`
+A `Shared` or `ActorHost` owner is not confined to `MainActor`. Create a
+``SnapshotPresentation`` from its current snapshot and observe its snapshot
+sequence. The presentation applies each snapshot on `MainActor` through the
+revision check:
+
+```swift
+import StateMachine
+import StateMachineExamples
+import StateMachineUI
+
+@MainActor
+func present(
+    _ shared: GeneratedProfile.Shared
+) throws -> SnapshotPresentation<GeneratedProfile.Snapshot> {
+    let presentation = SnapshotPresentation(shared.snapshot())
+    presentation.observe(try shared.snapshots())
+    return presentation
+}
+```
+
+Creating the sequence throws `SubscriptionFailure` when subscriber capacity is
+exhausted. For an `ActorHost`, use `try await actor.snapshots()`. The snapshot
+sequence keeps only the latest pending snapshot, and
+``SnapshotPresentation/isObserving`` becomes `false` when the sequence ends,
+after the owner closes or is released. ``SnapshotPresentation/snapshot`` keeps
+the last value applied. ``SnapshotPresentation/stopObserving()`` ends the
+observation, and `$snapshot` is the Combine publisher. Observation coalesces
+presentation data only; every accepted effect remains the host's responsibility.
+
+``MainActorSnapshotIngress`` is the lower-level option when snapshots arrive
+through a subscription callback outside `MainActor`. Pass their `Sendable`
 snapshots to ``MainActorSnapshotIngress/offer(_:revision:)`` and select a
 `MainActor` callback that applies them to the presentation. Capture the
 presentation weakly if the bridge belongs to a separate observation lifetime.
-
-The bridge holds one newest pending snapshot. It ignores older or duplicate
-revisions, bounds delivery work per turn, and does not allocate a new delivery
-task for each offer. Call ``MainActorSnapshotIngress/cancel()`` and cancel the
-host subscription when ending that observation lifetime. An already claimed
-callback may finish. This bridge coalesces presentation data only; every
-accepted effect remains the host's responsibility.
+The bridge holds one newest pending snapshot, ignores older or duplicate
+revisions, and bounds delivery work per turn. Call
+``MainActorSnapshotIngress/cancel()`` and cancel the host subscription when
+ending that observation lifetime. An already claimed callback may finish.
