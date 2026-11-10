@@ -288,6 +288,10 @@ nonisolated public enum IsolatedNote {
         ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription {
             try host.subscribe({ receive(project($0)) }, onFinish: onFinish)
         }
+        /// Registers a single-pass sequence of the latest complete observations.
+        public func snapshots() throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSnapshots<Snapshot> {
+            try host.snapshots { project($0) }
+        }
         /// Retains a terminal outcome with its existing operation authority.
         public func deliver(_ completion: Completion) -> DeliveryResult { project(host.deliver(completion)) }
         /// Reads immutable first-outcome records.

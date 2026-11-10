@@ -98,6 +98,9 @@ internal typealias MainActorSubscription = RuntimeMainActorSubscription
 /// Failure to register another live observer.
 internal typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
 
+/// A single-pass latest-value sequence of a MainActor owner's snapshots.
+internal typealias MainActorSnapshots = RuntimeMainActorSnapshots<Snapshot>
+
 /// Whether a managed owner retries a conflicting completion or waits for reconciliation.
 internal typealias CompletionPolicy = RuntimeCompletionPolicy
 
@@ -710,6 +713,14 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
         try host.subscribe({
                 receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
+    }
+    /// Registers a single-pass sequence of the latest complete snapshots.
+    ///
+    /// The sequence ends after the closed snapshot, when its task is cancelled, or when this owner is released.
+    internal func snapshots() throws(SubscriptionFailure) -> MainActorSnapshots {
+        try host.snapshots {
+            _stateMachineSnapshot($0)
+        }
     }
     /// Retains the first terminal outcome and validates current authority.
     internal func deliver(_ completion: Completion) -> DeliveryResult {

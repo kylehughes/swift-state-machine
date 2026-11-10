@@ -231,6 +231,10 @@ struct Generator {
         let routeNamespace =
             choices.isEmpty ? "" : "/// The edges each router may choose among.\n\(access)enum Route { \(choices) }"
         let methods = schema.transitions.map(observedMethod).joined(separator: "\n")
+        let sharedSnapshots =
+            schema.mode == .shared
+            ? "/// A single-pass latest-value sequence of a shared or actor owner's snapshots.\n\(access)typealias Snapshots = RuntimeSnapshots<Snapshot>"
+            : ""
         return """
             fileprivate typealias _StateMachineEngine = \(engine)
             /// Validated bounds for managed admission and serial subscriptions.
@@ -243,6 +247,9 @@ struct Generator {
             \(access)typealias MainActorSubscription = RuntimeMainActorSubscription
             /// Failure to register another live observer.
             \(access)typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
+            /// A single-pass latest-value sequence of a MainActor owner's snapshots.
+            \(access)typealias MainActorSnapshots = RuntimeMainActorSnapshots<Snapshot>
+            \(sharedSnapshots)
             /// Whether a managed owner retries a conflicting completion or waits for reconciliation.
             \(access)typealias CompletionPolicy = RuntimeCompletionPolicy
             /// The disposition of a retained completion.
@@ -803,6 +810,12 @@ struct Generator {
                     onFinish: @escaping \(isolation) () -> Void = {})\(asynchronous) throws(SubscriptionFailure) -> \(token) {
                     try \(awaiting)host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish)
                 }
+                /// Registers a single-pass sequence of the latest complete snapshots.
+                ///
+                /// The sequence ends after the closed snapshot, when its task is cancelled, or when this owner is released.
+                \(access)func snapshots()\(asynchronous) throws(SubscriptionFailure) -> \(mainActor ? "MainActorSnapshots" : "Snapshots") {
+                    try \(awaiting)host.snapshots { _stateMachineSnapshot($0) }
+                }
                 /// Retains the first terminal outcome and validates current authority.
                 \(access)func deliver(_ completion: Completion)\(asynchronous) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(\(awaiting)host.deliver(completion))") }
                 \(operationDeliveries(prefix: "", asynchronous: asynchronous, awaiting: awaiting))
@@ -879,6 +892,12 @@ struct Generator {
                 \(access)func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
                     onFinish: @escaping @Sendable () -> Void = {}) throws(SubscriptionFailure) -> Subscription {
                     try host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish)
+                }
+                /// Registers a single-pass sequence of the latest complete snapshots.
+                ///
+                /// The sequence ends after the closed snapshot, when its task is cancelled, or when this owner is released.
+                \(access)func snapshots() throws(SubscriptionFailure) -> Snapshots {
+                    try host.snapshots { _stateMachineSnapshot($0) }
                 }
                 /// Routes, prepares and admits one input in a single attempt.
                 ///

@@ -603,6 +603,12 @@ nonisolated public enum ReferenceProfile {
                 return Subscription(cancellation: SubscriptionCancellation { subscription.cancel() })
             } catch { throw .capacityExceeded }
         }
+        /// Registers a single-pass sequence of the latest complete observations.
+        public func snapshots() throws(SubscriptionFailure) -> RuntimeSnapshots<Snapshot> {
+            do {
+                return try host.snapshots { [configuration] in State.project($0, configuration: configuration) }
+            } catch { throw .capacityExceeded }
+        }
         /// Installs validated data with fresh incarnation and monotonically increasing revision.
         public func reset(_ archive: Archive, expected: Snapshot) -> CommitResult {
             project(
