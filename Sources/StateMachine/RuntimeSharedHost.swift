@@ -206,7 +206,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         reconciliationRequired = { _ in }
     }
     /// Capacity failure when registering a serial latest-value callback.
-    public enum SubscriptionFailure: Error { case capacityExceeded }
+    public typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
     /// Registers a capacity-one latest-value callback; client execution occurs outside host locks.
     public func subscribe(
         _ receive: @escaping @Sendable (Engine.Snapshot) -> Void,

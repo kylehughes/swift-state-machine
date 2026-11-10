@@ -52,15 +52,15 @@ public func stateMachineSchemaPlatformCheck() throws -> UInt64 {
         request: ProfileRequest(userID: user),
         drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
     )
-    guard case .committed(let receipt) = try editor.load() else { return 0 }
-    let presentation = editor.presentation
-    let ingress = MainActorSnapshotIngress<GeneratedProfile.Snapshot> { [weak presentation] in
-        presentation?.apply($0)
+    let receipt = try editor.load()
+    let background = SnapshotPresentation(editor.presentation.snapshot, revision: { $0.revision })
+    let ingress = MainActorSnapshotIngress<GeneratedProfile.Snapshot> { [weak background] in
+        background?.apply($0)
     }
     ingress.offer(receipt.snapshot, revision: receipt.revision)
     ingress.cancel()
     editor.dispose()
-    return presentation.snapshot.revision
+    return editor.presentation.snapshot.revision
 }
 
 /// Links native actor admission and managed shutdown through normal public imports.
@@ -70,7 +70,7 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
         .init(userID: user),
         drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
     )
-    guard case .committed(let receipt) = try await owner.send(.load(ProfileRequest(userID: user))) else { return 0 }
+    let receipt = try await owner.send(.load(ProfileRequest(userID: user)))
     await owner.shutdown()
     return receipt.revision
 }

@@ -426,7 +426,7 @@ First-class dynamic child orchestration is optional convenience in v1, but the u
 
 ### 9. UI and application integration
 
-`UI-001`: The baseline adapter supports iOS 16 with a MainActor-isolated observable object and a copyable snapshot projection. The runtime does not require SwiftUI; UIKit consumers can use the same snapshot subscription API.
+`UI-001`: The baseline adapter supports iOS 16 with a MainActor-isolated observable object and a copyable snapshot projection. The runtime does not require SwiftUI; UIKit consumers can use the same snapshot subscription API. The UI module provides a generic presentation over any MainActor owner that conforms to the runtime's small host protocol (`snapshot`, `send`, `subscribe`, `close`); generated MainActor owners conform. It publishes the accepted snapshot of an input in the same turn as `send` and applies later deliveries through the owner's subscription.
 
 `UI-002`: The UI owner retains the live machine privately. UI state contains copyable observations/model projections, not a raw lock, a mutable root pointer, or a noncopyable live authority embedded in a copying view value.
 
@@ -434,7 +434,7 @@ First-class dynamic child orchestration is optional convenience in v1, but the u
 
 `UI-004`: Snapshot application occurs on MainActor and checks the commit ordinal. A delayed delivery must not regress the visible model. UI delivery may coalesce to the latest snapshot, but it must not coalesce effect commands.
 
-`UI-005`: A newer Observation-based adapter may be provided with proper OS availability. Internal authority and lock storage must be excluded from automatic observation tracking. Observation callbacks must not execute while the commit lock is held.
+`UI-005`: A newer Observation-based adapter may be provided with proper OS availability. Internal authority and lock storage must be excluded from automatic observation tracking. Observation callbacks must not execute while the commit lock is held. The package provides this adapter as an `@Observable` counterpart of the baseline presentation, with the owner excluded from tracking.
 
 `UI-006`: The UI sample must demonstrate initial load, retry, cancellation, rapid request replacement, navigation away, and return. It must not access real services for conformance testing. A controlled fake driver supplies delayed and reordered outcomes.
 
@@ -715,7 +715,7 @@ public struct FetchFailureCompletion: Sendable {
 
 These have no public authority-bearing initializers. Also generate a closed domain `Completion` enum with one case per operation. Wrapping an already valid completion is harmless; constructing its hidden authority is prohibited.
 
-`API-110`: A hosted completion edge MUST require its appropriate sealed success/failure completion. It MUST NOT also offer a bare Output/Failure overload. Preparation combines snapshot provenance with the completion's operation authority; commit checks both. Authority includes the owner/incarnation, its primary scope activation, every declared dependency activation, and operation instance identity.
+`API-110`: A hosted completion edge MUST require its appropriate sealed success/failure completion. It MUST NOT also offer a bare Output/Failure overload. Preparation combines snapshot provenance with the completion's operation authority; commit checks both. Authority includes the owner/incarnation, its primary scope activation, every declared dependency activation, and operation instance identity. For convenience, each owner's `deliver` also accepts one operation's sealed completion directly, and an operation whose Output is `Void` offers a `succeeded()` that takes no value; neither admits an unsealed outcome.
 
 Work and completion are intentionally Copyable and Sendable in shared mode. This supports asynchronous callbacks without attempting to consume one captured noncopyable token repeatedly. Duplicate copies can request delivery, but successful terminal admission retires the operation atomically. This is at-most-once admission, not proof of honest driver results or exactly-once external execution.
 
@@ -810,7 +810,7 @@ Every managed host MUST receive its appropriately isolated Drivers value during 
 
 `discardPending(id:)` performs an explicit authority-only commit: revoke that operation and dispose its pending envelope atomically, recording cancellation if needed. Normal revision/queue checks apply; rejection leaves the pending record intact. It does not invent a model recovery transition; applications use a declared cancel/recovery edge when needed. Duplicate delivery returns the existing pending status without replacing its outcome or reexecuting preparation.
 
-`API-114`: Local ownership is a noncopyable dynamic value with mutating synchronous operations. MainActor ownership is an explicitly isolated final class. An actor adapter serializes entry but does not suspend inside preparation/commit. Shared ownership is an intentional reference-semantic handle. Shared schemas, supporting nominal types, transitions, and routers MUST have appropriate nonisolated annotations/defaults. The root macro cannot rewrite authored isolation: require annotations or diagnose unsupported isolation. Probe MainActor-default clients in G0; never substitute unchecked escape code or promise a silent override.
+`API-114`: Local ownership is a noncopyable dynamic value with mutating synchronous operations. MainActor ownership is an explicitly isolated final class. An actor adapter serializes entry but does not suspend inside preparation/commit. Shared ownership is an intentional reference-semantic handle. Shared schemas, supporting nominal types, transitions, and routers MUST have appropriate nonisolated annotations/defaults. The root macro cannot rewrite authored isolation: require annotations or diagnose unsupported isolation. Probe MainActor-default clients in G0; never substitute unchecked escape code or promise a silent override. Every hosted owner offers `send(_:)`, which routes, prepares and admits one input and reports failure through one closed `SendRejection` that distinguishes preparation rejection from commit rejection. MainActor and actor owners run the pair in one isolated turn; `Local` runs it under its exclusive access; the shared owner makes exactly one attempt and never repeats preparation (`CONFLICT-001`), so a concurrent commit surfaces as a conflict rejection. Explicit `commit` of a prepared candidate still returns `CommitResult`.
 
 `API-118`: Local has an explicit **manual-effect surface**, with no invisible asynchronous mutation:
 

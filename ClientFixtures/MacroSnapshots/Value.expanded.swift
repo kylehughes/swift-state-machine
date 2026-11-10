@@ -65,6 +65,21 @@ internal typealias Configuration = RuntimeManagedConfiguration
 /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
 internal typealias LocalConfiguration = RuntimeLimits
 
+/// A live observation registration; cancelling or releasing it stops delivery.
+internal typealias Subscription = RuntimeSubscription
+
+/// A live MainActor observation registration; cancelling or releasing it stops delivery.
+internal typealias MainActorSubscription = RuntimeMainActorSubscription
+
+/// Failure to register another live observer.
+internal typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
+
+/// Whether a managed owner retries a conflicting completion or waits for reconciliation.
+internal typealias CompletionPolicy = RuntimeCompletionPolicy
+
+/// The disposition of a retained completion.
+internal typealias PendingStatus = RuntimePendingStatus
+
 /// Admission rejection reasons in exact evaluation precedence.
 internal typealias CommitRejection = RuntimeState<Counter, Effect>.Rejection
 
@@ -98,7 +113,7 @@ internal func finish(_ input: Int) throws(PreparationFailure<Never>) -> Prepared
 }
 
 /// A complete historical root observation with sealed provenance.
-internal enum Snapshot: Sendable {
+internal enum Snapshot: Sendable, StateMachineSnapshot {
     case idle(Observed<Idle>)
     case done(Observed<Done>)
     fileprivate var record: _StateMachineEngine.Snapshot {
@@ -156,7 +171,7 @@ internal enum PreparationResult: ~Copyable, Sendable {
 }
 
 /// A historical receipt for an atomic acceptance.
-internal struct Receipt: Sendable {
+internal struct Receipt: Sendable, StateMachineReceipt {
     /// The accepted historical observation.
     internal let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
@@ -166,6 +181,14 @@ internal struct Receipt: Sendable {
     internal var revision: UInt64 {
         snapshot.revision
     }
+}
+
+/// Why `send` did not admit an input.
+internal enum SendRejection: Error {
+    /// Routing or the authored transition declined the input before a candidate existed.
+    case preparation(PreparationRejection)
+    /// The owner refused the prepared candidate; read `snapshot()` for the current root.
+    case commit(CommitRejection)
 }
 
 /// Admission either publishes the entire candidate or leaves all state unchanged.
@@ -315,7 +338,7 @@ internal typealias PendingCompletion = RuntimeDeliveryLedger<Counter, Effect, Co
 /// A closed completion delivery decision.
 internal enum DeliveryResult: Sendable {
     case committed(Receipt)
-    case pending(PendingCompletionID, RuntimePendingStatus)
+    case pending(PendingCompletionID, PendingStatus)
     case inProgress
     case notPending
     /// The operation's authority is inactive or its outcome was already settled.
@@ -358,6 +381,21 @@ internal struct Local: ~Copyable {
         let result = engine.commit(prepared.candidate)
         ledger.prune(in: engine)
         return _stateMachineAdmission(result)
+    }
+    /// Routes, prepares and admits one input against the current root.
+    @discardableResult
+    internal mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
+        switch Counter.prepare(input, on: snapshot()) {
+        case .prepared(let prepared):
+            switch commit(prepared) {
+            case .committed(let receipt):
+                return receipt
+            case .rejected(let reason, _):
+                throw .commit(reason)
+            }
+        case .rejected(let reason):
+            throw .preparation(reason)
+        }
     }
     /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
     internal mutating func drainCommands(limit: Int) -> [CommandBatch] {
@@ -434,12 +472,12 @@ internal struct Local: ~Copyable {
 }
 
 /// A sealed sole-writer MainActor owner with managed execution.
-@MainActor internal final class MainActorHost {
+@MainActor internal final class MainActorHost: MainActorStateMachineHost {
     private typealias Host = RuntimeMainActorHost<Counter, Effect, Completion, PreparationRejection>
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
     internal init(_ initial: Idle, drivers: MainActorDrivers, configuration: Configuration = .default,
-        completionPolicy: RuntimeCompletionPolicy = .manualOnConflict,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
         }) {
         host = Host(.idle(initial), scopes: [], configuration: configuration,
@@ -457,7 +495,8 @@ internal struct Local: ~Copyable {
         _stateMachineSnapshot(host.snapshot())
     }
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
-    internal func send(_ input: Input) throws(PreparationRejection) -> CommitResult {
+    @discardableResult
+    internal func send(_ input: Input) throws(SendRejection) -> Receipt {
         let result = host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
             switch Counter.prepare(input, on: _stateMachineSnapshot(raw)) {
             case .prepared(let prepared):
@@ -467,10 +506,12 @@ internal struct Local: ~Copyable {
             }
         }
         switch result {
-        case .success(let admission):
-            return _stateMachineAdmission(admission)
+        case .success(.committed(let record)):
+            return Receipt(record)
+        case .success(.rejected(let reason, _)):
+            throw .commit(reason)
         case .failure(let reason):
-            throw reason
+            throw .preparation(reason)
         }
     }
     /// Consumes an explicitly prepared historical candidate, rechecking freshness.
@@ -481,7 +522,7 @@ internal struct Local: ~Copyable {
     /// Subscribes to initial, accepted and terminal complete snapshots.
     internal func subscribe(_ receive: @escaping @MainActor (Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void = {
-        }) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription {
+        }) throws(SubscriptionFailure) -> MainActorSubscription {
         try host.subscribe({
                 receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
@@ -565,7 +606,7 @@ internal final class Shared: Sendable {
     private let host: RuntimeSharedHost<Counter, Effect, Completion, PreparationRejection>
     /// Creates fresh initial authority and retains the driver selection immutably.
     internal init(_ initial: Idle, drivers: Drivers, configuration: Configuration = .default,
-        completionPolicy: RuntimeCompletionPolicy = .manualOnConflict,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
         host = RuntimeSharedHost(.idle(initial), scopes: [], limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
@@ -584,10 +625,28 @@ internal final class Shared: Sendable {
     /// Registers a serial capacity-one latest-value observation callback.
     internal func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
         onFinish: @escaping @Sendable () -> Void = {
-        }) throws(RuntimeSharedHost<Counter, Effect, Completion, PreparationRejection>.SubscriptionFailure) -> RuntimeSubscription {
+        }) throws(SubscriptionFailure) -> Subscription {
         try host.subscribe({
                 receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
+    }
+    /// Routes, prepares and admits one input in a single attempt.
+    ///
+    /// Preparation runs outside the lock against one snapshot and is never repeated, so
+    /// a concurrent commit surfaces as `.commit(.conflict)` for the caller to resolve.
+    @discardableResult
+    internal func send(_ input: Input) throws(SendRejection) -> Receipt {
+        switch Counter.prepare(input, on: snapshot()) {
+        case .prepared(let prepared):
+            switch commit(prepared) {
+            case .committed(let receipt):
+                return receipt
+            case .rejected(let reason, _):
+                throw .commit(reason)
+            }
+        case .rejected(let reason):
+            throw .preparation(reason)
+        }
     }
     /// Consumes one candidate into an atomic admission attempt.
     internal func commit(_ prepared: consuming Prepared) -> CommitResult {
@@ -653,7 +712,7 @@ internal final class ActorHost: Sendable {
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
     internal init(_ initial: Idle, drivers: Drivers, configuration: Configuration = .default,
-        completionPolicy: RuntimeCompletionPolicy = .manualOnConflict,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
         host = Host(.idle(initial), scopes: [], configuration: configuration,
@@ -671,7 +730,8 @@ internal final class ActorHost: Sendable {
         _stateMachineSnapshot(await host.snapshot())
     }
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
-    internal func send(_ input: Input) async throws(PreparationRejection) -> CommitResult {
+    @discardableResult
+    internal func send(_ input: Input) async throws(SendRejection) -> Receipt {
         let result = await host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
             switch Counter.prepare(input, on: _stateMachineSnapshot(raw)) {
             case .prepared(let prepared):
@@ -681,10 +741,12 @@ internal final class ActorHost: Sendable {
             }
         }
         switch result {
-        case .success(let admission):
-            return _stateMachineAdmission(admission)
+        case .success(.committed(let record)):
+            return Receipt(record)
+        case .success(.rejected(let reason, _)):
+            throw .commit(reason)
         case .failure(let reason):
-            throw reason
+            throw .preparation(reason)
         }
     }
     /// Consumes an explicitly prepared historical candidate, rechecking freshness.
@@ -695,7 +757,7 @@ internal final class ActorHost: Sendable {
     /// Subscribes to initial, accepted and terminal complete snapshots.
     internal func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
         onFinish: @escaping @Sendable () -> Void = {
-        }) async throws(RuntimeHostSubscriptionFailure) -> RuntimeSubscription {
+        }) async throws(SubscriptionFailure) -> Subscription {
         try await host.subscribe({
                 receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)

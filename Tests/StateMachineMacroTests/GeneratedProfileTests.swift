@@ -89,6 +89,39 @@ import Testing
         #expect(first.acknowledgeExecution(work.execution, disposition: .terminated) == .recorded)
         #expect(first.acknowledgeExecution(work.execution, disposition: .terminated) == .duplicate)
     }
+    @Test func sendReportsPreparationAndCommitRejectionsThroughOneChannel() async throws {
+        let user = try UserID("kyle")
+        var local = GeneratedProfile.Local(.init(userID: user))
+        let foreign = try ProfileRequest(userID: try UserID("someone-else"))
+        do {
+            try local.send(.load(foreign))
+            Issue.record("A request for another user was admitted")
+        } catch {
+            guard case .preparation(.begin(.wrongUser)) = error else { throw Failure.unexpected }
+        }
+        let receipt = try local.send(.load(ProfileRequest(userID: user)))
+        #expect(receipt.revision == 1)
+        do {
+            try local.send(.retry)
+            Issue.record("An input with no edge from the current phase was admitted")
+        } catch {
+            guard case .preparation(.invalidPhase) = error else { throw Failure.unexpected }
+        }
+        _ = local.close()
+        do {
+            try local.send(.cancel)
+            Issue.record("A closed owner admitted an input")
+        } catch {
+            guard case .commit(.closed) = error else { throw Failure.unexpected }
+        }
+        let shared = GeneratedProfile.Shared(
+            .init(userID: user),
+            drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        )
+        #expect(try shared.send(.load(ProfileRequest(userID: user))).revision == 1)
+        await shared.shutdown()
+        #expect(shared.isQuiescent)
+    }
     @Test func managedGeneratedDriverCompletesAndJoins() async throws {
         let user = try UserID("kyle")
         let network = ControlledProfileNetwork()

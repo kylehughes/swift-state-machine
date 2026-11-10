@@ -888,7 +888,9 @@ private struct SchemaParser {
             "RuntimeCompletionPolicy", "RuntimeSharedHost", "RuntimeMainActorHost", "RuntimeActorHost",
             "RuntimeHostDelivery", "RuntimeHostSubscriptionFailure", "RuntimeMainActorSubscription",
             "RuntimeSubscription", "Change", "Advance",
-            "PreparationFailure", "PlanRejection", "Effect", "Route",
+            "PreparationFailure", "PlanRejection", "Effect", "Route", "SendRejection", "Subscription",
+            "MainActorSubscription", "SubscriptionFailure", "CompletionPolicy", "PendingStatus", "StateMachineSnapshot",
+            "StateMachineReceipt", "MainActorStateMachineHost",
         ]
         for operation in operations {
             for suffix in ["Work", "Completion", "SuccessCompletion", "FailureCompletion"] {

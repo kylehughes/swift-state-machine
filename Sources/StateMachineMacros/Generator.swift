@@ -237,6 +237,16 @@ struct Generator {
             \(access)typealias Configuration = RuntimeManagedConfiguration
             /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
             \(access)typealias LocalConfiguration = RuntimeLimits
+            /// A live observation registration; cancelling or releasing it stops delivery.
+            \(access)typealias Subscription = RuntimeSubscription
+            /// A live MainActor observation registration; cancelling or releasing it stops delivery.
+            \(access)typealias MainActorSubscription = RuntimeMainActorSubscription
+            /// Failure to register another live observer.
+            \(access)typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
+            /// Whether a managed owner retries a conflicting completion or waits for reconciliation.
+            \(access)typealias CompletionPolicy = RuntimeCompletionPolicy
+            /// The disposition of a retained completion.
+            \(access)typealias PendingStatus = RuntimePendingStatus
             /// Admission rejection reasons in exact evaluation precedence.
             \(access)typealias CommitRejection = \(engine).Rejection
             /// An immutable historical payload with sealed complete-root provenance.
@@ -251,7 +261,7 @@ struct Generator {
                 \(methods)
             }
             /// A complete historical root observation with sealed provenance.
-            \(access)enum Snapshot\(sendable) {
+            \(access)enum Snapshot: \(schema.mode == .shared ? "Sendable, " : "")StateMachineSnapshot {
                 \(cases)
                 fileprivate var record: _StateMachineEngine.Snapshot { switch self { \(recordCases) } }
                 /// The accepted revision of this observation.
@@ -284,12 +294,19 @@ struct Generator {
                 case rejected(PreparationRejection)
             }
             /// A historical receipt for an atomic acceptance.
-            \(access)struct Receipt\(sendable) {
+            \(access)struct Receipt: \(schema.mode == .shared ? "Sendable, " : "")StateMachineReceipt {
                 /// The accepted historical observation.
                 \(access)let snapshot: Snapshot
                 fileprivate init(_ record: _StateMachineEngine.Snapshot) { snapshot = _stateMachineSnapshot(record) }
                 /// The owner-lifetime accepted revision.
                 \(access)var revision: UInt64 { snapshot.revision }
+            }
+            /// Why `send` did not admit an input.
+            \(access)enum SendRejection: Error {
+                /// Routing or the authored transition declined the input before a candidate existed.
+                case preparation(PreparationRejection)
+                /// The owner refused the prepared candidate; read `snapshot()` for the current root.
+                case commit(CommitRejection)
             }
             /// Admission either publishes the entire candidate or leaves all state unchanged.
             \(access)enum CommitResult\(sendable) {
@@ -598,7 +615,7 @@ struct Generator {
         /// A closed completion delivery decision.
         \(access)enum DeliveryResult\(sendable) {
             case committed(Receipt)
-            case pending(PendingCompletionID, RuntimePendingStatus)
+            case pending(PendingCompletionID, PendingStatus)
             case inProgress
             case notPending
             /// The operation's authority is inactive or its outcome was already settled.
@@ -640,6 +657,18 @@ struct Generator {
                 let result = engine.commit(prepared.candidate)
                 ledger.prune(in: engine)
                 return _stateMachineAdmission(result)
+            }
+            /// Routes, prepares and admits one input against the current root.
+            @discardableResult
+            \(access)mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
+                switch \(name).prepare(input, on: snapshot()) {
+                case .prepared(let prepared):
+                    switch commit(prepared) {
+                    case .committed(let receipt): return receipt
+                    case .rejected(let reason, _): throw .commit(reason)
+                    }
+                case .rejected(let reason): throw .preparation(reason)
+                }
             }
             /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
             \(access)mutating func drainCommands(limit: Int) -> [CommandBatch] {
@@ -709,7 +738,7 @@ struct Generator {
         let isolation = mainActor ? "@MainActor" : "@Sendable"
         let asynchronous = mainActor ? "" : " async"
         let awaiting = mainActor ? "" : "await "
-        let token = mainActor ? "RuntimeMainActorSubscription" : "RuntimeSubscription"
+        let token = mainActor ? "MainActorSubscription" : "Subscription"
         let fields = schema.operations
             .map {
                 "/// Executes this operation within the selected isolation.\n\(access)let \($0.effect): @MainActor (\($0.name).Input) async -> Result<\($0.name).Output, \($0.name).Failure>"
@@ -734,12 +763,12 @@ struct Generator {
         return """
             \(driverDeclaration)
             /// A sealed sole-writer \(mainActor ? "MainActor" : "native actor") owner with managed execution.
-            \(mainActor ? "@MainActor " : "")\(access)final class \(facade)\(mainActor ? "" : ": Sendable") {
+            \(mainActor ? "@MainActor " : "")\(access)final class \(facade): \(mainActor ? "MainActorStateMachineHost" : "Sendable") {
                 private typealias Host = \(runtime)<\(name), Effect, Completion, PreparationRejection>
                 private let host: Host
                 /// Creates fresh authority and immutable execution selections.
                 \(access)init(_ initial: \(initialType), drivers: \(drivers), configuration: Configuration = .default,
-                    completionPolicy: RuntimeCompletionPolicy = .manualOnConflict,
+                    completionPolicy: CompletionPolicy = .manualOnConflict,
                     onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in }) {
                     host = Host(.\(schema.initial)(initial), scopes: [\(initialScopes)], configuration: configuration,
                         policy: completionPolicy, driver: { raw in
@@ -750,7 +779,8 @@ struct Generator {
                 /// Captures a complete historical observation.
                 \(access)func snapshot()\(asynchronous) -> Snapshot { _stateMachineSnapshot(\(awaiting)host.snapshot()) }
                 /// Routes, prepares and admits one input in a single isolated turn without suspension.
-                \(access)func send(_ input: Input)\(asynchronous) throws(PreparationRejection) -> CommitResult {
+                @discardableResult
+                \(access)func send(_ input: Input)\(asynchronous) throws(SendRejection) -> Receipt {
                     let result = \(awaiting)host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
                         switch \(name).prepare(input, on: _stateMachineSnapshot(raw)) {
                         case .prepared(let prepared): return .success(prepared.candidate)
@@ -758,8 +788,9 @@ struct Generator {
                         }
                     }
                     switch result {
-                    case .success(let admission): return _stateMachineAdmission(admission)
-                    case .failure(let reason): throw reason
+                    case .success(.committed(let record)): return Receipt(record)
+                    case .success(.rejected(let reason, _)): throw .commit(reason)
+                    case .failure(let reason): throw .preparation(reason)
                     }
                 }
                 /// Consumes an explicitly prepared historical candidate, rechecking freshness.
@@ -769,7 +800,7 @@ struct Generator {
                 }
                 /// Subscribes to initial, accepted and terminal complete snapshots.
                 \(access)func subscribe(_ receive: @escaping \(isolation) (Snapshot) -> Void,
-                    onFinish: @escaping \(isolation) () -> Void = {})\(asynchronous) throws(RuntimeHostSubscriptionFailure) -> \(token) {
+                    onFinish: @escaping \(isolation) () -> Void = {})\(asynchronous) throws(SubscriptionFailure) -> \(token) {
                     try \(awaiting)host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish)
                 }
                 /// Retains the first terminal outcome and validates current authority.
@@ -835,7 +866,7 @@ struct Generator {
                 private let host: RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>
                 /// Creates fresh initial authority and retains the driver selection immutably.
                 \(access)init(_ initial: \(initialType), drivers: Drivers, configuration: Configuration = .default,
-                    completionPolicy: RuntimeCompletionPolicy = .manualOnConflict,
+                    completionPolicy: CompletionPolicy = .manualOnConflict,
                     onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in }) {
                     host = RuntimeSharedHost(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
                         policy: completionPolicy, driver: { raw in
@@ -846,8 +877,23 @@ struct Generator {
                 \(access)func snapshot() -> Snapshot { _stateMachineSnapshot(host.snapshot()) }
                 /// Registers a serial capacity-one latest-value observation callback.
                 \(access)func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
-                    onFinish: @escaping @Sendable () -> Void = {}) throws(RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>.SubscriptionFailure) -> RuntimeSubscription {
+                    onFinish: @escaping @Sendable () -> Void = {}) throws(SubscriptionFailure) -> Subscription {
                     try host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish)
+                }
+                /// Routes, prepares and admits one input in a single attempt.
+                ///
+                /// Preparation runs outside the lock against one snapshot and is never repeated, so
+                /// a concurrent commit surfaces as `.commit(.conflict)` for the caller to resolve.
+                @discardableResult
+                \(access)func send(_ input: Input) throws(SendRejection) -> Receipt {
+                    switch \(name).prepare(input, on: snapshot()) {
+                    case .prepared(let prepared):
+                        switch commit(prepared) {
+                        case .committed(let receipt): return receipt
+                        case .rejected(let reason, _): throw .commit(reason)
+                        }
+                    case .rejected(let reason): throw .preparation(reason)
+                    }
                 }
                 /// Consumes one candidate into an atomic admission attempt.
                 \(access)func commit(_ prepared: consuming Prepared) -> CommitResult { _stateMachineAdmission(host.commit(prepared.candidate)) }
