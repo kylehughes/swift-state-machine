@@ -366,7 +366,6 @@ struct Generator {
                 case recorded
                 case duplicate
                 case foreignOwner
-                case unknownExecution
             }
             /// A closed accepted start or cancellation command.
             \(access)enum Command\(sendable) {
@@ -530,7 +529,10 @@ struct Generator {
             case pending(PendingCompletionID, RuntimePendingStatus)
             case inProgress
             case notPending
+            /// The operation's authority is inactive or its outcome was already settled.
             case stale
+            /// The completion was issued by a different owner.
+            case foreignOwner
             case discarded(Receipt)
             case rejected(CommitRejection)
         }
@@ -581,7 +583,6 @@ struct Generator {
                 case .recorded: return .recorded
                 case .duplicate: return .duplicate
                 case .foreignOwner: return .foreignOwner
-                @unknown default: return .unknownExecution
                 }
             }
             /// Retains the first outcome and attempts one typed preparation against the current root.
@@ -589,6 +590,7 @@ struct Generator {
                 \(schema.operations.isEmpty ? "" : """
                 switch ledger.retain(completion, for: completion.authority, in: &engine) {
                 case .stale: return .stale
+                case .foreignOwner: return .foreignOwner
                 case .pending(let id):
                     guard let pending = ledger.pending.first(where: { $0.id == id }) else { return .notPending }
                     if pending.status != .awaitingAdmission { return .pending(id, pending.status) }
@@ -726,6 +728,7 @@ struct Generator {
                     case .inProgress: return .inProgress
                     case .notPending: return .notPending
                     case .stale: return .stale
+                    case .foreignOwner: return .foreignOwner
                     case .discarded(let record): return .discarded(Receipt(record))
                     case .rejected(let reason): return .rejected(reason)
                     }
@@ -797,6 +800,7 @@ struct Generator {
                     case .inProgress: return .inProgress
                     case .notPending: return .notPending
                     case .stale: return .stale
+                    case .foreignOwner: return .foreignOwner
                     case .discarded(let record): return .discarded(Receipt(record))
                     case .rejected(let reason): return .rejected(reason)
                     }

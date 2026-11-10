@@ -17,6 +17,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         case inProgress
         case notPending
         case stale
+        case foreignOwner
         case discarded(Engine.Snapshot)
         case rejected(Engine.Rejection)
     }
@@ -303,6 +304,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             var after = before.value
             let retention = after.ledger.retain(outcome, for: authority, in: &after.engine)
             switch retention {
+            case .foreignOwner: return .foreignOwner
             case .stale:
                 if storage.isCurrent(before) { return .stale }
             case .pending(let id):

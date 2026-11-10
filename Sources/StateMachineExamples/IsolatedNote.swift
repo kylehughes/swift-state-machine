@@ -205,6 +205,7 @@ nonisolated public enum IsolatedNote {
         public mutating func deliver(_ completion: Completion) -> DeliveryResult {
             switch ledger.retain(completion, for: completion.authority, in: &engine) {
             case .stale: return .stale
+            case .foreignOwner: return .foreignOwner
             case .pending(let id):
                 guard let pending = ledger.pending.first(where: { $0.id == id }) else { return .notPending }
                 guard pending.status == .awaitingAdmission else { return .pending(id, pending.status) }
@@ -319,6 +320,7 @@ nonisolated public enum IsolatedNote {
         case inProgress
         case notPending
         case stale
+        case foreignOwner
         case discarded(Receipt)
         case rejected(Engine.Rejection)
     }
@@ -398,6 +400,7 @@ nonisolated public enum IsolatedNote {
         case .inProgress: .inProgress
         case .notPending: .notPending
         case .stale: .stale
+        case .foreignOwner: .foreignOwner
         case .discarded(let stamp): .discarded(Receipt(snapshot: project(stamp)))
         case .rejected(let reason): .rejected(reason)
         }

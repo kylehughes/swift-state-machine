@@ -5,6 +5,7 @@
     case inProgress
     case notPending
     case stale
+    case foreignOwner
     case discarded(RuntimeState<Model, Descriptor>.Snapshot)
     case rejected(RuntimeState<Model, Descriptor>.Rejection)
 }

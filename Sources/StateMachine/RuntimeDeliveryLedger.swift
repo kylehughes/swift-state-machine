@@ -68,10 +68,13 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
         case inProgress
         case notPending
     }
-    /// Whether the first envelope is retained or the operation is stale.
+    /// Whether the first envelope is retained, the operation is stale, or the ticket is another owner's.
     @frozen public enum Retention {
         case pending(RuntimePendingID)
+        /// The operation's authority is inactive or its outcome was already settled.
         case stale
+        /// The ticket was issued by a different owner, which is a caller error rather than a race.
+        case foreignOwner
     }
     /// The outcome of one completed preparation and admission attempt.
     @frozen public enum Finish {
@@ -103,7 +106,11 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
     /// Retains the first outcome together with its engine delivery disposition.
     public mutating func retain(_ outcome: Outcome, for ticket: RuntimeTicket, in engine: inout Engine) -> Retention {
         if let existing = entries.first(where: { $0.ticket == ticket }) { return .pending(existing.id) }
-        guard case .retained = engine.retainOutcome(for: ticket) else { return .stale }
+        switch engine.retainOutcome(for: ticket) {
+        case .retained: break
+        case .foreignOwner: return .foreignOwner
+        case .duplicate, .inactiveAuthority: return .stale
+        }
         let entry = Entry(id: RuntimePendingID(), ticket: ticket, outcome: outcome)
         entries.append(entry)
         return .pending(entry.id)

@@ -204,7 +204,6 @@ internal enum AcknowledgmentResult: Equatable, Sendable {
     case recorded
     case duplicate
     case foreignOwner
-    case unknownExecution
 }
 
 /// A closed accepted start or cancellation command.
@@ -316,7 +315,10 @@ internal enum DeliveryResult: Sendable {
     case pending(PendingCompletionID, RuntimePendingStatus)
     case inProgress
     case notPending
+    /// The operation's authority is inactive or its outcome was already settled.
     case stale
+    /// The completion was issued by a different owner.
+    case foreignOwner
     case discarded(Receipt)
     case rejected(CommitRejection)
 }
@@ -373,8 +375,6 @@ internal struct Local: ~Copyable {
             return .duplicate
         case .foreignOwner:
             return .foreignOwner
-        @unknown default:
-            return .unknownExecution
         }
     }
     /// Retains the first outcome and attempts one typed preparation against the current root.
@@ -537,6 +537,8 @@ internal struct Local: ~Copyable {
             return .notPending
         case .stale:
             return .stale
+        case .foreignOwner:
+            return .foreignOwner
         case .discarded(let record):
             return .discarded(Receipt(record))
         case .rejected(let reason):
@@ -629,6 +631,8 @@ internal final class Shared: Sendable {
             return .notPending
         case .stale:
             return .stale
+        case .foreignOwner:
+            return .foreignOwner
         case .discarded(let record):
             return .discarded(Receipt(record))
         case .rejected(let reason):
@@ -751,6 +755,8 @@ internal final class ActorHost: Sendable {
             return .notPending
         case .stale:
             return .stale
+        case .foreignOwner:
+            return .foreignOwner
         case .discarded(let record):
             return .discarded(Receipt(record))
         case .rejected(let reason):

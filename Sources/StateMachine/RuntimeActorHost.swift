@@ -107,6 +107,7 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
         let retention = ledger.retain(outcome, for: authority, in: &engine)
         switch retention {
         case .stale: return .stale
+        case .foreignOwner: return .foreignOwner
         case .pending(let id):
             guard let pending = ledger.pending.first(where: { $0.id == id }) else { return .notPending }
             guard pending.status == .awaitingAdmission else { return .pending(id, pending.status) }

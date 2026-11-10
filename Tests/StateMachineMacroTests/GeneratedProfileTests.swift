@@ -73,6 +73,22 @@ import Testing
         #expect(first.snapshot().revision == 0)
         _ = first.close()
     }
+    @Test func completionFromAnotherOwnerIsForeignRatherThanStale() throws {
+        let user = try UserID("kyle")
+        var first = GeneratedProfile.Local(.init(userID: user))
+        var second = GeneratedProfile.Local(.init(userID: user))
+        let work = try begin(&first)
+        _ = try begin(&second)
+        let completion = GeneratedProfile.Completion.fetch(work.succeeded(Profile(userID: user, name: "First")))
+        guard case .foreignOwner = second.deliver(completion) else { throw Failure.unexpected }
+        #expect(second.pendingCompletions().isEmpty)
+        #expect(second.acknowledgeExecution(work.execution, disposition: .terminated) == .foreignOwner)
+        // The issuing owner still accepts it once, and a repeat is stale rather than foreign.
+        guard case .committed = first.deliver(completion) else { throw Failure.unexpected }
+        guard case .stale = first.deliver(completion) else { throw Failure.unexpected }
+        #expect(first.acknowledgeExecution(work.execution, disposition: .terminated) == .recorded)
+        #expect(first.acknowledgeExecution(work.execution, disposition: .terminated) == .duplicate)
+    }
     @Test func managedGeneratedDriverCompletesAndJoins() async throws {
         let user = try UserID("kyle")
         let network = ControlledProfileNetwork()

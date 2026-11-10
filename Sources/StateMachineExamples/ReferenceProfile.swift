@@ -244,6 +244,7 @@ nonisolated public enum ReferenceProfile {
         case inProgress
         case notPending
         case stale
+        case foreignOwner
         case discarded(Receipt)
         case rejected(CommitRejection)
     }
@@ -318,7 +319,6 @@ nonisolated public enum ReferenceProfile {
         case recorded
         case duplicate
         case foreignOwner
-        case unknownExecution
     }
     /// Validated capacity bounds for shared and local ownership.
     public struct Configuration: Sendable {
@@ -682,6 +682,7 @@ nonisolated public enum ReferenceProfile {
             case .inProgress: return .inProgress
             case .notPending: return .notPending
             case .stale: return .stale
+            case .foreignOwner: return .foreignOwner
             case .discarded(let stamp):
                 return .discarded(Receipt(snapshot: State.project(stamp, configuration: configuration)))
             case .rejected(let reason): return .rejected(Self.rejection(reason))
@@ -1204,6 +1205,7 @@ extension ReferenceProfile.Local {
         let existing = state.ledger.pending.map(\.id)
         switch state.ledger.retain(completion, for: ReferenceProfile.authority(of: completion), in: &state.engine) {
         case .stale: return .stale
+        case .foreignOwner: return .foreignOwner
         case .pending(let id):
             if existing.contains(id), let pending = state.ledger.pending.first(where: { $0.id == id }) {
                 return .pending(id, pending.status)

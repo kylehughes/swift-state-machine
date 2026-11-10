@@ -328,7 +328,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         public let terminal: Bool
     }
     /// Execution acknowledgment independent of result admission.
-    public enum Acknowledgment: Equatable, Sendable {
+    @frozen public enum Acknowledgment: Equatable, Sendable {
         /// Actual termination was recorded.
         case recorded
         /// This obligation was already acknowledged or released.
