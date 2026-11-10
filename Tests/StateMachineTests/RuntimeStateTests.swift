@@ -28,14 +28,14 @@ import Testing
         }
     }
 
-    private func reject(_ result: Core.Admission, as expected: Core.Rejection, model: Int, ordinal: UInt64) {
+    private func reject(_ result: Core.Admission, as expected: Core.Rejection, model: Int, revision: UInt64) {
         guard case .rejected(let reason, let current) = result else {
             Issue.record("Expected rejection")
             return
         }
         #expect(reason == expected)
         #expect(current.model == model)
-        #expect(current.ordinal == ordinal)
+        #expect(current.revision == revision)
     }
 
     @Test func latestRevokesOldAuthorityAndPreservesAuthoredStartOrder() throws {
@@ -85,7 +85,7 @@ import Testing
                 starts: [.init(exclusive, descriptor: "blocked")]
             )
         )
-        reject(state.commit(candidate), as: .operationPolicy(.alreadyActive), model: 1, ordinal: 1)
+        reject(state.commit(candidate), as: .operationPolicy(.alreadyActive), model: 1, revision: 1)
         #expect(originals.allSatisfy { state.isActive($0.ticket) })
         #expect(state.executionReservations.count == 2)
         #expect(!state.hasQueuedBatches)
@@ -119,7 +119,7 @@ import Testing
                 .init(firstOperation, descriptor: "too many")
             ])
         )
-        reject(state.commit(blocked), as: .operationPolicy(.parallelLimit), model: 1, ordinal: 1)
+        reject(state.commit(blocked), as: .operationPolicy(.parallelLimit), model: 1, revision: 1)
         #expect(originals.allSatisfy { state.isActive($0.ticket) })
         try accept(
             &state,
@@ -146,7 +146,7 @@ import Testing
                 .init(parallel, descriptor: "three"),
             ])
         )
-        reject(empty.commit(tooMany), as: .operationPolicy(.parallelLimit), model: 0, ordinal: 0)
+        reject(empty.commit(tooMany), as: .operationPolicy(.parallelLimit), model: 0, revision: 0)
         #expect(empty.executionReservations.isEmpty)
         #expect(!empty.hasQueuedBatches)
         try accept(
@@ -165,7 +165,7 @@ import Testing
                 starts: [.init(parallel, descriptor: "third")]
             )
         )
-        reject(empty.commit(third), as: .operationPolicy(.parallelLimit), model: 1, ordinal: 1)
+        reject(empty.commit(third), as: .operationPolicy(.parallelLimit), model: 1, revision: 1)
         #expect(activePair.allSatisfy { empty.isActive($0.ticket) })
         #expect(empty.executionReservations.count == 2)
         #expect(!empty.hasQueuedBatches)
@@ -192,7 +192,7 @@ import Testing
         )
         #expect(state.snapshot.model == retained.model)
         #expect(!state.isActive(old.ticket))
-        reject(state.commit(oldProof), as: .inactiveAuthority, model: 7, ordinal: 3)
+        reject(state.commit(oldProof), as: .inactiveAuthority, model: 7, revision: 3)
         let replacement = try #require(works(state.drain(limit: 10)).first)
         #expect(replacement.ticket != old.ticket)
         #expect(state.isActive(replacement.ticket))
@@ -218,7 +218,7 @@ import Testing
                 return
             }
         }
-        #expect(state.snapshot.ordinal == 0)
+        #expect(state.snapshot.revision == 0)
         #expect(state.executionReservations.isEmpty)
         try accept(&state, model: 1, plan: .init(starts: [.init(exclusive, descriptor: "active")]))
         let work = try #require(works(state.drain(limit: 1)).first)
@@ -230,7 +230,7 @@ import Testing
             ])
         )
         try accept(&state, model: 2)
-        reject(state.commit(stale), as: .conflict, model: 2, ordinal: 2)
+        reject(state.commit(stale), as: .conflict, model: 2, revision: 2)
         let policy = try Core.prepare(
             on: state.snapshot,
             next: 99,
@@ -238,7 +238,7 @@ import Testing
                 .init(exclusive, descriptor: "policy")
             ])
         )
-        reject(state.commit(policy), as: .operationPolicy(.alreadyActive), model: 2, ordinal: 2)
+        reject(state.commit(policy), as: .operationPolicy(.alreadyActive), model: 2, revision: 2)
         let capacity = try Core.prepare(
             on: state.snapshot,
             next: 99,
@@ -246,14 +246,14 @@ import Testing
                 .init(.init(kind: 2, scope: b), descriptor: "capacity")
             ])
         )
-        reject(state.commit(capacity), as: .capacityExceeded(.commitQueue), model: 2, ordinal: 2)
-        #expect(state.drain(limit: 1).map(\.snapshot.ordinal) == [2])
-        reject(state.commit(capacity), as: .capacityExceeded(.executionReservations), model: 2, ordinal: 2)
+        reject(state.commit(capacity), as: .capacityExceeded(.commitQueue), model: 2, revision: 2)
+        #expect(state.drain(limit: 1).map(\.snapshot.revision) == [2])
+        reject(state.commit(capacity), as: .capacityExceeded(.executionReservations), model: 2, revision: 2)
         #expect(state.acknowledge(work.ticket) == .recorded)
         #expect(state.executionReservations.first?.execution == .terminated)
         #expect(state.executionReservations.first?.delivery == .awaitingOutcome)
         // Physical termination alone cannot dispose an unconsumed outcome.
-        reject(state.commit(capacity), as: .capacityExceeded(.executionReservations), model: 2, ordinal: 2)
+        reject(state.commit(capacity), as: .capacityExceeded(.executionReservations), model: 2, revision: 2)
         #expect(state.isActive(work.ticket))
         #expect(!state.hasQueuedBatches)
     }
@@ -270,7 +270,7 @@ import Testing
                 .init(operation, descriptor: "new")
             ])
         )
-        reject(state.commit(next), as: .capacityExceeded(.executionReservations), model: 1, ordinal: 1)
+        reject(state.commit(next), as: .capacityExceeded(.executionReservations), model: 1, revision: 1)
         #expect(state.isActive(old.ticket))
         #expect(!state.hasQueuedBatches)
         #expect(state.acknowledge(old.ticket) == .recorded)
@@ -344,7 +344,7 @@ import Testing
         #expect(state.acknowledge(work.ticket) == .recorded)
         #expect(state.executionReservations.first?.isPreparing == true)
         let closed = state.close()
-        #expect(closed.ordinal == 2)
+        #expect(closed.revision == 2)
         #expect(state.executionReservations.first?.delivery == .settled)
         #expect(state.executionReservations.first?.execution == .terminated)
         #expect(state.executionReservations.first?.isPreparing == true)

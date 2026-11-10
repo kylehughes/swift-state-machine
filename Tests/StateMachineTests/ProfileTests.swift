@@ -96,7 +96,7 @@ import os
             Issue.record("Commit rejected")
             return
         }
-        #expect(receipt.ordinal == 1)
+        #expect(receipt.revision == 1)
         let rejected = local.commit(loser)
         guard case .rejected(.conflict, _) = rejected else {
             Issue.record("Missing conflict")
@@ -166,9 +166,9 @@ import os
         }
         let close = local.close()
         let repeated = local.close()
-        #expect(close.ordinal == repeated.ordinal)
+        #expect(close.revision == repeated.revision)
         let batches = local.drainCommands(limit: 10)
-        #expect(batches.map(\.receipt.ordinal) == [1, 2])
+        #expect(batches.map(\.receipt.revision) == [1, 2])
         #expect(batches[0].commands.isEmpty)
         #expect(batches[1].terminal)
         let quiescent = local.isQuiescent
@@ -185,7 +185,7 @@ import os
             Issue.record("Reset rejected")
             return
         }
-        #expect(receipt.ordinal == 1)
+        #expect(receipt.revision == 1)
         let stale = local.commit(old.presentationChanged("stale"))
         guard case .rejected(.obsoleteIncarnation, _) = stale else {
             Issue.record("Old incarnation admitted")
@@ -197,7 +197,7 @@ import os
             Issue.record("Foreign admitted")
             return
         }
-        #expect(fork.snapshot().ordinal == 0)
+        #expect(fork.snapshot().revision == 0)
     }
 
     @Test func isolatedSnapshotIsIndependentValue() throws {
@@ -221,12 +221,12 @@ import os
             Issue.record("First replacement rejected")
             return
         }
-        #expect(first.ordinal == 1)
+        #expect(first.revision == 1)
         guard case .rejected(.capacityExceeded, let current) = try local.replaceText("second") else {
             Issue.record("Full queue did not report capacity rejection")
             return
         }
-        #expect(current.ordinal == 1)
+        #expect(current.revision == 1)
         #expect(current.value.text == "first")
         #expect(local.snapshot().value.tags == ["retained"])
         #expect(local.drainCommands(limit: 1).count == 1)
@@ -234,7 +234,7 @@ import os
             Issue.record("Replacement rejected after draining")
             return
         }
-        #expect(second.ordinal == 2)
+        #expect(second.revision == 2)
         #expect(second.snapshot.value.text == "second")
         #expect(second.snapshot.value.tags == ["retained"])
         _ = local.close()

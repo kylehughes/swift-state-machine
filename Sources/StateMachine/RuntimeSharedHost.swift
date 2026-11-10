@@ -35,7 +35,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         var ledger = Ledger()
         var drainerScheduled = false
         var ready = RuntimeDeliveryReadyQueue()
-        var processedOrdinal: UInt64 = 0
+        var processedRevision: UInt64 = 0
         mutating func prune() {
             ledger.prune(in: engine)
             ready.prune(keeping: ledger.pending.map(\.id))
@@ -218,7 +218,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             let snapshot = after.engine.snapshot
             let mailbox = LatestMailbox(
                 initial: snapshot,
-                ordinal: snapshot.ordinal,
+                revision: snapshot.revision,
                 terminal: snapshot.isClosed,
                 receive: receive,
                 finish: onFinish
@@ -246,7 +246,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     }
     private func publish(_ snapshot: Engine.Snapshot, to subscribers: [Subscriber]) {
         for subscriber in subscribers {
-            subscriber.mailbox.offer(snapshot, ordinal: snapshot.ordinal, terminal: snapshot.isClosed)
+            subscriber.mailbox.offer(snapshot, revision: snapshot.revision, terminal: snapshot.isClosed)
         }
     }
     /// Captures a coherent historical root.
@@ -476,7 +476,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             while true {
                 let previous = storage.load()
                 var next = previous.value
-                next.processedOrdinal = batch.snapshot.ordinal
+                next.processedRevision = batch.snapshot.revision
                 if storage.install(.init(next), replacing: previous) { break }
             }
             Task { await progress.changed() }
@@ -547,8 +547,8 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     public func flush(through snapshot: Engine.Snapshot) async -> Bool {
         guard storage.load().value.engine.owns(snapshot) else { return false }
         guard processor != nil else { return true }
-        while storage.load().value.processedOrdinal < snapshot.ordinal {
-            await progress.wait { storage.load().value.processedOrdinal >= snapshot.ordinal }
+        while storage.load().value.processedRevision < snapshot.revision {
+            await progress.wait { storage.load().value.processedRevision >= snapshot.revision }
         }
         return true
     }
@@ -559,8 +559,8 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     }
     /// Outstanding raw obligations at a coherent historical observation.
     public struct Diagnostics: Sendable {
-        /// The last accepted ordinal.
-        public let acceptedOrdinal: UInt64
+        /// The last accepted revision.
+        public let acceptedRevision: UInt64
         /// The last fully processed FIFO receipt.
         public let processedThrough: UInt64
         /// Whether FIFO batches await transfer.
@@ -576,8 +576,8 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     public func diagnostics() -> Diagnostics {
         let state = storage.load().value
         return Diagnostics(
-            acceptedOrdinal: state.engine.snapshot.ordinal,
-            processedThrough: state.processedOrdinal,
+            acceptedRevision: state.engine.snapshot.revision,
+            processedThrough: state.processedRevision,
             hasQueuedBatches: state.engine.hasQueuedBatches,
             isDraining: state.drainerScheduled,
             pending: state.ledger.pending.map(\.id),
@@ -589,7 +589,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         let receipt = close()
         guard processor != nil else { return isQuiescent }
         while true {
-            if isQuiescent, storage.load().value.processedOrdinal >= receipt.ordinal,
+            if isQuiescent, storage.load().value.processedRevision >= receipt.revision,
                 await coordinator?.runningCount ?? 0 == 0, isQuiescent
             {
                 return true

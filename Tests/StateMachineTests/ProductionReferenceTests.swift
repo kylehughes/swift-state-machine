@@ -21,7 +21,7 @@ import Testing
     private func compare(_ actual: Flow.CommitResult, _ expected: ReferenceAdmission) {
         switch (actual, expected) {
         case (.committed(let receipt), .committed(let snapshot)):
-            #expect(receipt.ordinal == snapshot.stamp.revision)
+            #expect(receipt.revision == snapshot.stamp.revision)
             #expect(root(receipt.snapshot) == snapshot.root)
         case (.rejected(let reason, _), .rejected(let expectedReason)):
             let mapped: ReferenceRejection
@@ -79,7 +79,7 @@ import Testing
             case 4:
                 let actual = flow.drainCommands(limit: 2)
                 let expected = oracle.drain(limit: 2)
-                #expect(actual.map(\.receipt.ordinal) == expected.map { $0.snapshot.stamp.revision })
+                #expect(actual.map(\.receipt.revision) == expected.map { $0.snapshot.stamp.revision })
                 #expect(actual.map(\.terminal) == expected.map(\.terminal))
                 for (batch, reference) in zip(actual, expected) {
                     let starts = batch.commands.compactMap { command -> Flow.FetchWork? in
@@ -110,15 +110,15 @@ import Testing
                 let actual = flow.commit(flow.snapshot().authenticationChanged())
                 compare(actual, oracle.commit(try oracle.prepare(.authentication)))
             }
-            #expect(flow.snapshot().ordinal == oracle.snapshot.stamp.revision)
+            #expect(flow.snapshot().revision == oracle.snapshot.stamp.revision)
             #expect(root(flow.snapshot()) == oracle.snapshot.root)
         }
         let receipt = flow.close()
         let final = oracle.close()
-        #expect(receipt.ordinal == final.stamp.revision)
+        #expect(receipt.revision == final.stamp.revision)
         #expect(receipt.snapshot.isClosed == final.closed)
         #expect(
-            flow.drainCommands(limit: 256).map(\.receipt.ordinal)
+            flow.drainCommands(limit: 256).map(\.receipt.revision)
                 == oracle.drain(limit: 256).map { $0.snapshot.stamp.revision }
         )
     }

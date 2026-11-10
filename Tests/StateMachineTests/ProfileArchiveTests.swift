@@ -149,8 +149,8 @@ import Testing
             )
         var restored = Flow.Local.restore(archive)
         var fork = try original.fork()
-        #expect(restored.snapshot().ordinal == 0)
-        #expect(fork.snapshot().ordinal == 0)
+        #expect(restored.snapshot().revision == 0)
+        #expect(fork.snapshot().revision == 0)
         #expect(restored.snapshot().model == old.model)
         #expect(restored.snapshot().presentation == "saved")
         guard case .rejected(.foreignOwner, _) = restored.commit(old.presentationChanged("foreign")),
@@ -163,7 +163,7 @@ import Testing
         }
     }
 
-    @Test func resetInvalidatesIssuedCompletionWithoutResettingOrdinal_RT033() throws {
+    @Test func resetInvalidatesIssuedCompletionWithoutResettingRevision_RT033() throws {
         let id = try UserID("kyle")
         var local = Flow.Local(.init(userID: id))
         guard case .idle(let idle) = local.snapshot(),
@@ -186,14 +186,14 @@ import Testing
             Issue.record("Reset rejected")
             return
         }
-        #expect(receipt.ordinal == 2)
+        #expect(receipt.revision == 2)
         guard case .rejected(.obsoleteIncarnation, _) = local.commit(candidate),
             case .committed(let next) = local.commit(local.snapshot().presentationChanged("fresh"))
         else {
             Issue.record("Reset retained old authority or rejected its new owner proof")
             return
         }
-        #expect(next.ordinal == 3)
+        #expect(next.revision == 3)
         #expect(local.acknowledgeExecution(work.execution, disposition: .terminated) == .recorded)
         _ = local.close()
         _ = local.drainCommands(limit: 10)

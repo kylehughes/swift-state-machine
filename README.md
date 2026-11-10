@@ -123,7 +123,7 @@ if case .idle(let idle) = machine.snapshot() {
     let prepared = try idle.load(request)
     switch machine.commit(consume prepared) {
     case .committed(let receipt):
-        print("Accepted revision \(receipt.ordinal)")
+        print("Accepted revision \(receipt.revision)")
     case .rejected(let reason, _):
         print("Load was not accepted: \(reason)")
     }

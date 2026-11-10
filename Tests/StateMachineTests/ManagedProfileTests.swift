@@ -49,7 +49,7 @@ import Testing
         let request = await network.nextRequest()
         #expect(await owner.flush(through: receipt) == .processed)
         let close = owner.close()
-        #expect(owner.close().ordinal == close.ordinal)
+        #expect(owner.close().revision == close.revision)
         #expect(await owner.flush(through: close) == .processed)
         #expect(await network.inFlightCount == 1)
         #expect(!owner.isQuiescent)
@@ -60,7 +60,7 @@ import Testing
         #expect(diagnostics.outstanding.count == 1)
         #expect(diagnostics.outstanding.first?.disposition == .issued)
         #expect(diagnostics.outstanding.first?.preparation == nil)
-        #expect(diagnostics.processedThrough == close.ordinal)
+        #expect(diagnostics.processedThrough == close.revision)
         #expect(await network.inFlightCount == 1)
         #expect(await network.complete(request.id, with: .success(Profile(userID: user, name: "Late"))))
         #expect(await owner.shutdownAndWait() == .quiescent)
@@ -216,7 +216,7 @@ import Testing
                 }
             }
         }
-        #expect(owner.snapshot().ordinal == 2_001)
+        #expect(owner.snapshot().revision == 2_001)
         #expect(await network.complete(request.id, with: .failure(.unavailable)))
         #expect(await owner.shutdownAndWait() == .quiescent)
         #expect(await network.inFlightCount == 0)

@@ -87,8 +87,8 @@ nonisolated public enum IsolatedNote {
             case .failed(let value): value.stamp
             }
         }
-        /// The owner-lifetime accepted ordinal.
-        public var ordinal: UInt64 { stamp.ordinal }
+        /// The owner-lifetime accepted revision.
+        public var revision: UInt64 { stamp.revision }
         /// Whether this historical owner has closed.
         public var isClosed: Bool { stamp.isClosed }
         /// The ordinary model, carrying no execution authority.
@@ -111,8 +111,8 @@ nonisolated public enum IsolatedNote {
     public struct Receipt {
         /// The complete accepted observation.
         public let snapshot: Snapshot
-        /// The accepted ordinal.
-        public var ordinal: UInt64 { snapshot.ordinal }
+        /// The accepted revision.
+        public var revision: UInt64 { snapshot.revision }
     }
     /// Atomic admission either publishes everything or preserves the current root.
     public enum CommitResult {

@@ -6,6 +6,6 @@ guard case .committed(let receipt) = owner.commit(try idle.finish(8)), case .don
     fatalError("atomic admission")
 }
 precondition(done.value.value == 9)
-precondition(receipt.ordinal == 1)
+precondition(receipt.revision == 1)
 precondition(owner.drainCommands(limit: 1).count == 1)
 print("external generated client passed")

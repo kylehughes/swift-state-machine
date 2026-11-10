@@ -4,7 +4,7 @@ Present complete state snapshots on `MainActor` with an iOS 16-compatible baseli
 
 ``SnapshotPresentation`` exposes the latest snapshot through `ObservableObject`
 and `@Published`. Applying an accepted receipt is synchronous, so a button's
-input can update the screen in the same actor turn. Its ordinal guard prevents
+input can update the screen in the same actor turn. Its revision guard prevents
 delayed observations from replacing newer state.
 
 The presentation owns an observation registration. The enclosing screen or

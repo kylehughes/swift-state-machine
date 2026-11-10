@@ -32,7 +32,7 @@ import os
             stamp: .init(
                 owner: expected.stamp.owner,
                 incarnation: expected.stamp.incarnation,
-                revision: actual.ordinal
+                revision: actual.revision
             ),
             root: root(actual),
             closed: actual.isClosed
@@ -356,17 +356,17 @@ import os
         var delivered: [Flow.Snapshot] = []
         for await observed in observations { delivered.append(observed) }
         for observed in delivered {
-            let expected = try #require(published[observed.ordinal])
+            let expected = try #require(published[observed.revision])
             #expect(Self.snapshot(observed, like: expected) == expected)
         }
         #expect(delivered.last?.isClosed == true)
-        #expect(delivered.last?.ordinal == oracle.snapshot.stamp.revision)
-        #expect(zip(delivered, delivered.dropFirst()).allSatisfy { $0.ordinal < $1.ordinal })
-        #expect(delivered.allSatisfy { $0.ordinal <= oracle.snapshot.stamp.revision })
+        #expect(delivered.last?.revision == oracle.snapshot.stamp.revision)
+        #expect(zip(delivered, delivered.dropFirst()).allSatisfy { $0.revision < $1.revision })
+        #expect(delivered.allSatisfy { $0.revision <= oracle.snapshot.stamp.revision })
         try Self.evidence(
             "seed-\(seed)",
             [
-                "seed": seed, "steps": commands, "observedOrdinals": delivered.map(\.ordinal),
+                "seed": seed, "steps": commands, "observedRevisions": delivered.map(\.revision),
                 "finalRevision": oracle.snapshot.stamp.revision,
             ]
         )

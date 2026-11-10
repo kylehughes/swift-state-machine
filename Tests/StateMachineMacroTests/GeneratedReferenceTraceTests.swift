@@ -27,8 +27,8 @@ import Testing
         }
         #expect(generatedPhase == expected.root.phase)
         #expect(handwrittenPhase == expected.root.phase)
-        #expect(generated.ordinal == expected.stamp.revision)
-        #expect(handwritten.ordinal == expected.stamp.revision)
+        #expect(generated.revision == expected.stamp.revision)
+        #expect(handwritten.revision == expected.stamp.revision)
         #expect(generated.isClosed == expected.closed)
         #expect(handwritten.isClosed == expected.closed)
     }
@@ -95,8 +95,8 @@ import Testing
         let gBatches = generated.drainCommands(limit: 20)
         let hBatches = handwritten.drainCommands(limit: 20)
         let referenceBatches = oracle.drain(limit: 20)
-        #expect(gBatches.map(\.receipt.ordinal) == referenceBatches.map { $0.snapshot.stamp.revision })
-        #expect(hBatches.map(\.receipt.ordinal) == referenceBatches.map { $0.snapshot.stamp.revision })
+        #expect(gBatches.map(\.receipt.revision) == referenceBatches.map { $0.snapshot.stamp.revision })
+        #expect(hBatches.map(\.receipt.revision) == referenceBatches.map { $0.snapshot.stamp.revision })
         #expect(gBatches.map { $0.commands.count } == referenceBatches.map { $0.revoked.count + $0.starts.count })
         #expect(hBatches.map { $0.commands.count } == referenceBatches.map { $0.revoked.count + $0.starts.count })
         _ = generated.close()

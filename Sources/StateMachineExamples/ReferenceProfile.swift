@@ -120,8 +120,8 @@ nonisolated public enum ReferenceProfile {
         fileprivate let configuration: Configuration
         /// The observed phase payload.
         public var value: Phase { payload }
-        /// The owner-lifetime commit ordinal.
-        public var ordinal: UInt64 { stamp.ordinal }
+        /// The owner-lifetime commit revision.
+        public var revision: UInt64 { stamp.revision }
     }
     /// A copyable historical observation of the complete root.
     public enum Snapshot: Sendable {
@@ -129,8 +129,8 @@ nonisolated public enum ReferenceProfile {
         case loading(Observed<Loading>)
         case loaded(Observed<Loaded>)
         case failed(Observed<Failed>)
-        /// The owner-lifetime commit ordinal.
-        public var ordinal: UInt64 { stamp.ordinal }
+        /// The owner-lifetime commit revision.
+        public var revision: UInt64 { stamp.revision }
         /// An unrelated presentation field.
         public var presentation: String { record.presentation }
         /// The ordinary model projection.
@@ -266,8 +266,8 @@ nonisolated public enum ReferenceProfile {
     }
     /// Outstanding tracked obligations when a shutdown deadline expires.
     public struct ShutdownDiagnostics: Equatable, Sendable {
-        /// The owner's final accepted ordinal at the diagnostic observation.
-        public let acceptedOrdinal: UInt64
+        /// The owner's final accepted revision at the diagnostic observation.
+        public let acceptedRevision: UInt64
         /// The last receipt whose offers and launch decisions were processed.
         public let processedThrough: UInt64
         /// Whether accepted ordinary or terminal batches still await processing.
@@ -375,8 +375,8 @@ nonisolated public enum ReferenceProfile {
     public struct Receipt: Sendable {
         /// Copies the current historical observation.
         public let snapshot: Snapshot
-        /// The owner-lifetime commit ordinal.
-        public var ordinal: UInt64 { snapshot.ordinal }
+        /// The owner-lifetime commit revision.
+        public var revision: UInt64 { snapshot.revision }
     }
     /// Historical acceptance or a rejection with current observation.
     public enum CommitResult: Sendable {
@@ -603,7 +603,7 @@ nonisolated public enum ReferenceProfile {
                 return Subscription(cancellation: SubscriptionCancellation { subscription.cancel() })
             } catch { throw .capacityExceeded }
         }
-        /// Installs validated data with fresh incarnation and monotonically increasing ordinal.
+        /// Installs validated data with fresh incarnation and monotonically increasing revision.
         public func reset(_ archive: Archive, expected: Snapshot) -> CommitResult {
             project(
                 host.commit(
@@ -721,7 +721,7 @@ nonisolated public enum ReferenceProfile {
             let diagnostics = host.diagnostics()
             return .timedOut(
                 .init(
-                    acceptedOrdinal: diagnostics.acceptedOrdinal,
+                    acceptedRevision: diagnostics.acceptedRevision,
                     processedThrough: diagnostics.processedThrough,
                     hasQueuedBatches: diagnostics.hasQueuedBatches,
                     isDraining: diagnostics.isDraining,
@@ -765,7 +765,7 @@ nonisolated public enum ReferenceProfile {
             let archive = try Archive(model: state.record.model, presentation: state.record.presentation)
             return Local(archive: archive, configuration: state.configuration)
         }
-        /// Attempts validated replacement with a fresh incarnation and monotonic ordinal.
+        /// Attempts validated replacement with a fresh incarnation and monotonic revision.
         public mutating func reset(_ archive: Archive, expected: Snapshot) -> CommitResult {
             let payload = Payload(
                 stamp: expected.stamp,

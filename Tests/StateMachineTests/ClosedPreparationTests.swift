@@ -39,7 +39,7 @@ import Testing
         #expect(closed.isClosed)
         #expect(!historical.isClosed)
         #expect(closed.model == historical.model)
-        #expect(closed.ordinal == historical.ordinal + 1)
+        #expect(closed.revision == historical.revision + 1)
 
         switch (phase, historical, closed) {
         case (.idle, .idle(let original), .idle(let ended)):

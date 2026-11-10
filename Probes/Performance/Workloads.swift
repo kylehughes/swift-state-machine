@@ -231,7 +231,7 @@ func concurrent(
 
 final class SubscriberRecorder: Sendable {
     struct State {
-        var ordinals: [UInt64] = []
+        var revisions: [UInt64] = []
         var completed: UInt64 = 0
         var goal: UInt64 = .max
     }
@@ -239,7 +239,7 @@ final class SubscriberRecorder: Sendable {
     let complete = Event()
     func observe(_ snapshot: PerformanceFlow.Snapshot) {
         let done = state.withLock { s in
-            s.ordinals.append(snapshot.ordinal)
+            s.revisions.append(snapshot.revision)
             s.completed = value(snapshot).completions
             return s.completed >= s.goal
         }
@@ -316,14 +316,14 @@ func pressure(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?)
     #endif
     await gate.release()
     await fast.complete.wait()
-    let beforeRelease = slow.state.withLock { $0.ordinals.count }
+    let beforeRelease = slow.state.withLock { $0.revisions.count }
     try require(beforeRelease == 0, "Blocked subscriber unexpectedly completed a callback")
     releaseSlow.signal()
     await slow.complete.wait()
-    let finalOrdinal = owner.snapshot().ordinal
-    let recorded = slow.state.withLock { $0.ordinals }
+    let finalRevision = owner.snapshot().revision
+    let recorded = slow.state.withLock { $0.revisions }
     try require(
-        recorded.count == 2 && recorded.last == finalOrdinal,
+        recorded.count == 2 && recorded.last == finalRevision,
         "Latest mailbox did not coalesce held observations to final state"
     )
     let executed = await gate.counts()
@@ -359,7 +359,7 @@ func pressure(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?)
     row.counts = [
         "acceptedEffectIntents": acceptedIDs.count, "executedDistinctIDs": Set(executed.starts).count,
         "completedEffects": executed.finishes.count, "blockedCallbacks": 1, "slowCallbacks": recorded.count,
-        "coalescedNonterminalObservations": Int(finalOrdinal + 1) - recorded.count,
+        "coalescedNonterminalObservations": Int(finalRevision + 1) - recorded.count,
         "configuredCommitCapacity": 8, "configuredExecutionCapacity": 16, "configuredSubscriberCapacity": 2,
         "quiescentOwners": 1, "registeredSubscribersAfterCancel": 0, "controlledDriversAfterShutdown": 0,
         "explicitRetries": 0,

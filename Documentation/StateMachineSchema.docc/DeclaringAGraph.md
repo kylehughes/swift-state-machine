@@ -113,7 +113,7 @@ scan other files.
 
 Generated member names and the support types used by expansion are reserved.
 For example, a value graph cannot name a phase case `model`, `record`,
-`ordinal`, or `isClosed`, because its snapshot already uses those members.
+`revision`, or `isClosed`, because its snapshot already uses those members.
 Diagnostics identify the conflicting declaration and ask for a distinct name.
 
 ## Prepare a hosted transition
@@ -128,7 +128,7 @@ func approveLocally() throws {
     let proposal = try draft.approve()
     switch machine.commit(consume proposal) {
     case .committed(let receipt):
-        print("Accepted revision \(receipt.ordinal)")
+        print("Accepted revision \(receipt.revision)")
     case .rejected(let reason, _):
         print("Approval was rejected: \(reason)")
     }

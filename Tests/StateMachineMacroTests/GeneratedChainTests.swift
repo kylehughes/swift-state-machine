@@ -79,15 +79,15 @@ nonisolated private enum ChainFlow: Sendable {
     }
     #expect(await owner.flush(through: receipt))
     var iterator = snapshots.makeAsyncIterator()
-    var finalOrdinal: UInt64?
+    var finalRevision: UInt64?
     while let snapshot = await iterator.next() {
         if case .done(let done) = snapshot {
             #expect(done.value.value == 3)
-            finalOrdinal = snapshot.ordinal
+            finalRevision = snapshot.revision
             break
         }
     }
-    #expect(finalOrdinal == 3)
+    #expect(finalRevision == 3)
     #expect(calls.withLock { $0 } == [1, 2])
     #expect(owner.pendingCompletions().isEmpty)
     await owner.shutdown()
@@ -113,9 +113,9 @@ func mainActorTerminalCandidateRetriesAfterActualWorkerJoin_RT032() async throws
     )
     var done = false
     var waiter: CheckedContinuation<Void, Never>?
-    var ordinals: [UInt64] = []
+    var revisions: [UInt64] = []
     let token = try owner.subscribe { snapshot in
-        ordinals.append(snapshot.ordinal)
+        revisions.append(snapshot.revision)
         if case .done(let value) = snapshot {
             #expect(value.value.value == 3)
             done = true
@@ -126,7 +126,7 @@ func mainActorTerminalCandidateRetriesAfterActualWorkerJoin_RT032() async throws
     _ = try owner.send(.begin)
     if !done { await withCheckedContinuation { waiter = $0 } }
     #expect(calls.withLock { $0 } == [1, 2])
-    #expect(ordinals == [0, 1, 2, 3])
+    #expect(revisions == [0, 1, 2, 3])
     #expect(owner.pendingCompletions().isEmpty)
     token.cancel()
     await owner.shutdown()
@@ -147,15 +147,15 @@ func nativeActorTerminalCandidateRetriesAfterActualWorkerJoin_RT032() async thro
     let token = try await owner.subscribe { events.yield($0) }
     _ = try await owner.send(.begin)
     var iterator = stream.makeAsyncIterator()
-    var ordinals: [UInt64] = []
+    var revisions: [UInt64] = []
     while let snapshot = await iterator.next() {
-        ordinals.append(snapshot.ordinal)
+        revisions.append(snapshot.revision)
         if case .done(let done) = snapshot {
             #expect(done.value.value == 3)
             break
         }
     }
-    #expect(ordinals == [0, 1, 2, 3])
+    #expect(revisions == [0, 1, 2, 3])
     #expect(await owner.pendingCompletions().isEmpty)
     token.cancel()
     events.finish()

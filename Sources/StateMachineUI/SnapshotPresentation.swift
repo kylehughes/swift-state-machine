@@ -11,21 +11,21 @@ import StateMachine
     @Published public private(set) var snapshot: Snapshot
     /// Whether this presentation currently owns a live registration.
     @Published public private(set) var isObserving = false
-    private let ordinal: @MainActor (Snapshot) -> UInt64
+    private let revision: @MainActor (Snapshot) -> UInt64
     private var watermark: UInt64
     private var subscription: RuntimeMainActorSubscription?
 
     /// Creates a historical projection without subscribing or starting work.
-    public init(_ initial: Snapshot, ordinal: @escaping @MainActor (Snapshot) -> UInt64) {
+    public init(_ initial: Snapshot, revision: @escaping @MainActor (Snapshot) -> UInt64) {
         snapshot = initial
-        watermark = ordinal(initial)
-        self.ordinal = ordinal
+        watermark = revision(initial)
+        self.revision = revision
     }
     /// Applies a newer complete snapshot synchronously; delayed delivery cannot regress the model.
     @discardableResult public func apply(_ next: Snapshot) -> Bool {
-        let nextOrdinal = ordinal(next)
-        guard nextOrdinal > watermark else { return false }
-        watermark = nextOrdinal
+        let nextRevision = revision(next)
+        guard nextRevision > watermark else { return false }
+        watermark = nextRevision
         snapshot = next
         return true
     }
@@ -63,7 +63,7 @@ import StateMachine
 nonisolated public final class MainActorSnapshotIngress<Snapshot: Sendable>: Sendable {
     private struct Envelope: Sendable {
         let value: Snapshot
-        let ordinal: UInt64
+        let revision: UInt64
     }
     private struct State: Sendable {
         var pending: Envelope?
@@ -75,14 +75,14 @@ nonisolated public final class MainActorSnapshotIngress<Snapshot: Sendable>: Sen
     private let receive: @MainActor @Sendable (Snapshot) -> Void
     /// Selects the isolated presentation callback without retaining a live machine.
     public init(_ receive: @escaping @MainActor @Sendable (Snapshot) -> Void) { self.receive = receive }
-    /// Stages only a newer ordinal and schedules at most one responsible delivery task.
-    public func offer(_ snapshot: Snapshot, ordinal: UInt64) {
+    /// Stages only a newer revision and schedules at most one responsible delivery task.
+    public func offer(_ snapshot: Snapshot, revision: UInt64) {
         while true {
             let before = state.load()
-            guard !before.value.closed, before.value.watermark.map({ ordinal > $0 }) ?? true else { return }
+            guard !before.value.closed, before.value.watermark.map({ revision > $0 }) ?? true else { return }
             var after = before.value
-            after.pending = Envelope(value: snapshot, ordinal: ordinal)
-            after.watermark = ordinal
+            after.pending = Envelope(value: snapshot, revision: revision)
+            after.watermark = revision
             let wake = !after.scheduled
             after.scheduled = true
             guard state.install(.init(after), replacing: before) else { continue }

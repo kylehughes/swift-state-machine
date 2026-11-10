@@ -27,7 +27,7 @@ nonisolated enum Counter: Sendable {
         Issue.record("rejected candidate")
         return
     }
-    #expect(receipt.ordinal == 1)
+    #expect(receipt.revision == 1)
     guard case .done(let done) = receipt.snapshot else {
         Issue.record("wrong destination phase")
         return

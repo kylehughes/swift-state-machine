@@ -53,9 +53,9 @@ archive never becomes a live owner.
 
 | Operation | Authority and history |
 | --- | --- |
-| `Local.restore` or `Shared.restore` | Creates an independent owner at ordinal zero from validated data. Shared restoration requires its immutable drivers. |
-| `fork()` | Copies persistable current data into an independent owner at ordinal zero. It starts no tasks and rejects loading. |
-| `reset(_:expected:)` | Attempts a new incarnation against the expected current snapshot. It preserves the owner's increasing ordinal and revokes old work authority. |
+| `Local.restore` or `Shared.restore` | Creates an independent owner at revision zero from validated data. Shared restoration requires its immutable drivers. |
+| `fork()` | Copies persistable current data into an independent owner at revision zero. It starts no tasks and rejects loading. |
+| `reset(_:expected:)` | Attempts a new incarnation against the expected current snapshot. It preserves the owner's increasing revision and revokes old work authority. |
 
 An observation or completion from the original owner cannot authorize work on
 a restored or forked owner. Reset also invalidates proposals and completions

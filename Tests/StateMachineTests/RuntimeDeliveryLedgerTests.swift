@@ -259,7 +259,7 @@ import Testing
             Issue.record("Discard bypassed full queue")
             return
         }
-        #expect(current.ordinal == before.ordinal)
+        #expect(current.revision == before.revision)
         #expect(current.model == 2)
         #expect(ledger.pending.map(\.outcome) == [42])
         #expect(ledger.pending.first?.id == id)
@@ -518,7 +518,7 @@ extension RuntimeDeliveryLedgerTests {
                 in: &core
             )
         else { throw TestFailure.admission }
-        #expect(core.snapshot.ordinal == 1)
+        #expect(core.snapshot.revision == 1)
         #expect(core.snapshot.model == 1)
         #expect(core.isActive(work.ticket))
         #expect(core.executionReservations.count == 1)
@@ -594,7 +594,7 @@ extension RuntimeDeliveryLedgerTests {
             )
         else { throw TestFailure.admission }
         #expect(retained == id)
-        #expect(core.snapshot.ordinal == 1)
+        #expect(core.snapshot.revision == 1)
         #expect(core.snapshot.model == 1)
         #expect(core.isActive(work.ticket))
         #expect(ledger.pending.first?.lastRejection == .admission(.foreignOwner))
@@ -636,7 +636,7 @@ extension RuntimeDeliveryLedgerTests {
             )
         else { throw TestFailure.admission }
         #expect(retained == id)
-        #expect(core.snapshot.ordinal == 2)
+        #expect(core.snapshot.revision == 2)
         #expect(core.snapshot.model == 2)
         #expect(core.isActive(first.ticket))
         #expect(ledger.pending.first?.lastRejection == .admission(.inactiveAuthority))
@@ -678,7 +678,7 @@ extension RuntimeDeliveryLedgerTests {
         else { throw TestFailure.admission }
         #expect(retained == id)
         #expect(core.isActive(work.ticket))
-        #expect(core.snapshot.ordinal == 2)
+        #expect(core.snapshot.revision == 2)
         #expect(ledger.pending.first?.lastRejection == .admission(.obsoleteIncarnation))
         #expect(ledger.pending.first?.outcome == 101)
         let retry = try claim(id, ledger: &ledger, core: &core)

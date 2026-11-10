@@ -37,7 +37,7 @@ private final class SharedCallbackLifetime: Sendable {
         }
         let rejected = results.compactMap { result -> Flow.CommitRejection? in
             if case .rejected(let reason, let current) = result {
-                #expect(current.ordinal == 1)
+                #expect(current.revision == 1)
                 #expect(current.model == before.model)
                 return reason
             }
@@ -47,9 +47,9 @@ private final class SharedCallbackLifetime: Sendable {
         #expect(rejected == [.conflict])
         let winner = try #require(accepted.first)
         #expect(shared.snapshot().presentation == winner.snapshot.presentation)
-        #expect(shared.snapshot().ordinal == 1)
-        #expect(shared.drainCommands(limit: 10).map(\.receipt.ordinal) == [1])
-        #expect(before.ordinal == 0)
+        #expect(shared.snapshot().revision == 1)
+        #expect(shared.drainCommands(limit: 10).map(\.receipt.revision) == [1])
+        #expect(before.revision == 0)
         #expect(before.presentation.isEmpty)
     }
 
@@ -73,7 +73,7 @@ private final class SharedCallbackLifetime: Sendable {
         }
         #expect(current.presentation == "new presentation")
         #expect(current.model == before.model)
-        #expect(shared.snapshot().ordinal == alias.snapshot().ordinal)
+        #expect(shared.snapshot().revision == alias.snapshot().revision)
         guard case .idle(let fresh) = current,
             case .committed(let loaded) = shared.commit(try fresh.load(request))
         else {
@@ -81,7 +81,7 @@ private final class SharedCallbackLifetime: Sendable {
             return
         }
         #expect(loaded.snapshot.presentation == "new presentation")
-        #expect(alias.snapshot().ordinal == 2)
+        #expect(alias.snapshot().revision == 2)
         #expect(before.presentation.isEmpty)
         #expect(before.model == .idle(idle.value))
     }
@@ -99,7 +99,7 @@ private final class SharedCallbackLifetime: Sendable {
                 Issue.record("Equal model or archive granted foreign authority")
                 continue
             }
-            #expect(current.ordinal == 0)
+            #expect(current.revision == 0)
             #expect(other.drainCommands(limit: 10).isEmpty)
             guard case .committed = other.commit(other.snapshot().presentationChanged("own")) else {
                 Issue.record("Fresh owner proof was rejected")
@@ -110,7 +110,7 @@ private final class SharedCallbackLifetime: Sendable {
             Issue.record("Reset was rejected")
             return
         }
-        #expect(reset.ordinal == 1)
+        #expect(reset.revision == 1)
         guard case .rejected(.obsoleteIncarnation, let current) = shared.commit(before.presentationChanged("old"))
         else {
             Issue.record("Reset retained old incarnation authority")
@@ -121,8 +121,8 @@ private final class SharedCallbackLifetime: Sendable {
             Issue.record("New incarnation proof was rejected")
             return
         }
-        #expect(fresh.ordinal == 2)
-        #expect(before.ordinal == 0)
+        #expect(fresh.revision == 2)
+        #expect(before.revision == 0)
         #expect(before.presentation.isEmpty)
     }
 
@@ -143,19 +143,19 @@ private final class SharedCallbackLifetime: Sendable {
             return
         }
         #expect(current.presentation == "two")
-        #expect(current.ordinal == 2)
+        #expect(current.revision == 2)
         let closed = shared.close()
-        #expect(closed.ordinal == 3)
+        #expect(closed.revision == 3)
         #expect(closed.snapshot.isClosed)
-        #expect(shared.close().ordinal == 3)
+        #expect(shared.close().revision == 3)
         #expect(!shared.isQuiescent)
         #expect(shared.drainCommands(limit: 0).isEmpty)
         let first = shared.drainCommands(limit: 1)
-        #expect(first.map(\.receipt.ordinal) == [1])
+        #expect(first.map(\.receipt.revision) == [1])
         #expect(first.map(\.receipt.snapshot.presentation) == ["one"])
         #expect(first.allSatisfy { !$0.terminal && $0.commands.isEmpty })
         let remaining = shared.drainCommands(limit: 10)
-        #expect(remaining.map(\.receipt.ordinal) == [2, 3])
+        #expect(remaining.map(\.receipt.revision) == [2, 3])
         #expect(remaining.map(\.terminal) == [false, true])
         #expect(remaining.allSatisfy { $0.commands.isEmpty })
         #expect(shared.isQuiescent)
@@ -185,12 +185,12 @@ private final class SharedCallbackLifetime: Sendable {
             Issue.record("Start/cancel/restart history failed")
             return
         }
-        #expect(issuedBatch.receipt.ordinal == 1)
+        #expect(issuedBatch.receipt.revision == 1)
         #expect(work.input == request)
         let closed = shared.close()
-        #expect(closed.ordinal == 4)
+        #expect(closed.revision == 4)
         let batches = shared.drainCommands(limit: 10)
-        #expect(batches.map(\.receipt.ordinal) == [2, 3, 4])
+        #expect(batches.map(\.receipt.revision) == [2, 3, 4])
         #expect(batches.map(\.terminal) == [false, false, true])
         #expect(batches.map { $0.commands.count } == [1, 0, 1])
         // The second start was revoked before drain, so it never issues work.
@@ -211,27 +211,27 @@ private final class SharedCallbackLifetime: Sendable {
         let shared = try owner()
         let (events, continuation) = AsyncStream<UInt64>.makeStream()
         let subscription = try shared.subscribe { snapshot in
-            continuation.yield(snapshot.ordinal)
-            #expect(shared.snapshot().ordinal == snapshot.ordinal)
-            if snapshot.ordinal == 0 {
+            continuation.yield(snapshot.revision)
+            #expect(shared.snapshot().revision == snapshot.revision)
+            if snapshot.revision == 0 {
                 guard case .committed = shared.commit(snapshot.presentationChanged("from callback")) else {
                     Issue.record("Reentrant commit was rejected")
                     continuation.finish()
                     return
                 }
-            } else if snapshot.ordinal == 1 {
+            } else if snapshot.revision == 1 {
                 _ = shared.close()
             }
         } onFinish: {
             continuation.finish()
         }
         defer { subscription.cancel() }
-        var ordinals: [UInt64] = []
-        for await ordinal in events { ordinals.append(ordinal) }
-        #expect(ordinals == [0, 1, 2])
+        var revisions: [UInt64] = []
+        for await revision in events { revisions.append(revision) }
+        #expect(revisions == [0, 1, 2])
         #expect(shared.snapshot().presentation == "from callback")
         #expect(shared.snapshot().isClosed)
-        #expect(shared.drainCommands(limit: 10).map(\.receipt.ordinal) == [1, 2])
+        #expect(shared.drainCommands(limit: 10).map(\.receipt.revision) == [1, 2])
     }
 
     @Test(arguments: [false, true])
@@ -242,14 +242,14 @@ private final class SharedCallbackLifetime: Sendable {
         let (events, continuation) = AsyncStream<UInt64>.makeStream()
         let subscription = try shared.subscribe { snapshot in
             #expect(snapshot.isClosed)
-            continuation.yield(snapshot.ordinal)
+            continuation.yield(snapshot.revision)
         } onFinish: {
             continuation.finish()
         }
         defer { subscription.cancel() }
-        var ordinals: [UInt64] = []
-        for await ordinal in events { ordinals.append(ordinal) }
-        #expect(ordinals == [closed.ordinal])
+        var revisions: [UInt64] = []
+        for await revision in events { revisions.append(revision) }
+        #expect(revisions == [closed.revision])
     }
 
     @Test(.parksCooperativeThread) func slowSubscriberCoalescesToFinalValueWithoutLosingBatches() async throws {
@@ -258,8 +258,8 @@ private final class SharedCallbackLifetime: Sendable {
         let (entered, entry) = AsyncStream<Void>.makeStream()
         let (events, continuation) = AsyncStream<UInt64>.makeStream()
         let subscription = try shared.subscribe { snapshot in
-            continuation.yield(snapshot.ordinal)
-            if snapshot.ordinal == 0 {
+            continuation.yield(snapshot.revision)
+            if snapshot.revision == 0 {
                 entry.yield(())
                 entry.finish()
                 // The callback API is synchronous: hold this one claimed delivery
@@ -283,13 +283,13 @@ private final class SharedCallbackLifetime: Sendable {
         }
         let closed = shared.close()
         release.signal()
-        var ordinals: [UInt64] = []
-        for await ordinal in events { ordinals.append(ordinal) }
-        #expect(ordinals == [0, closed.ordinal])
-        #expect(zip(ordinals, ordinals.dropFirst()).allSatisfy { $0 < $1 })
+        var revisions: [UInt64] = []
+        for await revision in events { revisions.append(revision) }
+        #expect(revisions == [0, closed.revision])
+        #expect(zip(revisions, revisions.dropFirst()).allSatisfy { $0 < $1 })
         #expect(shared.snapshot().presentation == "value 20")
         let batches = shared.drainCommands(limit: 100)
-        #expect(batches.map(\.receipt.ordinal) == Array(UInt64(1) ... UInt64(21)))
+        #expect(batches.map(\.receipt.revision) == Array(UInt64(1) ... UInt64(21)))
         #expect(batches.last?.terminal == true)
         #expect(shared.isQuiescent)
     }
@@ -298,7 +298,7 @@ private final class SharedCallbackLifetime: Sendable {
         let holder = OSAllocatedUnfairLock<Flow.Shared?>(initialState: nil)
         let (events, continuation) = AsyncStream<UInt64>.makeStream()
         let shared = Flow.Shared(.init(userID: try UserID("kyle"))) { batch in
-            continuation.yield(batch.receipt.ordinal)
+            continuation.yield(batch.receipt.revision)
             guard !batch.terminal else {
                 continuation.finish()
                 return
@@ -308,8 +308,8 @@ private final class SharedCallbackLifetime: Sendable {
                 continuation.finish()
                 return
             }
-            #expect(owner.snapshot().ordinal == batch.receipt.ordinal)
-            if batch.receipt.ordinal < 40 {
+            #expect(owner.snapshot().revision == batch.receipt.revision)
+            if batch.receipt.revision < 40 {
                 guard case .committed = owner.commit(owner.snapshot().presentationChanged("reentrant")) else {
                     Issue.record("Reentrant runner submission rejected")
                     continuation.finish()
@@ -325,9 +325,9 @@ private final class SharedCallbackLifetime: Sendable {
             Issue.record("Initial runner commit rejected")
             return
         }
-        var ordinals: [UInt64] = []
-        for await ordinal in events { ordinals.append(ordinal) }
-        #expect(ordinals == Array(UInt64(1) ... UInt64(41)))
+        var revisions: [UInt64] = []
+        for await revision in events { revisions.append(revision) }
+        #expect(revisions == Array(UInt64(1) ... UInt64(41)))
         #expect(shared.snapshot().isClosed)
         // The stream is finished inside the callback; join the drainer before querying cleanup.
         #expect(await shared.shutdownAndWait(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
@@ -349,7 +349,7 @@ private final class SharedCallbackLifetime: Sendable {
                 $0.active += 1
                 $0.maximum = max($0.maximum, $0.active)
             }
-            if batch.receipt.ordinal == 1 {
+            if batch.receipt.revision == 1 {
                 entry.yield(())
                 entry.finish()
                 #expect(release.wait(timeout: .now() + 10) == .success)
@@ -390,9 +390,9 @@ private final class SharedCallbackLifetime: Sendable {
         release.signal()
         var batches: [Flow.CommandBatch] = []
         for await batch in events { batches.append(batch) }
-        #expect(batches.map(\.receipt.ordinal) == Array(UInt64(1) ... final.ordinal))
+        #expect(batches.map(\.receipt.revision) == Array(UInt64(1) ... final.revision))
         #expect(batches.filter(\.terminal).count == 1)
-        #expect(batches.last?.receipt.ordinal == final.ordinal)
+        #expect(batches.last?.receipt.revision == final.revision)
         #expect(batches.last?.receipt.snapshot.isClosed == true)
         #expect(callbacks.withLock { $0.maximum } == 1)
         #expect(callbacks.withLock { $0.active } == 0)
@@ -404,7 +404,7 @@ private final class SharedCallbackLifetime: Sendable {
     @Test func packageRunnerRepeatedEnqueueAtCallbackReturnDoesNotLoseWakeups() async throws {
         let (events, continuation) = AsyncStream<UInt64>.makeStream()
         let shared = Flow.Shared(.init(userID: try UserID("kyle"))) { batch in
-            continuation.yield(batch.receipt.ordinal)
+            continuation.yield(batch.receipt.revision)
             if batch.terminal { continuation.finish() }
         }
         var delivered = events.makeAsyncIterator()
@@ -417,11 +417,11 @@ private final class SharedCallbackLifetime: Sendable {
                 Issue.record("Sequential enqueue rejected")
                 return
             }
-            #expect(receipt.ordinal == UInt64(index))
-            #expect(await delivered.next() == receipt.ordinal)
+            #expect(receipt.revision == UInt64(index))
+            #expect(await delivered.next() == receipt.revision)
         }
         let terminal = shared.close()
-        #expect(await delivered.next() == terminal.ordinal)
+        #expect(await delivered.next() == terminal.revision)
         #expect(await delivered.next() == nil)
         // The stream is finished inside the callback; join the drainer before querying cleanup.
         #expect(await shared.shutdownAndWait(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
@@ -454,7 +454,7 @@ private final class SharedCallbackLifetime: Sendable {
     {
         let shared = try owner(configuration: .init(subscriberCapacity: 1))
         let release = DispatchSemaphore(value: 0)
-        let ordinals = OSAllocatedUnfairLock(initialState: [UInt64]())
+        let revisions = OSAllocatedUnfairLock(initialState: [UInt64]())
         let (entered, entry) = AsyncStream<Void>.makeStream()
         let (released, lifetimeEnded) = AsyncStream<Void>.makeStream()
         let subscription = try shared.subscribe {
@@ -465,7 +465,7 @@ private final class SharedCallbackLifetime: Sendable {
                 })
             ] snapshot in
             withExtendedLifetime(lifetime) {
-                ordinals.withLock { $0.append(snapshot.ordinal) }
+                revisions.withLock { $0.append(snapshot.revision) }
                 entry.yield(())
                 entry.finish()
                 #expect(release.wait(timeout: .now() + 10) == .success)
@@ -498,7 +498,7 @@ private final class SharedCallbackLifetime: Sendable {
         // Capture destruction is a teardown barrier for this callback. The
         // retained canceled token cannot keep its registration closure alive.
         withExtendedLifetime(subscription) {
-            #expect(ordinals.withLock { $0 } == [0])
+            #expect(revisions.withLock { $0 } == [0])
         }
     }
 
@@ -546,10 +546,10 @@ private final class SharedCallbackLifetime: Sendable {
                 }
             },
             processed: { batch in
-                if batch.receipt.ordinal == 1 {
+                if batch.receipt.revision == 1 {
                     #expect(stages.withLock { $0.firstStartCompleted })
                 }
-                processedEvent.yield(batch.receipt.ordinal)
+                processedEvent.yield(batch.receipt.revision)
                 if batch.terminal { processedEvent.finish() }
             }
         )
@@ -560,7 +560,7 @@ private final class SharedCallbackLifetime: Sendable {
             observedEvent.finish()
         }
         let subscription = try shared.subscribe { snapshot in
-            if snapshot.ordinal == 1 {
+            if snapshot.revision == 1 {
                 #expect(stages.withLock { $0.firstCancellationCompleted })
                 guard case .committed = shared.commit(snapshot.presentationChanged("reentrant observation")) else {
                     Issue.record("Observation reentry rejected")
@@ -578,14 +578,14 @@ private final class SharedCallbackLifetime: Sendable {
         }
         var cancellation = cancelEntered.makeAsyncIterator()
         _ = try #require(await cancellation.next())
-        #expect(shared.snapshot().ordinal == 1)
+        #expect(shared.snapshot().revision == 1)
         release.yield(())
         release.finish()
         var completions = processed.makeAsyncIterator()
         #expect(await completions.next() == 1)
         _ = shared.close()
         var remaining: [UInt64] = []
-        while let ordinal = await completions.next() { remaining.append(ordinal) }
+        while let revision = await completions.next() { remaining.append(revision) }
         #expect(remaining == [2, 3])
     }
 

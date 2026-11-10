@@ -37,8 +37,8 @@ struct Generator {
                     result = "Change<\(phase(edge.to)), Effect>"
                 }
                 var lines = [
-                    "let _: _AtomicTypeWitness<\(before)> = _AtomicTypeWitness<\(edge.sourceType)>()",
-                    "let _: _AtomicTypeWitness<\(result)> = _AtomicTypeWitness<\(edge.returnType)>()",
+                    "let _: _TransitionSourceIsPhasePayload<\(before)> = _TransitionSourceIsPhasePayload<\(edge.sourceType)>()",
+                    "let _: _TransitionReturnsDeclaredResult<\(result)> = _TransitionReturnsDeclaredResult<\(edge.returnType)>()",
                 ]
                 if let payload = edge.payloadType {
                     let expected: String
@@ -48,7 +48,9 @@ struct Generator {
                         expected =
                             "\(operation(edge.trigger.name).name).\(edge.trigger.kind == .success ? "Output" : "Failure")"
                     }
-                    lines.append("let _: _AtomicTypeWitness<\(expected)> = _AtomicTypeWitness<\(payload)>()")
+                    lines.append(
+                        "let _: _TriggerPayloadMatchesDeclaration<\(expected)> = _TriggerPayloadMatchesDeclaration<\(payload)>()"
+                    )
                 }
                 return lines.joined(separator: "\n")
             }
@@ -57,13 +59,13 @@ struct Generator {
             .map { op in
                 let payload = schema.effects.first { $0.caseName == op.effect }!.payloadType!
                 return
-                    "let _: _AtomicTypeWitness<\(op.name).Input> = _AtomicTypeWitness<\(payload)>(); let _ = _AtomicErrorWitness<\(op.name).Failure>()"
+                    "let _: _EffectPayloadIsOperationInput<\(op.name).Input> = _EffectPayloadIsOperationInput<\(payload)>(); let _ = _OperationFailureIsError<\(op.name).Failure>()"
             }
             .joined(separator: "\n")
         let routeWitnesses = schema.routes
             .map { route in
                 var lines = [
-                    "let _: _AtomicTypeWitness<Observed<\(phase(route.from))>> = _AtomicTypeWitness<\(route.sourceType)>()"
+                    "let _: _RouterSourceIsObservedPhase<Observed<\(phase(route.from))>> = _RouterSourceIsObservedPhase<\(route.sourceType)>()"
                 ]
                 if let payload = route.payloadType {
                     let expected: String
@@ -73,22 +75,28 @@ struct Generator {
                         expected =
                             "\(operation(route.trigger.name).name)\(route.trigger.kind == .success ? "Success" : "Failure")Completion"
                     }
-                    lines.append("let _: _AtomicTypeWitness<\(expected)> = _AtomicTypeWitness<\(payload)>()")
+                    lines.append(
+                        "let _: _TriggerPayloadMatchesDeclaration<\(expected)> = _TriggerPayloadMatchesDeclaration<\(payload)>()"
+                    )
                 }
                 return lines.joined(separator: "\n")
             }
             .joined(separator: "\n")
         return """
-            fileprivate struct _AtomicTypeWitness<Value: ~Copyable> {}
-            fileprivate struct _AtomicSendableWitness<Value: Sendable> {}
-            fileprivate struct _AtomicErrorWitness<Value: Error> {}
-            fileprivate struct _AtomicCopyableWitness<Value> {}
-            fileprivate static func _atomicWitnesses() {
+            fileprivate struct _TransitionSourceIsPhasePayload<Value: ~Copyable> {}
+            fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {}
+            fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {}
+            fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {}
+            fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {}
+            fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {}
+            fileprivate struct _OperationFailureIsError<Value: Error> {}
+            fileprivate struct _EffectIsCopyable<Value> {}
+            fileprivate static func _stateMachineWitnesses() {
                 \(edges)
                 \(operationWitnesses)
                 \(routeWitnesses)
-                let _ = _AtomicCopyableWitness<Effect>()
-                \(schema.mode == .shared ? "let _ = _AtomicSendableWitness<Input>(); let _ = _AtomicSendableWitness<Effect>()" : "")
+                let _ = _EffectIsCopyable<Effect>()
+                \(schema.mode == .shared ? "let _ = _SharedModeRequiresSendable<Input>(); let _ = _SharedModeRequiresSendable<Effect>()" : "")
             }
             """
     }
@@ -160,7 +168,7 @@ struct Generator {
             .joined(separator: "\n")
         let methods = schema.transitions.map(observedMethod).joined(separator: "\n")
         return """
-            fileprivate typealias _AtomicEngine = \(engine)
+            fileprivate typealias _StateMachineEngine = \(engine)
             /// Validated bounds for managed admission and serial subscriptions.
             \(access)typealias Configuration = RuntimeManagedConfiguration
             /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
@@ -170,32 +178,32 @@ struct Generator {
             /// An immutable historical payload with sealed complete-root provenance.
             \(access)struct Observed<Phase\(bound)>\(sendable) {
                 fileprivate let payload: Phase
-                fileprivate let record: _AtomicEngine.Snapshot
+                fileprivate let record: _StateMachineEngine.Snapshot
                 fileprivate let claim: RuntimeDeliveryClaim?
                 /// The copied historical payload.
                 \(access)var value: Phase { payload }
-                /// The owner-lifetime accepted ordinal.
-                \(access)var ordinal: UInt64 { record.ordinal }
+                /// The owner-lifetime accepted revision.
+                \(access)var revision: UInt64 { record.revision }
                 \(methods)
             }
             /// A complete historical root observation with sealed provenance.
             \(access)enum Snapshot\(sendable) {
                 \(cases)
-                fileprivate var record: _AtomicEngine.Snapshot { switch self { \(recordCases) } }
-                /// The accepted ordinal of this observation.
-                \(access)var ordinal: UInt64 { record.ordinal }
+                fileprivate var record: _StateMachineEngine.Snapshot { switch self { \(recordCases) } }
+                /// The accepted revision of this observation.
+                \(access)var revision: UInt64 { record.revision }
                 /// Whether this historical root records closure.
                 \(access)var isClosed: Bool { record.isClosed }
                 /// Ordinary model data; constructing it confers no installation authority.
                 \(access)var model: \(name) { record.model }
             }
-            fileprivate static func _atomicSnapshot(_ record: _AtomicEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
+            fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
                 switch record.model { \(observationCases) }
             }
             /// A sealed inert candidate consumed by admission.
             \(access)struct Prepared: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
-                fileprivate let candidate: _AtomicEngine.Candidate
-                fileprivate init(_ candidate: _AtomicEngine.Candidate) { self.candidate = candidate }
+                fileprivate let candidate: _StateMachineEngine.Candidate
+                fileprivate init(_ candidate: _StateMachineEngine.Candidate) { self.candidate = candidate }
             }
             /// A closed typed dynamic routing rejection.
             \(access)enum PreparationRejection: Error {
@@ -214,19 +222,19 @@ struct Generator {
             \(access)struct Receipt\(sendable) {
                 /// The accepted historical observation.
                 \(access)let snapshot: Snapshot
-                fileprivate init(_ record: _AtomicEngine.Snapshot) { snapshot = _atomicSnapshot(record) }
-                /// The owner-lifetime accepted ordinal.
-                \(access)var ordinal: UInt64 { snapshot.ordinal }
+                fileprivate init(_ record: _StateMachineEngine.Snapshot) { snapshot = _stateMachineSnapshot(record) }
+                /// The owner-lifetime accepted revision.
+                \(access)var revision: UInt64 { snapshot.revision }
             }
             /// Admission either publishes the entire candidate or leaves all state unchanged.
             \(access)enum CommitResult\(sendable) {
                 case committed(Receipt)
                 case rejected(CommitRejection, current: Snapshot)
             }
-            fileprivate static func _atomicAdmission(_ result: _AtomicEngine.Admission) -> CommitResult {
+            fileprivate static func _stateMachineAdmission(_ result: _StateMachineEngine.Admission) -> CommitResult {
                 switch result {
                 case .committed(let record): return .committed(Receipt(record))
-                case .rejected(let reason, let current): return .rejected(reason, current: _atomicSnapshot(current))
+                case .rejected(let reason, let current): return .rejected(reason, current: _stateMachineSnapshot(current))
                 }
             }
             """
@@ -254,7 +262,7 @@ struct Generator {
         let call = "\(edge.failureType == nil ? "" : "try ")\(name).\(edge.name)(payload\(argument))"
         let prepare = """
             do {
-                let candidate = try _atomicPrepare(on: record, next: .\(edge.to)(change.next), effects: change.effects,
+                let candidate = try _stateMachinePrepare(on: record, next: .\(edge.to)(change.next), effects: change.effects,
                     from: \(index(edge.from)), to: \(index(edge.to)), invalidates: \(scopeIndices(edge.invalidates)),
                     allowed: \(operationIndices(edge.starts)), requiring: \(ticket), claim: claim)
                 return Prepared(candidate)
@@ -274,7 +282,7 @@ struct Generator {
         switch admission {
         case .latest: ".latest"
         case .rejectWhenActive: ".rejectWhenActive"
-        case .parallel(let limit): ".parallel( \(limit))"
+        case .parallel(let limit): ".parallel(\(limit))"
         }
     }
     func index(_ phase: String) -> Int { schema.phases.firstIndex { $0.caseName == phase }! }
@@ -379,7 +387,7 @@ struct Generator {
                     self.terminal = terminal
                 }
             }
-            fileprivate static func _atomicBatch(_ batch: _AtomicEngine.Batch) -> CommandBatch {
+            fileprivate static func _stateMachineBatch(_ batch: _StateMachineEngine.Batch) -> CommandBatch {
                 let commands = batch.commands.map { command -> Command in
                     switch command {
                     case .cancel(let ticket): return .cancel(ExecutionHandle(authority: ticket))
@@ -455,22 +463,22 @@ struct Generator {
             }
             .joined(separator: "\n")
         return """
-            fileprivate static var _atomicEligibility: [[Int]] { [\(eligibility)] }
-            fileprivate static func _atomicPrepare(
-                on record: _AtomicEngine.Snapshot, next: \(name), effects: [Effect], from: Int, to: Int,
+            fileprivate static var _stateMachineEligibility: [[Int]] { [\(eligibility)] }
+            fileprivate static func _stateMachinePrepare(
+                on record: _StateMachineEngine.Snapshot, next: \(name), effects: [Effect], from: Int, to: Int,
                 invalidates: [Int], allowed: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
-            ) throws(PlanRejection) -> _AtomicEngine.Candidate {
-                var edits: [_AtomicEngine.ScopeEdit] = []
-                for (scope, phases) in _atomicEligibility.enumerated() {
+            ) throws(PlanRejection) -> _StateMachineEngine.Candidate {
+                var edits: [_StateMachineEngine.ScopeEdit] = []
+                for (scope, phases) in _stateMachineEligibility.enumerated() {
                     let before = phases.contains(from)
                     let after = phases.contains(to)
                     if after && (!before || invalidates.contains(scope)) { edits.append(.activate(RuntimeScopeID(kind: UInt32(scope)))) }
                     else if before && !after { edits.append(.remove(RuntimeScopeID(kind: UInt32(scope)))) }
                 }
-                \(schema.operations.isEmpty ? "let" : "var") starts: [_AtomicEngine.Start] = []
+                \(schema.operations.isEmpty ? "let" : "var") starts: [_StateMachineEngine.Start] = []
                 \(schema.operations.isEmpty ? "" : "var counts = Array(repeating: 0, count: \(schema.operations.count))")
                 for effect in effects { switch effect { \(starts) } }
-                return try _AtomicEngine.prepare(on: record, next: next, requiring: ticket.map { [$0] } ?? [],
+                return try _StateMachineEngine.prepare(on: record, next: next, requiring: ticket.map { [$0] } ?? [],
                     plan: .init(scopes: edits, retire: ticket.map { [$0] } ?? [], starts: starts,
                         controlCount: invalidates.count, finishingClaims: claim.map { [$0] } ?? []))
             }
@@ -478,7 +486,7 @@ struct Generator {
             \(access)static func prepare(_ input: Input, on snapshot: Snapshot) -> PreparationResult {
                 \(schema.inputs.isEmpty ? "" : "switch (input, snapshot) { \(inputCases) }")
             }
-            fileprivate static func _atomicCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
+            fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
                 \(schema.operations.isEmpty ? "" : "switch (completion, snapshot) { \(completionCases) }")
             }
             """
@@ -511,7 +519,7 @@ struct Generator {
     var ledger: String { "RuntimeDeliveryLedger<\(name), Effect, Completion, PreparationRejection>" }
     func local() -> String {
         """
-        fileprivate typealias _AtomicLedger = \(ledger)
+        fileprivate typealias _StateMachineLedger = \(ledger)
         /// The opaque identity of a first retained terminal envelope.
         \(access)typealias PendingCompletionID = RuntimePendingID
         /// Typed historical diagnostics for a retained completion.
@@ -526,16 +534,16 @@ struct Generator {
             case discarded(Receipt)
             case rejected(CommitRejection)
         }
-        fileprivate static func _atomicFinish(_ result: _AtomicLedger.Finish) -> DeliveryResult {
+        fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> DeliveryResult {
             switch result {
             case .committed(let record): return .committed(Receipt(record))
             case .pending(let id, let status): return .pending(id, status)
             case .notPending: return .notPending
             }
         }
-        fileprivate static func _atomicDeliveryPreparation(_ attempt: _AtomicLedger.Attempt) -> _AtomicLedger.Preparation {
+        fileprivate static func _stateMachineDeliveryPreparation(_ attempt: _StateMachineLedger.Attempt) -> _StateMachineLedger.Preparation {
             \(schema.operations.isEmpty ? "return .failure(.domain(.invalidPhase))" : """
-            switch _atomicCompletion(attempt.outcome, on: _atomicSnapshot(attempt.snapshot, claim: attempt.claim)) {
+            switch _stateMachineCompletion(attempt.outcome, on: _stateMachineSnapshot(attempt.snapshot, claim: attempt.claim)) {
             case .prepared(let prepared): return .success(prepared.candidate)
             case .rejected(let reason):
                 if case .plan(let plan) = reason { return .failure(.plan(plan)) }
@@ -545,23 +553,23 @@ struct Generator {
         }
         /// A noncopyable manually driven owner with an embedded value engine.
         \(access)struct Local: ~Copyable {
-            fileprivate var engine: _AtomicEngine
-            fileprivate var ledger = _AtomicLedger()
+            fileprivate var engine: _StateMachineEngine
+            fileprivate var ledger = _StateMachineLedger()
             /// Creates fresh authority only in the declared initial phase.
             \(access)init(_ initial: \(initialType), configuration: LocalConfiguration = .default) {
-                engine = _AtomicEngine(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration)
+                engine = _StateMachineEngine(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration)
             }
             /// Returns an immutable historical observation.
-            \(access)borrowing func snapshot() -> Snapshot { _atomicSnapshot(engine.snapshot) }
+            \(access)borrowing func snapshot() -> Snapshot { _stateMachineSnapshot(engine.snapshot) }
             /// Consumes and atomically accepts or rejects a complete candidate.
             \(access)mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
                 let result = engine.commit(prepared.candidate)
                 ledger.prune(in: engine)
-                return _atomicAdmission(result)
+                return _stateMachineAdmission(result)
             }
             /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
             \(access)mutating func drainCommands(limit: Int) -> [CommandBatch] {
-                let batches = engine.drain(limit: limit).map { _atomicBatch($0) }
+                let batches = engine.drain(limit: limit).map { _stateMachineBatch($0) }
                 _ = ledger.retryCapacity(in: &engine)
                 return batches
             }
@@ -594,8 +602,8 @@ struct Generator {
                 case .inProgress: return .inProgress
                 case .notPending: return .notPending
                 case .claimed(let attempt):
-                    let preparation = _atomicDeliveryPreparation(attempt)
-                    return _atomicFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
+                    let preparation = _stateMachineDeliveryPreparation(attempt)
+                    return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
                 }
             }
             /// Queries immutable first-outcome records without claiming preparation.
@@ -662,32 +670,32 @@ struct Generator {
                         policy: completionPolicy, driver: { raw in
                             switch raw.descriptor { \(managedExecutions) }
                         }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") },
-                        prepare: { _atomicDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
+                        prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
                 }
                 /// Captures a complete historical observation.
-                \(access)func snapshot()\(asynchronous) -> Snapshot { _atomicSnapshot(\(awaiting)host.snapshot()) }
+                \(access)func snapshot()\(asynchronous) -> Snapshot { _stateMachineSnapshot(\(awaiting)host.snapshot()) }
                 /// Routes, prepares and admits one input in a single isolated turn without suspension.
                 \(access)func send(_ input: Input)\(asynchronous) throws(PreparationRejection) -> CommitResult {
-                    let result = \(awaiting)host.prepareAndCommit { raw -> Result<_AtomicEngine.Candidate, PreparationRejection> in
-                        switch \(name).prepare(input, on: _atomicSnapshot(raw)) {
+                    let result = \(awaiting)host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
+                        switch \(name).prepare(input, on: _stateMachineSnapshot(raw)) {
                         case .prepared(let prepared): return .success(prepared.candidate)
                         case .rejected(let reason): return .failure(reason)
                         }
                     }
                     switch result {
-                    case .success(let admission): return _atomicAdmission(admission)
+                    case .success(let admission): return _stateMachineAdmission(admission)
                     case .failure(let reason): throw reason
                     }
                 }
                 /// Consumes an explicitly prepared historical candidate, rechecking freshness.
                 \(access)func commit(_ prepared: consuming Prepared)\(asynchronous) -> CommitResult {
                     let candidate = prepared.candidate
-                    return _atomicAdmission(\(awaiting)host.commit(candidate))
+                    return _stateMachineAdmission(\(awaiting)host.commit(candidate))
                 }
                 /// Subscribes to initial, accepted and terminal complete snapshots.
                 \(access)func subscribe(_ receive: @escaping \(isolation) (Snapshot) -> Void,
                     onFinish: @escaping \(isolation) () -> Void = {})\(asynchronous) throws(RuntimeHostSubscriptionFailure) -> \(token) {
-                    try \(awaiting)host.subscribe({ receive(_atomicSnapshot($0)) }, onFinish: onFinish)
+                    try \(awaiting)host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish)
                 }
                 /// Retains the first terminal outcome and validates current authority.
                 \(access)func deliver(_ completion: Completion)\(asynchronous) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(\(awaiting)host.deliver(completion))") }
@@ -755,17 +763,17 @@ struct Generator {
                     host = RuntimeSharedHost(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
                         policy: completionPolicy, driver: { raw in
                             switch raw.descriptor { \(managedExecutions) }
-                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") }, prepare: { _atomicDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
+                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") }, prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
                 }
                 /// Captures a coherent historical observation.
-                \(access)func snapshot() -> Snapshot { _atomicSnapshot(host.snapshot()) }
+                \(access)func snapshot() -> Snapshot { _stateMachineSnapshot(host.snapshot()) }
                 /// Registers a serial capacity-one latest-value observation callback.
                 \(access)func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
                     onFinish: @escaping @Sendable () -> Void = {}) throws(RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>.SubscriptionFailure) -> RuntimeSubscription {
-                    try host.subscribe({ receive(_atomicSnapshot($0)) }, onFinish: onFinish)
+                    try host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish)
                 }
                 /// Consumes one candidate into an atomic admission attempt.
-                \(access)func commit(_ prepared: consuming Prepared) -> CommitResult { _atomicAdmission(host.commit(prepared.candidate)) }
+                \(access)func commit(_ prepared: consuming Prepared) -> CommitResult { _stateMachineAdmission(host.commit(prepared.candidate)) }
                 /// Retains and attempts delivery of the first typed terminal outcome.
                 \(access)func deliver(_ completion: Completion) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(host.deliver(completion))") }
                 /// Returns immutable first-outcome diagnostics.

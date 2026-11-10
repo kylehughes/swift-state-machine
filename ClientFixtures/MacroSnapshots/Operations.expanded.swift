@@ -1,50 +1,62 @@
-fileprivate struct _AtomicTypeWitness<Value: ~Copyable> {
+fileprivate struct _TransitionSourceIsPhasePayload<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicSendableWitness<Value: Sendable> {
+fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicErrorWitness<Value: Error> {
+fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicCopyableWitness<Value> {
+fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {
 }
 
-fileprivate static func _atomicWitnesses() {
-    let _: _AtomicTypeWitness<Idle> = _AtomicTypeWitness<Idle>()
-    let _: _AtomicTypeWitness<Change<Loading, Effect>> = _AtomicTypeWitness<Change<Loading, Effect>>()
-    let _: _AtomicTypeWitness<Int> = _AtomicTypeWitness<Int>()
-    let _: _AtomicTypeWitness<Loading> = _AtomicTypeWitness<Loading>()
-    let _: _AtomicTypeWitness<Change<Idle, Effect>> = _AtomicTypeWitness<Change<Idle, Effect>>()
-    let _: _AtomicTypeWitness<Loading> = _AtomicTypeWitness<Loading>()
-    let _: _AtomicTypeWitness<Change<Loading, Effect>> = _AtomicTypeWitness<Change<Loading, Effect>>()
-    let _: _AtomicTypeWitness<Loading> = _AtomicTypeWitness<Loading>()
-    let _: _AtomicTypeWitness<Change<Loading, Effect>> = _AtomicTypeWitness<Change<Loading, Effect>>()
-    let _: _AtomicTypeWitness<String> = _AtomicTypeWitness<String>()
-    let _: _AtomicTypeWitness<Loading> = _AtomicTypeWitness<Loading>()
-    let _: _AtomicTypeWitness<Change<Loaded, Effect>> = _AtomicTypeWitness<Change<Loaded, Effect>>()
-    let _: _AtomicTypeWitness<Fetch.Output> = _AtomicTypeWitness<Fetch.Output>()
-    let _: _AtomicTypeWitness<Loading> = _AtomicTypeWitness<Loading>()
-    let _: _AtomicTypeWitness<Change<Failed, Effect>> = _AtomicTypeWitness<Change<Failed, Effect>>()
-    let _: _AtomicTypeWitness<Fetch.Failure> = _AtomicTypeWitness<Fetch.Failure>()
-    let _: _AtomicTypeWitness<Loading> = _AtomicTypeWitness<Loading>()
-    let _: _AtomicTypeWitness<Change<Loading, Effect>> = _AtomicTypeWitness<Change<Loading, Effect>>()
-    let _: _AtomicTypeWitness<Audit.Output> = _AtomicTypeWitness<Audit.Output>()
-    let _: _AtomicTypeWitness<Loaded> = _AtomicTypeWitness<Loaded>()
-    let _: _AtomicTypeWitness<Change<Idle, Effect>> = _AtomicTypeWitness<Change<Idle, Effect>>()
-    let _: _AtomicTypeWitness<Bool> = _AtomicTypeWitness<Bool>()
-    let _: _AtomicTypeWitness<Loaded> = _AtomicTypeWitness<Loaded>()
-    let _: _AtomicTypeWitness<Change<Loaded, Effect>> = _AtomicTypeWitness<Change<Loaded, Effect>>()
-    let _: _AtomicTypeWitness<Bool> = _AtomicTypeWitness<Bool>()
-    let _: _AtomicTypeWitness<Fetch.Input> = _AtomicTypeWitness<Fetch.Input>();
-    let _ = _AtomicErrorWitness<Fetch.Failure>()
-    let _: _AtomicTypeWitness<Audit.Input> = _AtomicTypeWitness<Audit.Input>();
-    let _ = _AtomicErrorWitness<Audit.Failure>()
-    let _: _AtomicTypeWitness<Observed<Loaded>> = _AtomicTypeWitness<Observed<Loaded>>()
-    let _: _AtomicTypeWitness<Bool> = _AtomicTypeWitness<Bool>()
-    let _ = _AtomicCopyableWitness<Effect>()
-    let _ = _AtomicSendableWitness<Input>();
-    let _ = _AtomicSendableWitness<Effect>()
+fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {
+}
+
+fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {
+}
+
+fileprivate struct _OperationFailureIsError<Value: Error> {
+}
+
+fileprivate struct _EffectIsCopyable<Value> {
+}
+
+fileprivate static func _stateMachineWitnesses() {
+    let _: _TransitionSourceIsPhasePayload<Idle> = _TransitionSourceIsPhasePayload<Idle>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<Int> = _TriggerPayloadMatchesDeclaration<Int>()
+    let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
+    let _: _TransitionReturnsDeclaredResult<Change<Idle, Effect>> = _TransitionReturnsDeclaredResult<Change<Idle, Effect>>()
+    let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<String> = _TriggerPayloadMatchesDeclaration<String>()
+    let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loaded, Effect>> = _TransitionReturnsDeclaredResult<Change<Loaded, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<Fetch.Output> = _TriggerPayloadMatchesDeclaration<Fetch.Output>()
+    let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
+    let _: _TransitionReturnsDeclaredResult<Change<Failed, Effect>> = _TransitionReturnsDeclaredResult<Change<Failed, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<Fetch.Failure> = _TriggerPayloadMatchesDeclaration<Fetch.Failure>()
+    let _: _TransitionSourceIsPhasePayload<Loading> = _TransitionSourceIsPhasePayload<Loading>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loading, Effect>> = _TransitionReturnsDeclaredResult<Change<Loading, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<Audit.Output> = _TriggerPayloadMatchesDeclaration<Audit.Output>()
+    let _: _TransitionSourceIsPhasePayload<Loaded> = _TransitionSourceIsPhasePayload<Loaded>()
+    let _: _TransitionReturnsDeclaredResult<Change<Idle, Effect>> = _TransitionReturnsDeclaredResult<Change<Idle, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
+    let _: _TransitionSourceIsPhasePayload<Loaded> = _TransitionSourceIsPhasePayload<Loaded>()
+    let _: _TransitionReturnsDeclaredResult<Change<Loaded, Effect>> = _TransitionReturnsDeclaredResult<Change<Loaded, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
+    let _: _EffectPayloadIsOperationInput<Fetch.Input> = _EffectPayloadIsOperationInput<Fetch.Input>();
+    let _ = _OperationFailureIsError<Fetch.Failure>()
+    let _: _EffectPayloadIsOperationInput<Audit.Input> = _EffectPayloadIsOperationInput<Audit.Input>();
+    let _ = _OperationFailureIsError<Audit.Failure>()
+    let _: _RouterSourceIsObservedPhase<Observed<Loaded>> = _RouterSourceIsObservedPhase<Observed<Loaded>>()
+    let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
+    let _ = _EffectIsCopyable<Effect>()
+    let _ = _SharedModeRequiresSendable<Input>();
+    let _ = _SharedModeRequiresSendable<Effect>()
 }
 
 /// Unique authority over one declared workflow phase.
@@ -113,7 +125,7 @@ public static func owned(_ initial: consuming Idle) -> Owned<Idle> {
     Owned(initial)
 }
 
-fileprivate typealias _AtomicEngine = RuntimeState<Flow, Effect>
+fileprivate typealias _StateMachineEngine = RuntimeState<Flow, Effect>
 
 /// Validated bounds for managed admission and serial subscriptions.
 public typealias Configuration = RuntimeManagedConfiguration
@@ -127,15 +139,15 @@ public typealias CommitRejection = RuntimeState<Flow, Effect>.Rejection
 /// An immutable historical payload with sealed complete-root provenance.
 public struct Observed<Phase: Sendable>: Sendable {
     fileprivate let payload: Phase
-    fileprivate let record: _AtomicEngine.Snapshot
+    fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: RuntimeDeliveryClaim?
     /// The copied historical payload.
     public var value: Phase {
         payload
     }
-    /// The owner-lifetime accepted ordinal.
-    public var ordinal: UInt64 {
-        record.ordinal
+    /// The owner-lifetime accepted revision.
+    public var revision: UInt64 {
+        record.revision
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared where Phase == Idle {
@@ -146,7 +158,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         throw .domain(error)
     }
     do {
-    let candidate = try _atomicPrepare(on: record, next: .loading(change.next), effects: change.effects,
+    let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
         from: 0, to: 1, invalidates: [0],
         allowed: [0], requiring: nil, claim: claim)
     return Prepared(candidate)
@@ -159,7 +171,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Idle, Effect>
         change = Flow.cancel(payload)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .idle(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .idle(change.next), effects: change.effects,
             from: 1, to: 0, invalidates: [0],
             allowed: [], requiring: nil, claim: claim)
         return Prepared(candidate)
@@ -172,7 +184,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Loading, Effect>
         change = Flow.sessionChanged(payload)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .loading(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
             from: 1, to: 1, invalidates: [1],
             allowed: [], requiring: nil, claim: claim)
         return Prepared(candidate)
@@ -185,7 +197,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Loading, Effect>
         change = Flow.note(payload, input)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .loading(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
             from: 1, to: 1, invalidates: [],
             allowed: [1], requiring: nil, claim: claim)
         return Prepared(candidate)
@@ -198,7 +210,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Loaded, Effect>
         change = Flow.received(payload, completion.value)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .loaded(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .loaded(change.next), effects: change.effects,
             from: 1, to: 2, invalidates: [],
             allowed: [], requiring: completion.authority, claim: claim)
         return Prepared(candidate)
@@ -211,7 +223,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Failed, Effect>
         change = Flow.failed(payload, completion.value)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .failed(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .failed(change.next), effects: change.effects,
             from: 1, to: 3, invalidates: [],
             allowed: [], requiring: completion.authority, claim: claim)
         return Prepared(candidate)
@@ -224,7 +236,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Loading, Effect>
         change = Flow.audited(payload, completion.value)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .loading(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next), effects: change.effects,
             from: 1, to: 1, invalidates: [],
             allowed: [], requiring: completion.authority, claim: claim)
         return Prepared(candidate)
@@ -237,7 +249,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Idle, Effect>
         change = Flow.restart(payload, input)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .idle(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .idle(change.next), effects: change.effects,
             from: 2, to: 0, invalidates: [],
             allowed: [], requiring: nil, claim: claim)
         return Prepared(candidate)
@@ -250,7 +262,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
         let change: Change<Loaded, Effect>
         change = Flow.keep(payload, input)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .loaded(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .loaded(change.next), effects: change.effects,
             from: 2, to: 2, invalidates: [],
             allowed: [], requiring: nil, claim: claim)
         return Prepared(candidate)
@@ -266,7 +278,7 @@ public enum Snapshot: Sendable {
     case loading(Observed<Loading>)
     case loaded(Observed<Loaded>)
     case failed(Observed<Failed>)
-    fileprivate var record: _AtomicEngine.Snapshot {
+    fileprivate var record: _StateMachineEngine.Snapshot {
         switch self {
         case .idle(let value):
             return value.record
@@ -278,9 +290,9 @@ public enum Snapshot: Sendable {
             return value.record
         }
     }
-    /// The accepted ordinal of this observation.
-    public var ordinal: UInt64 {
-        record.ordinal
+    /// The accepted revision of this observation.
+    public var revision: UInt64 {
+        record.revision
     }
     /// Whether this historical root records closure.
     public var isClosed: Bool {
@@ -292,7 +304,7 @@ public enum Snapshot: Sendable {
     }
 }
 
-fileprivate static func _atomicSnapshot(_ record: _AtomicEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
+fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
     case .idle(let payload):
         return .idle(Observed(payload: payload, record: record, claim: claim))
@@ -307,8 +319,8 @@ fileprivate static func _atomicSnapshot(_ record: _AtomicEngine.Snapshot, claim:
 
 /// A sealed inert candidate consumed by admission.
 public struct Prepared: ~Copyable, Sendable {
-    fileprivate let candidate: _AtomicEngine.Candidate
-    fileprivate init(_ candidate: _AtomicEngine.Candidate) {
+    fileprivate let candidate: _StateMachineEngine.Candidate
+    fileprivate init(_ candidate: _StateMachineEngine.Candidate) {
         self.candidate = candidate
     }
 }
@@ -332,12 +344,12 @@ public enum PreparationResult: ~Copyable, Sendable {
 public struct Receipt: Sendable {
     /// The accepted historical observation.
     public let snapshot: Snapshot
-    fileprivate init(_ record: _AtomicEngine.Snapshot) {
-        snapshot = _atomicSnapshot(record)
+    fileprivate init(_ record: _StateMachineEngine.Snapshot) {
+        snapshot = _stateMachineSnapshot(record)
     }
-    /// The owner-lifetime accepted ordinal.
-    public var ordinal: UInt64 {
-        snapshot.ordinal
+    /// The owner-lifetime accepted revision.
+    public var revision: UInt64 {
+        snapshot.revision
     }
 }
 
@@ -347,12 +359,12 @@ public enum CommitResult: Sendable {
     case rejected(CommitRejection, current: Snapshot)
 }
 
-fileprivate static func _atomicAdmission(_ result: _AtomicEngine.Admission) -> CommitResult {
+fileprivate static func _stateMachineAdmission(_ result: _StateMachineEngine.Admission) -> CommitResult {
     switch result {
     case .committed(let record):
         return .committed(Receipt(record))
     case .rejected(let reason, let current):
-        return .rejected(reason, current: _atomicSnapshot(current))
+        return .rejected(reason, current: _stateMachineSnapshot(current))
     }
 }
 
@@ -504,7 +516,7 @@ public struct CommandBatch: Sendable {
     }
 }
 
-fileprivate static func _atomicBatch(_ batch: _AtomicEngine.Batch) -> CommandBatch {
+fileprivate static func _stateMachineBatch(_ batch: _StateMachineEngine.Batch) -> CommandBatch {
     let commands = batch.commands.map { command -> Command in
         switch command {
         case .cancel(let ticket):
@@ -521,16 +533,16 @@ fileprivate static func _atomicBatch(_ batch: _AtomicEngine.Batch) -> CommandBat
     return CommandBatch(receipt: Receipt(batch.snapshot), commands: commands, terminal: batch.terminal)
 }
 
-fileprivate static var _atomicEligibility: [[Int]] {
+fileprivate static var _stateMachineEligibility: [[Int]] {
     [[1], Array(0 ..< 4)]
 }
 
-fileprivate static func _atomicPrepare(
-    on record: _AtomicEngine.Snapshot, next: Flow, effects: [Effect], from: Int, to: Int,
+fileprivate static func _stateMachinePrepare(
+    on record: _StateMachineEngine.Snapshot, next: Flow, effects: [Effect], from: Int, to: Int,
     invalidates: [Int], allowed: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
-) throws(PlanRejection) -> _AtomicEngine.Candidate {
-    var edits: [_AtomicEngine.ScopeEdit] = []
-    for (scope, phases) in _atomicEligibility.enumerated() {
+) throws(PlanRejection) -> _StateMachineEngine.Candidate {
+    var edits: [_StateMachineEngine.ScopeEdit] = []
+    for (scope, phases) in _stateMachineEligibility.enumerated() {
         let before = phases.contains(from)
         let after = phases.contains(to)
         if after && (!before || invalidates.contains(scope)) {
@@ -540,7 +552,7 @@ fileprivate static func _atomicPrepare(
             edits.append(.remove(RuntimeScopeID(kind: UInt32(scope))))
         }
     }
-    var starts: [_AtomicEngine.Start] = []
+    var starts: [_StateMachineEngine.Start] = []
     var counts = Array(repeating: 0, count: 2)
     for effect in effects {
         switch effect {
@@ -565,10 +577,10 @@ fileprivate static func _atomicPrepare(
                 throw .invalidPlan
             }
             starts.append(.init(RuntimeOperation(kind: 1, scope: RuntimeScopeID(kind: 0),
-                dependencies: [RuntimeScopeID(kind: 1)], policy: .parallel( 2)), descriptor: effect))
+                dependencies: [RuntimeScopeID(kind: 1)], policy: .parallel(2)), descriptor: effect))
         }
     }
-    return try _AtomicEngine.prepare(on: record, next: next, requiring: ticket.map {
+    return try _StateMachineEngine.prepare(on: record, next: next, requiring: ticket.map {
             [$0]
         } ?? [],
         plan: .init(scopes: edits, retire: ticket.map {
@@ -668,7 +680,7 @@ public static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparation
     }
 }
 
-fileprivate static func _atomicCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
+fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
     switch (completion, snapshot) {
     case (.fetch(.success), .idle):
         return .rejected(.invalidPhase)
@@ -738,7 +750,7 @@ fileprivate static func _atomicCompletion(_ completion: Completion, on snapshot:
     }
 }
 
-fileprivate typealias _AtomicLedger = RuntimeDeliveryLedger<Flow, Effect, Completion, PreparationRejection>
+fileprivate typealias _StateMachineLedger = RuntimeDeliveryLedger<Flow, Effect, Completion, PreparationRejection>
 
 /// The opaque identity of a first retained terminal envelope.
 public typealias PendingCompletionID = RuntimePendingID
@@ -757,7 +769,7 @@ public enum DeliveryResult: Sendable {
     case rejected(CommitRejection)
 }
 
-fileprivate static func _atomicFinish(_ result: _AtomicLedger.Finish) -> DeliveryResult {
+fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> DeliveryResult {
     switch result {
     case .committed(let record):
         return .committed(Receipt(record))
@@ -768,8 +780,8 @@ fileprivate static func _atomicFinish(_ result: _AtomicLedger.Finish) -> Deliver
     }
 }
 
-fileprivate static func _atomicDeliveryPreparation(_ attempt: _AtomicLedger.Attempt) -> _AtomicLedger.Preparation {
-    switch _atomicCompletion(attempt.outcome, on: _atomicSnapshot(attempt.snapshot, claim: attempt.claim)) {
+fileprivate static func _stateMachineDeliveryPreparation(_ attempt: _StateMachineLedger.Attempt) -> _StateMachineLedger.Preparation {
+    switch _stateMachineCompletion(attempt.outcome, on: _stateMachineSnapshot(attempt.snapshot, claim: attempt.claim)) {
     case .prepared(let prepared):
         return .success(prepared.candidate)
     case .rejected(let reason):
@@ -782,26 +794,26 @@ fileprivate static func _atomicDeliveryPreparation(_ attempt: _AtomicLedger.Atte
 
 /// A noncopyable manually driven owner with an embedded value engine.
 public struct Local: ~Copyable {
-    fileprivate var engine: _AtomicEngine
-    fileprivate var ledger = _AtomicLedger()
+    fileprivate var engine: _StateMachineEngine
+    fileprivate var ledger = _StateMachineLedger()
     /// Creates fresh authority only in the declared initial phase.
     public init(_ initial: Idle, configuration: LocalConfiguration = .default) {
-        engine = _AtomicEngine(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration)
+        engine = _StateMachineEngine(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration)
     }
     /// Returns an immutable historical observation.
     public borrowing func snapshot() -> Snapshot {
-        _atomicSnapshot(engine.snapshot)
+        _stateMachineSnapshot(engine.snapshot)
     }
     /// Consumes and atomically accepts or rejects a complete candidate.
     public mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
         let result = engine.commit(prepared.candidate)
         ledger.prune(in: engine)
-        return _atomicAdmission(result)
+        return _stateMachineAdmission(result)
     }
     /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
     public mutating func drainCommands(limit: Int) -> [CommandBatch] {
         let batches = engine.drain(limit: limit).map {
-            _atomicBatch($0)
+            _stateMachineBatch($0)
         }
         _ = ledger.retryCapacity(in: &engine)
         return batches
@@ -845,8 +857,8 @@ public struct Local: ~Copyable {
         case .notPending:
             return .notPending
         case .claimed(let attempt):
-            let preparation = _atomicDeliveryPreparation(attempt)
-            return _atomicFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
+            let preparation = _stateMachineDeliveryPreparation(attempt)
+            return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
         }
     }
     /// Queries immutable first-outcome records without claiming preparation.
@@ -924,17 +936,17 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
                 return outcome.authority
             },
             prepare: {
-                _atomicDeliveryPreparation($0)
+                _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
     }
     /// Captures a complete historical observation.
     public func snapshot() -> Snapshot {
-        _atomicSnapshot(host.snapshot())
+        _stateMachineSnapshot(host.snapshot())
     }
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
     public func send(_ input: Input) throws(PreparationRejection) -> CommitResult {
-        let result = host.prepareAndCommit { raw -> Result<_AtomicEngine.Candidate, PreparationRejection> in
-            switch Flow.prepare(input, on: _atomicSnapshot(raw)) {
+        let result = host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
+            switch Flow.prepare(input, on: _stateMachineSnapshot(raw)) {
             case .prepared(let prepared):
                 return .success(prepared.candidate)
             case .rejected(let reason):
@@ -943,7 +955,7 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
         }
         switch result {
         case .success(let admission):
-            return _atomicAdmission(admission)
+            return _stateMachineAdmission(admission)
         case .failure(let reason):
             throw reason
         }
@@ -951,14 +963,14 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
     /// Consumes an explicitly prepared historical candidate, rechecking freshness.
     public func commit(_ prepared: consuming Prepared) -> CommitResult {
         let candidate = prepared.candidate
-        return _atomicAdmission(host.commit(candidate))
+        return _stateMachineAdmission(host.commit(candidate))
     }
     /// Subscribes to initial, accepted and terminal complete snapshots.
     public func subscribe(_ receive: @escaping @MainActor (Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void = {
         }) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription {
         try host.subscribe({
-                receive(_atomicSnapshot($0))
+                receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
     }
     /// Retains the first terminal outcome and validates current authority.
@@ -1070,24 +1082,24 @@ public final class Shared: Sendable {
             }, ticket: { (outcome: Completion) -> RuntimeTicket in
                 return outcome.authority
             }, prepare: {
-                _atomicDeliveryPreparation($0)
+                _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
     }
     /// Captures a coherent historical observation.
     public func snapshot() -> Snapshot {
-        _atomicSnapshot(host.snapshot())
+        _stateMachineSnapshot(host.snapshot())
     }
     /// Registers a serial capacity-one latest-value observation callback.
     public func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
         onFinish: @escaping @Sendable () -> Void = {
         }) throws(RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>.SubscriptionFailure) -> RuntimeSubscription {
         try host.subscribe({
-                receive(_atomicSnapshot($0))
+                receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
     }
     /// Consumes one candidate into an atomic admission attempt.
     public func commit(_ prepared: consuming Prepared) -> CommitResult {
-        _atomicAdmission(host.commit(prepared.candidate))
+        _stateMachineAdmission(host.commit(prepared.candidate))
     }
     /// Retains and attempts delivery of the first typed terminal outcome.
     public func deliver(_ completion: Completion) -> DeliveryResult {
@@ -1175,17 +1187,17 @@ public final class ActorHost: Sendable {
                 return outcome.authority
             },
             prepare: {
-                _atomicDeliveryPreparation($0)
+                _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
     }
     /// Captures a complete historical observation.
     public func snapshot() async -> Snapshot {
-        _atomicSnapshot(await host.snapshot())
+        _stateMachineSnapshot(await host.snapshot())
     }
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
     public func send(_ input: Input) async throws(PreparationRejection) -> CommitResult {
-        let result = await host.prepareAndCommit { raw -> Result<_AtomicEngine.Candidate, PreparationRejection> in
-            switch Flow.prepare(input, on: _atomicSnapshot(raw)) {
+        let result = await host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
+            switch Flow.prepare(input, on: _stateMachineSnapshot(raw)) {
             case .prepared(let prepared):
                 return .success(prepared.candidate)
             case .rejected(let reason):
@@ -1194,7 +1206,7 @@ public final class ActorHost: Sendable {
         }
         switch result {
         case .success(let admission):
-            return _atomicAdmission(admission)
+            return _stateMachineAdmission(admission)
         case .failure(let reason):
             throw reason
         }
@@ -1202,14 +1214,14 @@ public final class ActorHost: Sendable {
     /// Consumes an explicitly prepared historical candidate, rechecking freshness.
     public func commit(_ prepared: consuming Prepared) async -> CommitResult {
         let candidate = prepared.candidate
-        return _atomicAdmission(await host.commit(candidate))
+        return _stateMachineAdmission(await host.commit(candidate))
     }
     /// Subscribes to initial, accepted and terminal complete snapshots.
     public func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
         onFinish: @escaping @Sendable () -> Void = {
         }) async throws(RuntimeHostSubscriptionFailure) -> RuntimeSubscription {
         try await host.subscribe({
-                receive(_atomicSnapshot($0))
+                receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
     }
     /// Retains the first terminal outcome and validates current authority.

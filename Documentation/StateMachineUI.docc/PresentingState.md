@@ -85,12 +85,12 @@ the account can revoke operation authority and make a late response stale.
 
 Observe the complete `snapshot` instead of maintaining independently published
 phase fields. ``SnapshotPresentation/apply(_:)`` accepts strictly increasing
-ordinals. It can therefore apply an immediate receipt before asynchronous
+revisions. It can therefore apply an immediate receipt before asynchronous
 observation reaches the same revision, without regressing when that delayed
 observation arrives.
 
 One presentation belongs to one owner history. A restored or forked owner starts
-at ordinal zero, so create a new presentation for it rather than feeding those
+at revision zero, so create a new presentation for it rather than feeding those
 revisions into the original presentation's watermark.
 
 ## Separate observation from running work
@@ -109,12 +109,12 @@ wait from finishing; disposal itself is synchronous.
 ## Bridge a shared host
 
 Shared-host callbacks may arrive outside `MainActor`. Pass their `Sendable`
-snapshots to ``MainActorSnapshotIngress/offer(_:ordinal:)`` and select a
+snapshots to ``MainActorSnapshotIngress/offer(_:revision:)`` and select a
 `MainActor` callback that applies them to the presentation. Capture the
 presentation weakly if the bridge belongs to a separate observation lifetime.
 
 The bridge holds one newest pending snapshot. It ignores older or duplicate
-ordinals, bounds delivery work per turn, and does not allocate a new delivery
+revisions, bounds delivery work per turn, and does not allocate a new delivery
 task for each offer. Call ``MainActorSnapshotIngress/cancel()`` and cancel the
 host subscription when ending that observation lifetime. An already claimed
 callback may finish. This bridge coalesces presentation data only; every

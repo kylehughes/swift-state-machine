@@ -24,7 +24,7 @@ import StateMachineUI
             configuration: configuration
         )
         self.machine = machine
-        presentation = SnapshotPresentation(machine.snapshot(), ordinal: { $0.ordinal })
+        presentation = SnapshotPresentation(machine.snapshot(), revision: { $0.revision })
         try presentation.observe {
             (receive, finish) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription in
             try machine.subscribe(receive, onFinish: finish)

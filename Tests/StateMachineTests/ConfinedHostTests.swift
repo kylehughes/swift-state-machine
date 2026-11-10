@@ -89,25 +89,25 @@ import Testing
             prepare: { _ in .failure(.plan(.invalidPlan)) }
         )
         for value in 1 ... 2 { _ = owner.commit(try Engine.prepare(on: owner.snapshot(), next: value)) }
-        var ordinals: [UInt64] = []
+        var revisions: [UInt64] = []
         var finishes = 0
         let token = try owner.subscribe(
             { snapshot in
-                ordinals.append(snapshot.ordinal)
-                if snapshot.ordinal == 2 {
+                revisions.append(snapshot.revision)
+                if snapshot.revision == 2 {
                     _ = owner.commit(try! Engine.prepare(on: owner.snapshot(), next: 3))
                 }
             },
             onFinish: { finishes += 1 }
         )
-        #expect(ordinals == [2])
+        #expect(revisions == [2])
         let closed = owner.close()
         #expect(await owner.flush(through: closed))
-        #expect(ordinals == [2, 3, 4])
+        #expect(revisions == [2, 3, 4])
         #expect(finishes == 1 && owner.subscriberCount == 0)
         var terminal: [UInt64] = []
         var terminalFinishes = 0
-        let closedToken = try owner.subscribe({ terminal.append($0.ordinal) }, onFinish: { terminalFinishes += 1 })
+        let closedToken = try owner.subscribe({ terminal.append($0.revision) }, onFinish: { terminalFinishes += 1 })
         #expect(await owner.flush(through: owner.close()))
         #expect(terminal == [4] && terminalFinishes == 1)
         token.cancel()
@@ -129,7 +129,7 @@ import Testing
             return Result { () throws(PlanRejection) in try Engine.prepare(on: old, next: 20) }
         }
         guard case .success(.rejected(.conflict, let current)) = result else { throw Failure.unexpected }
-        #expect(current.model == 10 && current.ordinal == 1)
+        #expect(current.model == 10 && current.revision == 1)
         _ = owner.close()
     }
 
@@ -146,38 +146,38 @@ import Testing
         defer { observation.cancel() }
         _ = try editor.load()
         guard case .loading = editor.presentation.snapshot else { throw Failure.unexpected }
-        #expect(editor.presentation.snapshot.ordinal == 1)
+        #expect(editor.presentation.snapshot.revision == 1)
         let first = await network.nextRequest()
         #expect(await network.complete(first.id, with: .failure(.unavailable)))
         let failure = await trace.wait { if case .failed = $0 { true } else { false } }
-        #expect(failure.ordinal == 2)
+        #expect(failure.revision == 2)
         _ = try editor.retry()
         guard case .loading = editor.presentation.snapshot else { throw Failure.unexpected }
         let retry = await network.nextRequest()
         #expect(await network.complete(retry.id, with: .success(Profile(userID: user, name: "Saved"))))
         let loaded = await trace.wait { if case .loaded = $0 { true } else { false } }
-        #expect(loaded.ordinal == 4)
+        #expect(loaded.revision == 4)
         _ = try editor.refresh(ProfileRequest(userID: user, attempts: 2))
         let late = await network.nextRequest()
         editor.dispose()
         #expect(!editor.presentation.isObserving && editor.presentation.snapshot.isClosed)
-        let disposed = editor.presentation.snapshot.ordinal
+        let disposed = editor.presentation.snapshot.revision
         #expect(await network.complete(late.id, with: .success(Profile(userID: user, name: "Too late"))))
         await editor.shutdown()
-        #expect(editor.isQuiescent && editor.presentation.snapshot.ordinal == disposed)
-        #expect(trace.values.map(\.ordinal) == trace.values.map(\.ordinal).sorted())
+        #expect(editor.isQuiescent && editor.presentation.snapshot.revision == disposed)
+        #expect(trace.values.map(\.revision) == trace.values.map(\.revision).sorted())
     }
 
     @MainActor @Test func rapidBackgroundIngressCoalescesAndNeverRegresses_RT031() async {
         let trace = SnapshotTrace<Int>()
         let ingress = MainActorSnapshotIngress<Int> { trace.record($0) }
         // No suspension until all offers are staged: one responsible task receives only the latest.
-        for value in 0 ..< 10_000 { ingress.offer(value, ordinal: UInt64(value)) }
-        ingress.offer(-1, ordinal: 1)
+        for value in 0 ..< 10_000 { ingress.offer(value, revision: UInt64(value)) }
+        ingress.offer(-1, revision: 1)
         let latest = await trace.wait { $0 == 9_999 }
         #expect(latest == 9_999 && trace.values == [9_999])
         ingress.cancel()
-        ingress.offer(10_000, ordinal: 10_000)
+        ingress.offer(10_000, revision: 10_000)
         #expect(trace.values == [9_999])
     }
 
@@ -196,7 +196,7 @@ import Testing
 
         let returned = try ProfileEditor(request: request, drivers: .init(fetch: drivers.fetch, audit: drivers.audit))
         guard case .idle = returned.presentation.snapshot else { throw Failure.unexpected }
-        #expect(returned.presentation.snapshot.ordinal == 0 && returned.presentation.isObserving)
+        #expect(returned.presentation.snapshot.revision == 0 && returned.presentation.isObserving)
         let trace = SnapshotTrace<GeneratedProfile.Snapshot>()
         let observation = returned.presentation.$snapshot.sink { trace.record($0) }
         _ = try returned.load()
@@ -205,7 +205,7 @@ import Testing
         #expect(await network.complete(newRequest.id, with: .success(.init(userID: user, name: "Returned screen"))))
         let loaded = await trace.wait { if case .loaded = $0 { true } else { false } }
         guard case .loaded(let value) = loaded else { throw Failure.unexpected }
-        #expect(value.value.profile.name == "Returned screen" && loaded.ordinal == 2)
+        #expect(value.value.profile.name == "Returned screen" && loaded.revision == 2)
         observation.cancel()
         await returned.shutdown()
         #expect(returned.isQuiescent && first.presentation.snapshot.isClosed)
@@ -288,10 +288,10 @@ import Testing
         #expect(final.isClosed && running == 0)
         token.cancel()
         continuation.finish()
-        var ordinals: [UInt64] = []
-        for await snapshot in stream { ordinals.append(snapshot.ordinal) }
-        #expect(ordinals == ordinals.sorted() && Set(ordinals).count == ordinals.count)
-        #expect(ordinals.first == 0 && ordinals.last == final.ordinal)
+        var revisions: [UInt64] = []
+        for await snapshot in stream { revisions.append(snapshot.revision) }
+        #expect(revisions == revisions.sorted() && Set(revisions).count == revisions.count)
+        #expect(revisions.first == 0 && revisions.last == final.revision)
     }
 
     @MainActor @Test func isolatedSnapshotAndTokenDoNotRetainSuspendedOwner_RT032() async throws {
@@ -333,7 +333,7 @@ import Testing
         #expect(owner.runningCount == 0 && owner.isQuiescent)
     }
 
-    @Test func nativeActorSubscriptionOrdinalsAndClosedInitialRemainMonotonic_RT032() async throws {
+    @Test func nativeActorSubscriptionRevisionsAndClosedInitialRemainMonotonic_RT032() async throws {
         typealias Engine = RuntimeState<Int, Int>
         let owner = RuntimeActorHost<Int, Int, RuntimeTicket, Never>(
             0,
@@ -356,7 +356,7 @@ import Testing
         let closed = await owner.close()
         #expect(await owner.flush(through: closed))
         var observed: [UInt64] = []
-        for await value in stream { observed.append(value.ordinal) }
+        for await value in stream { observed.append(value.revision) }
         #expect(observed == [64, 65, 66])
         let (terminalStream, terminalEvents) = AsyncStream<Engine.Snapshot>.makeStream()
         let terminalToken = try await owner.subscribe(
@@ -364,7 +364,7 @@ import Testing
             onFinish: { terminalEvents.finish() }
         )
         var terminal: [UInt64] = []
-        for await value in terminalStream { terminal.append(value.ordinal) }
+        for await value in terminalStream { terminal.append(value.revision) }
         #expect(terminal == [66])
         token.cancel()
         terminalToken.cancel()
@@ -394,7 +394,7 @@ import Testing
             case .loaded(let localLoaded) = local.snapshot()
         else { throw Failure.unexpected }
         #expect(local.acknowledgeExecution(work.execution, disposition: .terminated) == .recorded)
-        #expect(loadingReceipt.ordinal == 1 && loadedReceipt.ordinal == 2)
+        #expect(loadingReceipt.revision == 1 && loadedReceipt.revision == 2)
 
         var reference = SequentialReference(owner: 1)
         guard case .committed = reference.commit(try reference.prepare(.load(1))),
@@ -405,7 +405,7 @@ import Testing
             throw Failure.unexpected
         }
         reference.acknowledge(referenceWork)
-        #expect(referenceLoaded.root.phase == .loaded(2) && referenceLoaded.stamp.revision == loadedReceipt.ordinal)
+        #expect(referenceLoaded.root.phase == .loaded(2) && referenceLoaded.stamp.revision == loadedReceipt.revision)
 
         let actor = GeneratedProfile.ActorHost(
             .init(userID: user),
@@ -415,15 +415,15 @@ import Testing
         let token = try await actor.subscribe { events.yield($0) }
         _ = try await actor.send(.load(request))
         var actorName: String?
-        var actorOrdinals: [UInt64] = []
+        var actorRevisions: [UInt64] = []
         for await snapshot in stream {
-            actorOrdinals.append(snapshot.ordinal)
+            actorRevisions.append(snapshot.revision)
             if case .loaded(let value) = snapshot {
                 actorName = value.value.profile.name
                 break
             }
         }
-        #expect(actorOrdinals == [0, 1, 2])
+        #expect(actorRevisions == [0, 1, 2])
         #expect(actorName == ownedName && localLoaded.value.profile.name == ownedName)
         token.cancel()
         events.finish()

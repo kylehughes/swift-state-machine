@@ -166,13 +166,13 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     public struct Snapshot {
         /// The historical immutable domain record.
         public let model: Model
-        /// The owner-lifetime accepted ordinal.
-        public let ordinal: UInt64
+        /// The owner-lifetime accepted revision.
+        public let revision: UInt64
         /// Whether admission has permanently ended.
         public let isClosed: Bool
         fileprivate let owner: RuntimeIdentity
         fileprivate let incarnation: RuntimeIdentity
-        fileprivate let revision: RuntimeIdentity
+        fileprivate let revisionIdentity: RuntimeIdentity
         fileprivate let scopes: [Scope]
         fileprivate let limits: RuntimeLimits
     }
@@ -375,8 +375,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
     private let owner = RuntimeIdentity()
     private var incarnation = RuntimeIdentity()
-    private var revision = RuntimeIdentity()
-    private var ordinal: UInt64 = 0
+    private var revisionIdentity = RuntimeIdentity()
+    private var revision: UInt64 = 0
     private var model: Model
     private var closed = false
     private let limits: RuntimeLimits
@@ -402,11 +402,11 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     public var snapshot: Snapshot {
         Snapshot(
             model: model,
-            ordinal: ordinal,
+            revision: revision,
             isClosed: closed,
             owner: owner,
             incarnation: incarnation,
-            revision: revision,
+            revisionIdentity: revisionIdentity,
             scopes: scopes,
             limits: limits
         )
@@ -491,7 +491,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         }) {
             return reject(.inactiveAuthority)
         }
-        if candidate.expected.revision !== revision { return reject(.conflict) }
+        if candidate.expected.revisionIdentity !== revisionIdentity { return reject(.conflict) }
         let plan = candidate.plan
         var remaining = active.filter { ticket in
             !plan.reset && Self.bindingsValid(ticket, scopes: candidate.scopes)
@@ -527,7 +527,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             remaining.append(ticket)
             works.append(RuntimeWork(descriptor: start.descriptor, ticket: ticket))
         }
-        if ordinal == UInt64.max - 1 { return reject(.revisionExhausted) }
+        if revision == UInt64.max - 1 { return reject(.revisionExhausted) }
         if queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
         let revoked = active.filter { ticket in !remaining.contains { $0.operation === ticket.operation } }
         var prospective = reservations
@@ -550,8 +550,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         incarnation = candidate.incarnation
         active = remaining
         reservations = prospective
-        ordinal += 1
-        revision = RuntimeIdentity()
+        revision += 1
+        revisionIdentity = RuntimeIdentity()
         let accepted = snapshot
         queue.append(
             Batch(
@@ -563,7 +563,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         return .committed(accepted)
     }
 
-    /// Idempotently closes with the reserved final ordinal and independent queue slot.
+    /// Idempotently closes with the reserved final revision and independent queue slot.
     public mutating func close() -> Snapshot {
         if let closeSnapshot { return closeSnapshot }
         let cancelled = active
@@ -572,8 +572,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         active = []
         scopes = []
         closed = true
-        ordinal += 1
-        revision = RuntimeIdentity()
+        revision += 1
+        revisionIdentity = RuntimeIdentity()
         let final = snapshot
         closeSnapshot = final
         terminal = Batch(snapshot: final, commands: cancelled.map { .cancel($0) }, terminal: true)

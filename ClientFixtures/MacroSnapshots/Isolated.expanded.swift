@@ -1,28 +1,40 @@
-fileprivate struct _AtomicTypeWitness<Value: ~Copyable> {
+fileprivate struct _TransitionSourceIsPhasePayload<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicSendableWitness<Value: Sendable> {
+fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicErrorWitness<Value: Error> {
+fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicCopyableWitness<Value> {
+fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {
 }
 
-fileprivate static func _atomicWitnesses() {
-    let _: _AtomicTypeWitness<Draft> = _AtomicTypeWitness<Draft>()
-    let _: _AtomicTypeWitness<Change<Saving, Effect>> = _AtomicTypeWitness<Change<Saving, Effect>>()
-    let _: _AtomicTypeWitness<Draft> = _AtomicTypeWitness<Draft>()
-    let _: _AtomicTypeWitness<Change<Draft, Effect>> = _AtomicTypeWitness<Change<Draft, Effect>>()
-    let _: _AtomicTypeWitness<String> = _AtomicTypeWitness<String>()
-    let _: _AtomicTypeWitness<Saving> = _AtomicTypeWitness<Saving>()
-    let _: _AtomicTypeWitness<Change<Draft, Effect>> = _AtomicTypeWitness<Change<Draft, Effect>>()
-    let _: _AtomicTypeWitness<Save.Output> = _AtomicTypeWitness<Save.Output>()
-    let _: _AtomicTypeWitness<Save.Input> = _AtomicTypeWitness<Save.Input>();
-    let _ = _AtomicErrorWitness<Save.Failure>()
+fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {
+}
 
-    let _ = _AtomicCopyableWitness<Effect>()
+fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {
+}
+
+fileprivate struct _OperationFailureIsError<Value: Error> {
+}
+
+fileprivate struct _EffectIsCopyable<Value> {
+}
+
+fileprivate static func _stateMachineWitnesses() {
+    let _: _TransitionSourceIsPhasePayload<Draft> = _TransitionSourceIsPhasePayload<Draft>()
+    let _: _TransitionReturnsDeclaredResult<Change<Saving, Effect>> = _TransitionReturnsDeclaredResult<Change<Saving, Effect>>()
+    let _: _TransitionSourceIsPhasePayload<Draft> = _TransitionSourceIsPhasePayload<Draft>()
+    let _: _TransitionReturnsDeclaredResult<Change<Draft, Effect>> = _TransitionReturnsDeclaredResult<Change<Draft, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<String> = _TriggerPayloadMatchesDeclaration<String>()
+    let _: _TransitionSourceIsPhasePayload<Saving> = _TransitionSourceIsPhasePayload<Saving>()
+    let _: _TransitionReturnsDeclaredResult<Change<Draft, Effect>> = _TransitionReturnsDeclaredResult<Change<Draft, Effect>>()
+    let _: _TriggerPayloadMatchesDeclaration<Save.Output> = _TriggerPayloadMatchesDeclaration<Save.Output>()
+    let _: _EffectPayloadIsOperationInput<Save.Input> = _EffectPayloadIsOperationInput<Save.Input>();
+    let _ = _OperationFailureIsError<Save.Failure>()
+
+    let _ = _EffectIsCopyable<Effect>()
 
 }
 
@@ -58,7 +70,7 @@ internal static func owned(_ initial: consuming Draft) -> Owned<Draft> {
     Owned(initial)
 }
 
-fileprivate typealias _AtomicEngine = RuntimeState<Note, Effect>
+fileprivate typealias _StateMachineEngine = RuntimeState<Note, Effect>
 
 /// Validated bounds for managed admission and serial subscriptions.
 internal typealias Configuration = RuntimeManagedConfiguration
@@ -72,22 +84,22 @@ internal typealias CommitRejection = RuntimeState<Note, Effect>.Rejection
 /// An immutable historical payload with sealed complete-root provenance.
 internal struct Observed<Phase> {
     fileprivate let payload: Phase
-    fileprivate let record: _AtomicEngine.Snapshot
+    fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: RuntimeDeliveryClaim?
     /// The copied historical payload.
     internal var value: Phase {
         payload
     }
-    /// The owner-lifetime accepted ordinal.
-    internal var ordinal: UInt64 {
-        record.ordinal
+    /// The owner-lifetime accepted revision.
+    internal var revision: UInt64 {
+        record.revision
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 internal func save() throws(PreparationFailure<Never>) -> Prepared where Phase == Draft {
     let change: Change<Saving, Effect>
     change = Note.save(payload)
     do {
-    let candidate = try _atomicPrepare(on: record, next: .saving(change.next), effects: change.effects,
+    let candidate = try _stateMachinePrepare(on: record, next: .saving(change.next), effects: change.effects,
         from: 0, to: 1, invalidates: [],
         allowed: [0], requiring: nil, claim: claim)
     return Prepared(candidate)
@@ -100,7 +112,7 @@ internal func save() throws(PreparationFailure<Never>) -> Prepared where Phase =
         let change: Change<Draft, Effect>
         change = Note.edit(payload, input)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .draft(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .draft(change.next), effects: change.effects,
             from: 0, to: 0, invalidates: [],
             allowed: [], requiring: nil, claim: claim)
         return Prepared(candidate)
@@ -113,7 +125,7 @@ internal func save() throws(PreparationFailure<Never>) -> Prepared where Phase =
         let change: Change<Draft, Effect>
         change = Note.saved(payload, completion.value)
         do {
-        let candidate = try _atomicPrepare(on: record, next: .draft(change.next), effects: change.effects,
+        let candidate = try _stateMachinePrepare(on: record, next: .draft(change.next), effects: change.effects,
             from: 1, to: 0, invalidates: [],
             allowed: [], requiring: completion.authority, claim: claim)
         return Prepared(candidate)
@@ -127,7 +139,7 @@ internal func save() throws(PreparationFailure<Never>) -> Prepared where Phase =
 internal enum Snapshot {
     case draft(Observed<Draft>)
     case saving(Observed<Saving>)
-    fileprivate var record: _AtomicEngine.Snapshot {
+    fileprivate var record: _StateMachineEngine.Snapshot {
         switch self {
         case .draft(let value):
             return value.record
@@ -135,9 +147,9 @@ internal enum Snapshot {
             return value.record
         }
     }
-    /// The accepted ordinal of this observation.
-    internal var ordinal: UInt64 {
-        record.ordinal
+    /// The accepted revision of this observation.
+    internal var revision: UInt64 {
+        record.revision
     }
     /// Whether this historical root records closure.
     internal var isClosed: Bool {
@@ -149,7 +161,7 @@ internal enum Snapshot {
     }
 }
 
-fileprivate static func _atomicSnapshot(_ record: _AtomicEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
+fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
     case .draft(let payload):
         return .draft(Observed(payload: payload, record: record, claim: claim))
@@ -160,8 +172,8 @@ fileprivate static func _atomicSnapshot(_ record: _AtomicEngine.Snapshot, claim:
 
 /// A sealed inert candidate consumed by admission.
 internal struct Prepared: ~Copyable {
-    fileprivate let candidate: _AtomicEngine.Candidate
-    fileprivate init(_ candidate: _AtomicEngine.Candidate) {
+    fileprivate let candidate: _StateMachineEngine.Candidate
+    fileprivate init(_ candidate: _StateMachineEngine.Candidate) {
         self.candidate = candidate
     }
 }
@@ -185,12 +197,12 @@ internal enum PreparationResult: ~Copyable {
 internal struct Receipt {
     /// The accepted historical observation.
     internal let snapshot: Snapshot
-    fileprivate init(_ record: _AtomicEngine.Snapshot) {
-        snapshot = _atomicSnapshot(record)
+    fileprivate init(_ record: _StateMachineEngine.Snapshot) {
+        snapshot = _stateMachineSnapshot(record)
     }
-    /// The owner-lifetime accepted ordinal.
-    internal var ordinal: UInt64 {
-        snapshot.ordinal
+    /// The owner-lifetime accepted revision.
+    internal var revision: UInt64 {
+        snapshot.revision
     }
 }
 
@@ -200,12 +212,12 @@ internal enum CommitResult {
     case rejected(CommitRejection, current: Snapshot)
 }
 
-fileprivate static func _atomicAdmission(_ result: _AtomicEngine.Admission) -> CommitResult {
+fileprivate static func _stateMachineAdmission(_ result: _StateMachineEngine.Admission) -> CommitResult {
     switch result {
     case .committed(let record):
         return .committed(Receipt(record))
     case .rejected(let reason, let current):
-        return .rejected(reason, current: _atomicSnapshot(current))
+        return .rejected(reason, current: _stateMachineSnapshot(current))
     }
 }
 
@@ -306,7 +318,7 @@ internal struct CommandBatch {
     }
 }
 
-fileprivate static func _atomicBatch(_ batch: _AtomicEngine.Batch) -> CommandBatch {
+fileprivate static func _stateMachineBatch(_ batch: _StateMachineEngine.Batch) -> CommandBatch {
     let commands = batch.commands.map { command -> Command in
         switch command {
         case .cancel(let ticket):
@@ -321,16 +333,16 @@ fileprivate static func _atomicBatch(_ batch: _AtomicEngine.Batch) -> CommandBat
     return CommandBatch(receipt: Receipt(batch.snapshot), commands: commands, terminal: batch.terminal)
 }
 
-fileprivate static var _atomicEligibility: [[Int]] {
+fileprivate static var _stateMachineEligibility: [[Int]] {
     [[1]]
 }
 
-fileprivate static func _atomicPrepare(
-    on record: _AtomicEngine.Snapshot, next: Note, effects: [Effect], from: Int, to: Int,
+fileprivate static func _stateMachinePrepare(
+    on record: _StateMachineEngine.Snapshot, next: Note, effects: [Effect], from: Int, to: Int,
     invalidates: [Int], allowed: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
-) throws(PlanRejection) -> _AtomicEngine.Candidate {
-    var edits: [_AtomicEngine.ScopeEdit] = []
-    for (scope, phases) in _atomicEligibility.enumerated() {
+) throws(PlanRejection) -> _StateMachineEngine.Candidate {
+    var edits: [_StateMachineEngine.ScopeEdit] = []
+    for (scope, phases) in _stateMachineEligibility.enumerated() {
         let before = phases.contains(from)
         let after = phases.contains(to)
         if after && (!before || invalidates.contains(scope)) {
@@ -340,7 +352,7 @@ fileprivate static func _atomicPrepare(
             edits.append(.remove(RuntimeScopeID(kind: UInt32(scope))))
         }
     }
-    var starts: [_AtomicEngine.Start] = []
+    var starts: [_StateMachineEngine.Start] = []
     var counts = Array(repeating: 0, count: 1)
     for effect in effects {
         switch effect {
@@ -357,7 +369,7 @@ fileprivate static func _atomicPrepare(
                 dependencies: [], policy: .rejectWhenActive), descriptor: effect))
         }
     }
-    return try _AtomicEngine.prepare(on: record, next: next, requiring: ticket.map {
+    return try _StateMachineEngine.prepare(on: record, next: next, requiring: ticket.map {
             [$0]
         } ?? [],
         plan: .init(scopes: edits, retire: ticket.map {
@@ -404,7 +416,7 @@ internal static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparati
     }
 }
 
-fileprivate static func _atomicCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
+fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
     switch (completion, snapshot) {
     case (.save(.success), .draft):
         return .rejected(.invalidPhase)
@@ -428,7 +440,7 @@ fileprivate static func _atomicCompletion(_ completion: Completion, on snapshot:
     }
 }
 
-fileprivate typealias _AtomicLedger = RuntimeDeliveryLedger<Note, Effect, Completion, PreparationRejection>
+fileprivate typealias _StateMachineLedger = RuntimeDeliveryLedger<Note, Effect, Completion, PreparationRejection>
 
 /// The opaque identity of a first retained terminal envelope.
 internal typealias PendingCompletionID = RuntimePendingID
@@ -447,7 +459,7 @@ internal enum DeliveryResult {
     case rejected(CommitRejection)
 }
 
-fileprivate static func _atomicFinish(_ result: _AtomicLedger.Finish) -> DeliveryResult {
+fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> DeliveryResult {
     switch result {
     case .committed(let record):
         return .committed(Receipt(record))
@@ -458,8 +470,8 @@ fileprivate static func _atomicFinish(_ result: _AtomicLedger.Finish) -> Deliver
     }
 }
 
-fileprivate static func _atomicDeliveryPreparation(_ attempt: _AtomicLedger.Attempt) -> _AtomicLedger.Preparation {
-    switch _atomicCompletion(attempt.outcome, on: _atomicSnapshot(attempt.snapshot, claim: attempt.claim)) {
+fileprivate static func _stateMachineDeliveryPreparation(_ attempt: _StateMachineLedger.Attempt) -> _StateMachineLedger.Preparation {
+    switch _stateMachineCompletion(attempt.outcome, on: _stateMachineSnapshot(attempt.snapshot, claim: attempt.claim)) {
     case .prepared(let prepared):
         return .success(prepared.candidate)
     case .rejected(let reason):
@@ -472,26 +484,26 @@ fileprivate static func _atomicDeliveryPreparation(_ attempt: _AtomicLedger.Atte
 
 /// A noncopyable manually driven owner with an embedded value engine.
 internal struct Local: ~Copyable {
-    fileprivate var engine: _AtomicEngine
-    fileprivate var ledger = _AtomicLedger()
+    fileprivate var engine: _StateMachineEngine
+    fileprivate var ledger = _StateMachineLedger()
     /// Creates fresh authority only in the declared initial phase.
     internal init(_ initial: Draft, configuration: LocalConfiguration = .default) {
-        engine = _AtomicEngine(.draft(initial), scopes: [], limits: configuration)
+        engine = _StateMachineEngine(.draft(initial), scopes: [], limits: configuration)
     }
     /// Returns an immutable historical observation.
     internal borrowing func snapshot() -> Snapshot {
-        _atomicSnapshot(engine.snapshot)
+        _stateMachineSnapshot(engine.snapshot)
     }
     /// Consumes and atomically accepts or rejects a complete candidate.
     internal mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
         let result = engine.commit(prepared.candidate)
         ledger.prune(in: engine)
-        return _atomicAdmission(result)
+        return _stateMachineAdmission(result)
     }
     /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
     internal mutating func drainCommands(limit: Int) -> [CommandBatch] {
         let batches = engine.drain(limit: limit).map {
-            _atomicBatch($0)
+            _stateMachineBatch($0)
         }
         _ = ledger.retryCapacity(in: &engine)
         return batches
@@ -535,8 +547,8 @@ internal struct Local: ~Copyable {
         case .notPending:
             return .notPending
         case .claimed(let attempt):
-            let preparation = _atomicDeliveryPreparation(attempt)
-            return _atomicFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
+            let preparation = _stateMachineDeliveryPreparation(attempt)
+            return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
         }
     }
     /// Queries immutable first-outcome records without claiming preparation.
@@ -603,17 +615,17 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
                 return outcome.authority
             },
             prepare: {
-                _atomicDeliveryPreparation($0)
+                _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
     }
     /// Captures a complete historical observation.
     internal func snapshot() -> Snapshot {
-        _atomicSnapshot(host.snapshot())
+        _stateMachineSnapshot(host.snapshot())
     }
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
     internal func send(_ input: Input) throws(PreparationRejection) -> CommitResult {
-        let result = host.prepareAndCommit { raw -> Result<_AtomicEngine.Candidate, PreparationRejection> in
-            switch Note.prepare(input, on: _atomicSnapshot(raw)) {
+        let result = host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
+            switch Note.prepare(input, on: _stateMachineSnapshot(raw)) {
             case .prepared(let prepared):
                 return .success(prepared.candidate)
             case .rejected(let reason):
@@ -622,7 +634,7 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
         }
         switch result {
         case .success(let admission):
-            return _atomicAdmission(admission)
+            return _stateMachineAdmission(admission)
         case .failure(let reason):
             throw reason
         }
@@ -630,14 +642,14 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
     /// Consumes an explicitly prepared historical candidate, rechecking freshness.
     internal func commit(_ prepared: consuming Prepared) -> CommitResult {
         let candidate = prepared.candidate
-        return _atomicAdmission(host.commit(candidate))
+        return _stateMachineAdmission(host.commit(candidate))
     }
     /// Subscribes to initial, accepted and terminal complete snapshots.
     internal func subscribe(_ receive: @escaping @MainActor (Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void = {
         }) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription {
         try host.subscribe({
-                receive(_atomicSnapshot($0))
+                receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
     }
     /// Retains the first terminal outcome and validates current authority.

@@ -70,7 +70,7 @@ import Testing
         guard case .rejected(.foreignOwner, _) = second.commit(try idle.begin(.init(userID: user))) else {
             throw Failure.unexpected
         }
-        #expect(first.snapshot().ordinal == 0)
+        #expect(first.snapshot().revision == 0)
         _ = first.close()
     }
     @Test func managedGeneratedDriverCompletesAndJoins() async throws {

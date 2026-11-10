@@ -4,5 +4,5 @@ import StateMachineUI
 
 @concurrent nonisolated func misuse(_ owner: GeneratedNote.MainActorHost) async {
     let value = await owner.snapshot()
-    print(value.ordinal)
+    print(value.revision)
 }

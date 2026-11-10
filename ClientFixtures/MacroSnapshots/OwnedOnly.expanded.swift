@@ -1,22 +1,34 @@
-fileprivate struct _AtomicTypeWitness<Value: ~Copyable> {
+fileprivate struct _TransitionSourceIsPhasePayload<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicSendableWitness<Value: Sendable> {
+fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicErrorWitness<Value: Error> {
+fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {
 }
 
-fileprivate struct _AtomicCopyableWitness<Value> {
+fileprivate struct _EffectPayloadIsOperationInput<Value: ~Copyable> {
 }
 
-fileprivate static func _atomicWitnesses() {
-    let _: _AtomicTypeWitness<Idle> = _AtomicTypeWitness<Idle>()
-    let _: _AtomicTypeWitness<Advance<Idle, Done, Effect, Rejection>> = _AtomicTypeWitness<Advance<Idle, Done, Effect, Rejection>>()
-    let _: _AtomicTypeWitness<Bool> = _AtomicTypeWitness<Bool>()
+fileprivate struct _RouterSourceIsObservedPhase<Value: ~Copyable> {
+}
+
+fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {
+}
+
+fileprivate struct _OperationFailureIsError<Value: Error> {
+}
+
+fileprivate struct _EffectIsCopyable<Value> {
+}
+
+fileprivate static func _stateMachineWitnesses() {
+    let _: _TransitionSourceIsPhasePayload<Idle> = _TransitionSourceIsPhasePayload<Idle>()
+    let _: _TransitionReturnsDeclaredResult<Advance<Idle, Done, Effect, Rejection>> = _TransitionReturnsDeclaredResult<Advance<Idle, Done, Effect, Rejection>>()
+    let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
 
 
-    let _ = _AtomicCopyableWitness<Effect>()
+    let _ = _EffectIsCopyable<Effect>()
 
 }
 

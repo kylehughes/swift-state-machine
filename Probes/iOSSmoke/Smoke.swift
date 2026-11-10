@@ -101,29 +101,29 @@ nonisolated private struct ResultFile: Encodable {
             throw SmokeFailure(message: "UI load did not accept synchronously")
         }
         try require(
-            editor.presentation.snapshot.ordinal == 1 && label.text == "Loading",
+            editor.presentation.snapshot.revision == 1 && label.text == "Loading",
             "UI snapshot and UILabel did not advance in the input turn"
         )
         passed(
             "UI-SAME-TURN",
-            ["ordinal": "1", "label": label.text ?? "", "isObserving": String(editor.presentation.isObserving)]
+            ["revision": "1", "label": label.text ?? "", "isObserving": String(editor.presentation.isObserving)]
         )
         let first = await network.nextRequest()
         let failed = await network.complete(first.id, with: .failure(.unavailable))
         try require(failed, "Fake failure was not delivered")
         let failure = await trace.wait { if case .failed = $0 { true } else { false } }
-        try require(failure.ordinal == 2 && label.text == "Failed", "Typed failure was not presented")
+        try require(failure.revision == 2 && label.text == "Failed", "Typed failure was not presented")
         _ = try editor.retry()
         let retry = await network.nextRequest()
         passed(
             "NETWORK-FAILURE-RETRY",
-            ["failedOrdinal": String(failure.ordinal), "retryOrdinal": String(editor.presentation.snapshot.ordinal)]
+            ["failedRevision": String(failure.revision), "retryRevision": String(editor.presentation.snapshot.revision)]
         )
         let accepted = await network.complete(retry.id, with: .success(.init(userID: user, name: "Runtime success")))
         try require(accepted, "Retry success was not delivered")
         let loaded = await trace.wait { if case .loaded = $0 { true } else { false } }
-        try require(loaded.ordinal == 4 && label.text == "Runtime success", "Success did not follow typed retry")
-        passed("NETWORK-SUCCESS", ["ordinal": String(loaded.ordinal), "label": label.text ?? ""])
+        try require(loaded.revision == 4 && label.text == "Runtime success", "Success did not follow typed retry")
+        passed("NETWORK-SUCCESS", ["revision": String(loaded.revision), "label": label.text ?? ""])
         _ = try editor.refresh(request)
         let cancelled = await network.nextRequest()
         _ = try editor.cancel()
@@ -143,27 +143,27 @@ nonisolated private struct ResultFile: Encodable {
         try require(label.text == "Replacement", "Late response overwrote replacement UI")
         passed(
             "NETWORK-CANCEL-LATE",
-            ["replacementOrdinal": String(replaced.ordinal), "duplicateAccepted": String(duplicate)]
+            ["replacementRevision": String(replaced.revision), "duplicateAccepted": String(duplicate)]
         )
         _ = try editor.refresh(request)
         let accountRequest = await network.nextRequest()
         _ = try editor.accountChanged()
-        let invalidatedOrdinal = editor.presentation.snapshot.ordinal
+        let invalidatedRevision = editor.presentation.snapshot.revision
         let oldAccount = await network.complete(
             accountRequest.id,
             with: .success(.init(userID: user, name: "Prior account"))
         )
         try require(oldAccount, "Prior account response was not released")
-        let openOwnerOrdinal = try openAccountInvalidation(request, user: user)
+        let openOwnerRevision = try openAccountInvalidation(request, user: user)
         editor.dispose()
         try require(
             !editor.presentation.isObserving && editor.presentation.snapshot.isClosed,
             "Navigation did not remove observation and close authority"
         )
-        let disposedOrdinal = editor.presentation.snapshot.ordinal
+        let disposedRevision = editor.presentation.snapshot.revision
         await editor.shutdown()
         try require(
-            editor.isQuiescent && editor.presentation.snapshot.ordinal == disposedOrdinal,
+            editor.isQuiescent && editor.presentation.snapshot.revision == disposedRevision,
             "Teardown did not join actual tasks"
         )
         guard case .loading = editor.presentation.snapshot else {
@@ -172,18 +172,18 @@ nonisolated private struct ResultFile: Encodable {
         passed(
             "ACCOUNT-INVALIDATION",
             [
-                "invalidatedOrdinal": String(invalidatedOrdinal), "closedOrdinal": String(disposedOrdinal),
-                "historicalPhase": "loading", "openOwnerOrdinal": String(openOwnerOrdinal),
+                "invalidatedRevision": String(invalidatedRevision), "closedRevision": String(disposedRevision),
+                "historicalPhase": "loading", "openOwnerRevision": String(openOwnerRevision),
                 "openOwnerOutcome": "stale",
             ]
         )
-        let ordinals = trace.values.map(\.ordinal)
-        try require(ordinals == ordinals.sorted(), "UI observations regressed")
+        let revisions = trace.values.map(\.revision)
+        try require(revisions == revisions.sorted(), "UI observations regressed")
         passed(
             "TEARDOWN",
             [
                 "isQuiescent": String(editor.isQuiescent), "isObserving": String(editor.presentation.isObserving),
-                "ordinals": String(describing: ordinals),
+                "revisions": String(describing: revisions),
             ]
         )
     }
@@ -195,7 +195,7 @@ nonisolated private struct ResultFile: Encodable {
             case .prepared(let invalidation) = GeneratedProfile.prepare(.authenticationChanged, on: local.snapshot()),
             case .committed = local.commit(invalidation)
         else { throw SmokeFailure(message: "Open-owner account invalidation setup failed") }
-        let ordinal = local.snapshot().ordinal
+        let revision = local.snapshot().revision
         guard case .stale = local.deliver(.fetch(work.succeeded(.init(userID: user, name: "Unauthorized late value"))))
         else {
             throw SmokeFailure(message: "Account invalidation relied on close to revoke completion")
@@ -204,7 +204,7 @@ nonisolated private struct ResultFile: Encodable {
             throw SmokeFailure(message: "Revoked result changed open-owner phase")
         }
         try require(
-            local.snapshot().ordinal == ordinal && !local.snapshot().isClosed,
+            local.snapshot().revision == revision && !local.snapshot().isClosed,
             "Revoked result changed open-owner revision"
         )
         let acknowledgment = local.acknowledgeExecution(work.execution, disposition: .terminated)
@@ -213,7 +213,7 @@ nonisolated private struct ResultFile: Encodable {
         _ = local.drainCommands(limit: 100)
         let settled = local.isQuiescent
         try require(settled, "Open-owner Local obligations did not settle")
-        return ordinal
+        return revision
     }
     private func isolatedEditor() async throws {
         let owner = IsolatedNote.MainActorHost(
@@ -235,7 +235,7 @@ nonisolated private struct ResultFile: Encodable {
         try require(owner.runningCount == 0 && owner.isQuiescent, "Isolated Void worker was not joined")
         passed(
             "ISOLATED-EDITOR",
-            ["text": saved.value.text, "joinedWorkers": String(owner.runningCount), "ordinal": String(saved.ordinal)]
+            ["text": saved.value.text, "joinedWorkers": String(owner.runningCount), "revision": String(saved.revision)]
         )
     }
     private func actorAndLocal() async throws {
@@ -350,13 +350,13 @@ nonisolated private struct ResultFile: Encodable {
             .init(text: "terminal"),
             drivers: .init(save: { .success(.init(text: $0.text)) })
         )
-        var ordinals: [UInt64] = []
+        var revisions: [UInt64] = []
         var finishes = 0
-        let token = try owner.subscribe({ ordinals.append($0.ordinal) }, onFinish: { finishes += 1 })
+        let token = try owner.subscribe({ revisions.append($0.revision) }, onFinish: { finishes += 1 })
         let receipt = owner.close()
         let processed = await owner.flush(through: receipt)
         try require(
-            processed && ordinals == [0, 1] && finishes == 1 && owner.subscriberCount == 0,
+            processed && revisions == [0, 1] && finishes == 1 && owner.subscriberCount == 0,
             "Initial and terminal subscription contract failed"
         )
         token.cancel()
@@ -364,7 +364,7 @@ nonisolated private struct ResultFile: Encodable {
         passed(
             "SUBSCRIPTION-TERMINAL",
             [
-                "ordinals": String(describing: ordinals), "finishes": String(finishes),
+                "revisions": String(describing: revisions), "finishes": String(finishes),
                 "subscribers": String(owner.subscriberCount),
             ]
         )

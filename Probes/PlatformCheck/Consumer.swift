@@ -29,8 +29,8 @@ public func stateMachinePlatformCheck() throws -> UInt64 {
     guard case .committed(let receipt) = owner.commit(consume prepared) else { return 0 }
     let after = owner.snapshot()
     let closing = owner.close()
-    guard !after.isClosed, closing.snapshot.isClosed, closing.ordinal > after.ordinal else { return 0 }
-    return receipt.ordinal + after.ordinal + closing.ordinal
+    guard !after.isClosed, closing.snapshot.isClosed, closing.revision > after.revision else { return 0 }
+    return receipt.revision + after.revision + closing.revision
 }
 
 /// Links a client-authored macro expansion and its manually driven value owner.
@@ -43,7 +43,7 @@ public func stateMachineSchemaPlatformCheck() throws -> UInt64 {
     guard batches.count == 1 else { return 0 }
     _ = owner.close()
     _ = owner.drainCommands(limit: 1)
-    return receipt.ordinal
+    return receipt.revision
 }
 
 /// Links the MainActor facade, observable presentation, and background ingress baseline.
@@ -58,10 +58,10 @@ public func stateMachineSchemaPlatformCheck() throws -> UInt64 {
     let ingress = MainActorSnapshotIngress<GeneratedProfile.Snapshot> { [weak presentation] in
         presentation?.apply($0)
     }
-    ingress.offer(receipt.snapshot, ordinal: receipt.ordinal)
+    ingress.offer(receipt.snapshot, revision: receipt.revision)
     ingress.cancel()
     editor.dispose()
-    return presentation.snapshot.ordinal
+    return presentation.snapshot.revision
 }
 
 /// Links native actor admission and managed shutdown through normal public imports.
@@ -73,5 +73,5 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
     )
     guard case .committed(let receipt) = try await owner.send(.load(ProfileRequest(userID: user))) else { return 0 }
     await owner.shutdown()
-    return receipt.ordinal
+    return receipt.revision
 }

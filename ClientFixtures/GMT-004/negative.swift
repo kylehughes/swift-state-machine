@@ -7,7 +7,7 @@ nonisolated enum Counter: Sendable {
     struct Done: Sendable { let value: Int }
     @Initial case idle(Idle)
     case done(Done)
-    struct _AtomicLedger {}
+    struct _StateMachineLedger {}
     enum Input: Sendable { case finish(Int) }
     enum Effect: Sendable {}
     @Transition(on: Input.finish)

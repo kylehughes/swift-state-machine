@@ -316,8 +316,10 @@ struct SchemaTests {
 
     @Test func reservesAllGeneratedSupportNames() {
         for name in [
-            "Host", "owned", "ExecutionHandle", "CommandBatch", "PendingCompletion", "_AtomicEngine", "_atomicPrepare",
-            "FetchWork", "_AtomicErrorWitness", "_AtomicCopyableWitness", "_atomicEligibility", "Phase", "RuntimeState",
+            "Host", "owned", "ExecutionHandle", "CommandBatch", "PendingCompletion", "_StateMachineEngine",
+            "_stateMachinePrepare",
+            "FetchWork", "_OperationFailureIsError", "_EffectIsCopyable", "_stateMachineEligibility",
+            "Phase", "RuntimeState",
         ] {
             let source = Self.schema.replacingOccurrences(
                 of: "struct Idle {}",
@@ -358,12 +360,12 @@ struct SchemaTests {
     }
 
     @Test func diagnosesTransitionWrapperMemberCollisions() {
-        let source = Self.schema.replacingOccurrences(of: "func begin(", with: "func ordinal(")
+        let source = Self.schema.replacingOccurrences(of: "func begin(", with: "func revision(")
         #expect(throws: DiagnosticsError.self) { try Self.parse(source) }
     }
 
     @Test func diagnosesSnapshotCaseMemberCollisions() {
-        let source = Self.schema.replacingOccurrences(of: "case idle(Idle)", with: "case ordinal(Idle)")
+        let source = Self.schema.replacingOccurrences(of: "case idle(Idle)", with: "case revision(Idle)")
         #expect(throws: DiagnosticsError.self) { try Self.parse(source) }
     }
 

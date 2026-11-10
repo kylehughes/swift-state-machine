@@ -65,7 +65,7 @@ import Testing
                 return
             }
         }
-        #expect(core.snapshot.ordinal == before.ordinal)
+        #expect(core.snapshot.revision == before.revision)
         #expect(core.snapshot.model.completedValue == nil)
         #expect(core.isActive(rawWork.ticket))
         #expect(core.executionReservations.count == 1)
@@ -84,10 +84,10 @@ import Testing
             Issue.record("Same retained envelope failed after correction")
             return
         }
-        #expect(receipt.ordinal == before.ordinal + 2)
+        #expect(receipt.revision == before.revision + 2)
         #expect(receipt.model.completedValue == 42)
         #expect(!core.isActive(rawWork.ticket))
-        #expect(core.drain(limit: 10).map(\.snapshot.ordinal) == [2, 3])
+        #expect(core.drain(limit: 10).map(\.snapshot.revision) == [2, 3])
         // Acceptance settles delivery but cannot impersonate physical termination.
         #expect(core.executionReservations.count == 1)
         #expect(core.acknowledge(rawWork.ticket) == .recorded)

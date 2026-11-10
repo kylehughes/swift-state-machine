@@ -122,7 +122,7 @@ private struct SchemaParser {
 
     private func identifier(_ text: String) -> Bool {
         guard !text.isEmpty, text != "_", !text.hasPrefix("`") else { return false }
-        let parsed = Parser.parse(source: "enum _AtomicIdentifier { case \(text) }")
+        let parsed = Parser.parse(source: "enum _SchemaIdentifier { case \(text) }")
         guard !parsed.hasError, parsed.statements.count == 1,
             let declaration = parsed.statements.first?.item.as(EnumDeclSyntax.self),
             declaration.memberBlock.members.count == 1,
@@ -257,6 +257,31 @@ private struct SchemaParser {
         guard trigger.kind != .input else { return "on: Input.\(trigger.name)" }
         let name = operations.first { $0.effect == trigger.name }?.name ?? trigger.name
         return "\(trigger.kind == .success ? "onSuccess" : "onFailure"): \(name).self"
+    }
+
+    /// Finds the authored declaration to blame for a name, falling back to the schema.
+    private func anchor(for name: String, in declaration: EnumDeclSyntax) -> Syntax {
+        func matches(_ token: TokenSyntax) -> Bool {
+            token.text == name || token.text == "`\(name)`" || "`\(token.text)`" == name
+        }
+        for member in declaration.memberBlock.members {
+            if let cases = member.decl.as(EnumCaseDeclSyntax.self),
+                let element = cases.elements.first(where: { matches($0.name) })
+            {
+                return Syntax(element)
+            }
+            if let named = member.decl.asProtocol(NamedDeclSyntax.self), matches(named.name) {
+                return Syntax(member.decl)
+            }
+            if let variable = member.decl.as(VariableDeclSyntax.self),
+                variable.bindings.contains(where: {
+                    $0.pattern.as(IdentifierPatternSyntax.self).map { matches($0.identifier) } ?? false
+                })
+            {
+                return Syntax(member.decl)
+            }
+        }
+        return Syntax(declaration)
     }
 
     private func marker(_ attributes: AttributeListSyntax, named name: String) throws -> AttributeSyntax? {
@@ -562,11 +587,19 @@ private struct SchemaParser {
             }
             try validateFunction(function, route: isRoute)
             if !isRoute,
-                ["withValue", "phase", "payload", "record", "claim", "value", "ordinal"].contains(function.name.text)
+                ["withValue", "phase", "payload", "record", "claim", "value", "revision"].contains(function.name.text)
             {
                 try reject(
                     function,
                     "'\(function.name.text)' is reserved by generated phase wrappers; rename this transition."
+                )
+            }
+            if !isRoute, function.signature.effectSpecifiers?.throwsClause != nil,
+                ["plan", "invalidPhase"].contains(function.name.text)
+            {
+                try reject(
+                    function.name,
+                    "'\(function.name.text)' is already a PreparationRejection case; rename this throwing transition."
                 )
             }
             guard edgeNames.insert(function.name.text).inserted,
@@ -717,11 +750,15 @@ private struct SchemaParser {
             "MainActorHost", "ActorHost", "MainActorDrivers", "Configuration", "LocalConfiguration", "makeOwned",
             "owned", "prepare", "ExecutionHandle", "Host",
             "ExecutionDisposition", "AcknowledgmentResult", "Command", "CommandBatch", "PendingCompletionID",
-            "PendingCompletion", "DeliveryResult", "_AtomicEngine", "_AtomicLedger", "_AtomicTypeWitness",
-            "_AtomicSendableWitness", "_AtomicErrorWitness", "_AtomicCopyableWitness", "_atomicWitnesses",
-            "_atomicSnapshot",
-            "_atomicAdmission", "_atomicBatch", "_atomicPrepare", "_atomicCompletion", "_atomicFinish",
-            "_atomicDeliveryPreparation", "_atomicEligibility", "Phase", "Int", "UInt32", "UInt64", "String", "Bool",
+            "PendingCompletion", "DeliveryResult", "_StateMachineEngine", "_StateMachineLedger",
+            "_TransitionSourceIsPhasePayload", "_TransitionReturnsDeclaredResult", "_TriggerPayloadMatchesDeclaration",
+            "_EffectPayloadIsOperationInput", "_RouterSourceIsObservedPhase", "_SharedModeRequiresSendable",
+            "_OperationFailureIsError", "_EffectIsCopyable", "_stateMachineWitnesses",
+            "_stateMachineSnapshot",
+            "_stateMachineAdmission", "_stateMachineBatch", "_stateMachinePrepare", "_stateMachineCompletion",
+            "_stateMachineFinish",
+            "_stateMachineDeliveryPreparation", "_stateMachineEligibility", "Phase", "Int", "UInt32", "UInt64",
+            "String", "Bool",
             "Void", "Never", "Result", "Error", "Sendable", "Copyable", "Array", "RuntimeState", "RuntimeTicket",
             "RuntimeLimits", "RuntimeManagedConfiguration", "RuntimeScopeID", "RuntimeOperation",
             "RuntimeOperationPolicy",
@@ -743,17 +780,20 @@ private struct SchemaParser {
             )
         }
         if mode != .ownedOnly,
-            let phase = phases.first(where: { ["record", "model", "ordinal", "isClosed"].contains($0.caseName) })
+            let phase = phases.first(where: { ["record", "model", "revision", "isClosed"].contains($0.caseName) })
         {
             try reject(
-                declaration,
+                anchor(for: phase.caseName, in: declaration),
                 "Phase case '\(phase.caseName)' is reserved by generated Snapshot members; rename the phase case."
             )
         }
         for name in declaredNames + phases.map(\.caseName)
         where reserved.contains(name.hasPrefix("`") && name.hasSuffix("`") ? String(name.dropFirst().dropLast()) : name)
         {
-            try reject(declaration, "'\(name)' is reserved for generated members; rename the authored declaration.")
+            try reject(
+                anchor(for: name, in: declaration),
+                "'\(name)' is reserved for generated members; rename the authored declaration."
+            )
         }
         for phase in phases {
             for on in Set(transitions.filter { $0.from == phase.caseName }.map(\.trigger))

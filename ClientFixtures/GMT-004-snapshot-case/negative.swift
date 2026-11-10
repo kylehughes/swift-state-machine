@@ -5,7 +5,7 @@ import StateMachineSchema
 nonisolated enum Counter: Sendable {
     struct Idle: Sendable { let value: [String: [Int?]] }
     struct Done: Sendable { let value: Int }
-    @Initial case ordinal(Idle)
+    @Initial case revision(Idle)
     case done(Done)
     enum Input: Sendable { case finish(Int) }
     enum Effect: Sendable {}

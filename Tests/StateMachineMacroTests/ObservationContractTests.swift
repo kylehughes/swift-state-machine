@@ -122,7 +122,7 @@ struct ObservationContractTests {
                 for await values in group { observations.append(values) }
                 return observations
             }
-            #expect(receipt.ordinal == 1)
+            #expect(receipt.revision == 1)
             #expect(receipt.model == successor)
             #expect(!receipt.isClosed)
             var observations: [[Core.Snapshot]] = []
@@ -132,19 +132,19 @@ struct ObservationContractTests {
         #expect(samples.count == 8)
         for reader in samples {
             #expect(reader.first?.model == .before(initial))
-            #expect(reader.first?.ordinal == 0)
+            #expect(reader.first?.revision == 0)
             #expect(reader.last?.model == successor)
-            #expect(reader.last?.ordinal == 1)
+            #expect(reader.last?.revision == 1)
             #expect(
                 reader.allSatisfy { snapshot in
-                    (snapshot.ordinal == 0 && snapshot.model == .before(initial))
-                        || (snapshot.ordinal == 1 && snapshot.model == successor)
+                    (snapshot.revision == 0 && snapshot.model == .before(initial))
+                        || (snapshot.revision == 1 && snapshot.model == successor)
                 }
             )
         }
         let batches = owner.drainCommands(limit: 10)
         #expect(batches.count == 1)
-        #expect(batches.first?.snapshot.ordinal == 1)
+        #expect(batches.first?.snapshot.revision == 1)
         #expect(batches.first?.snapshot.model == successor)
         #expect(batches.allSatisfy { !$0.terminal && $0.commands.isEmpty })
         #expect(owner.drainCommands(limit: 10).isEmpty)
@@ -175,7 +175,7 @@ struct ObservationContractTests {
             #expect(after.value.history == original)
             #expect(middle.value.history == ["rows": [[1, 2], [3, 4], [5, 6]]])
             #expect(current.value.history == ["rows": [[1, 2], [3, 4], [5, 6], [7, 8]]])
-            #expect([before.ordinal, first.ordinal, second.ordinal, third.ordinal] == [0, 1, 2, 3])
+            #expect([before.revision, first.revision, second.revision, third.revision] == [0, 1, 2, 3])
             guard case .after(let reread) = owner.snapshot() else { throw Failure.unexpected }
             #expect(reread.value.history == current.value.history)
         } catch {
@@ -204,11 +204,11 @@ struct ObservationContractTests {
         #expect(initial.value.history == original)
         #expect(middle.value.history == ["rows": [[1, 2], [3, 4], [5, 6]]])
         #expect(current.value.history == ["rows": [[1, 2], [3, 4], [5, 6], [7, 8]]])
-        #expect([before.ordinal, first.ordinal, second.ordinal] == [0, 1, 2])
+        #expect([before.revision, first.revision, second.revision] == [0, 1, 2])
         guard case .value(let reread) = owner.snapshot() else { throw Failure.unexpected }
         #expect(reread.value.history == current.value.history)
         _ = owner.close()
-        #expect(owner.drainCommands(limit: 10).map(\.receipt.ordinal) == [1, 2, 3])
+        #expect(owner.drainCommands(limit: 10).map(\.receipt.revision) == [1, 2, 3])
         let quiescent = owner.isQuiescent
         #expect(quiescent)
     }
@@ -230,7 +230,7 @@ struct ObservationContractTests {
         let (events, observations) = AsyncStream<Core.Snapshot>.makeStream()
         let subscription = try owner.subscribe { snapshot in
             observations.yield(snapshot)
-            if snapshot.ordinal == 0 {
+            if snapshot.revision == 0 {
                 entry.yield(())
                 entry.finish()
                 // The synchronous production callback remains claimed while all
@@ -256,14 +256,14 @@ struct ObservationContractTests {
                 ])
                 let candidate = try Core.prepare(on: owner.snapshot(), next: index, plan: plan)
                 guard case .committed(let receipt) = owner.commit(candidate) else { throw Failure.unexpected }
-                #expect(receipt.ordinal == UInt64(index))
+                #expect(receipt.revision == UInt64(index))
                 #expect(receipt.model == index)
             }
             // Draining before close preserves every accepted start decision. This
             // manual host grants no automatic driver execution: acknowledge each
             // issued description explicitly as skipped after inspecting its batch.
             let batches = owner.drainCommands(limit: 100)
-            #expect(batches.map(\.snapshot.ordinal) == Array(UInt64(1) ... UInt64(20)))
+            #expect(batches.map(\.snapshot.revision) == Array(UInt64(1) ... UInt64(20)))
             #expect(batches.allSatisfy { !$0.terminal && $0.commands.count == 2 })
             var works: [RuntimeWork<Description>] = []
             for (index, batch) in batches.enumerated() {
@@ -284,17 +284,17 @@ struct ObservationContractTests {
             let terminal = owner.drainCommands(limit: 100)
             #expect(terminal.count == 1)
             #expect(terminal.first?.terminal == true)
-            #expect(terminal.first?.snapshot.ordinal == 21)
+            #expect(terminal.first?.snapshot.revision == 21)
             #expect(owner.drainCommands(limit: 100).isEmpty)
             release.signal()
             var delivered: [Core.Snapshot] = []
             for await snapshot in events { delivered.append(snapshot) }
             // onFinish is the terminal callback barrier; all reader tasks above are
             // structured, and this host has no unjoined physical driver tasks.
-            #expect(delivered.map(\.ordinal) == [0, closed.ordinal])
+            #expect(delivered.map(\.revision) == [0, closed.revision])
             #expect(delivered.map(\.model) == [0, 20])
             #expect(delivered.last?.isClosed == true)
-            #expect(zip(delivered, delivered.dropFirst()).allSatisfy { $0.ordinal < $1.ordinal })
+            #expect(zip(delivered, delivered.dropFirst()).allSatisfy { $0.revision < $1.revision })
             #expect(owner.diagnostics().outstanding.isEmpty)
             #expect(owner.isQuiescent)
         } catch {

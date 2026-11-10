@@ -12,7 +12,7 @@
 
     private struct Subscriber {
         let identity: RuntimeIdentity
-        var ordinal: UInt64
+        var revision: UInt64
         let receive: @MainActor (Engine.Snapshot) -> Void
         let finish: @MainActor () -> Void
     }
@@ -23,7 +23,7 @@
     private var subscribers: [Subscriber] = []
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var draining = false
-    private var processedOrdinal: UInt64 = 0
+    private var processedRevision: UInt64 = 0
     private let subscriberCapacity: Int
     private let policy: RuntimeCompletionPolicy
     private let driver: @MainActor (RuntimeWork<Descriptor>) async -> Outcome
@@ -88,7 +88,7 @@
         if !initial.isClosed {
             guard subscribers.count < subscriberCapacity else { throw .capacityExceeded }
             subscribers.append(
-                Subscriber(identity: identity, ordinal: initial.ordinal, receive: receive, finish: onFinish)
+                Subscriber(identity: identity, revision: initial.revision, receive: receive, finish: onFinish)
             )
         }
         let token = RuntimeMainActorSubscription { [weak self] in
@@ -197,12 +197,12 @@
             }
             // Initial observation may already include batches awaiting FIFO processing.
             // Advance each registration before callbacks so synchronous reentry cannot regress it.
-            let observers = subscribers.filter { batch.snapshot.ordinal > $0.ordinal }
+            let observers = subscribers.filter { batch.snapshot.revision > $0.revision }
             if batch.terminal {
                 subscribers = []
             } else {
-                for index in subscribers.indices where subscribers[index].ordinal < batch.snapshot.ordinal {
-                    subscribers[index].ordinal = batch.snapshot.ordinal
+                for index in subscribers.indices where subscribers[index].revision < batch.snapshot.revision {
+                    subscribers[index].revision = batch.snapshot.revision
                 }
             }
             for observer in observers {
@@ -212,7 +212,7 @@
             for command in batch.commands {
                 if case .start(let work) = command { start(work) }
             }
-            processedOrdinal = batch.snapshot.ordinal
+            processedRevision = batch.snapshot.revision
             changed()
         }
         Task { @MainActor [weak self] in
@@ -310,7 +310,7 @@
     /// Waits for FIFO processing through this owner-bound historical receipt.
     public func flush(through snapshot: Engine.Snapshot) async -> Bool {
         guard engine.owns(snapshot) else { return false }
-        while processedOrdinal < snapshot.ordinal { await waitForChange() }
+        while processedRevision < snapshot.revision { await waitForChange() }
         return true
     }
     /// The number of physical workers whose joined termination has not yet been processed.
@@ -322,7 +322,7 @@
     /// Closes and waits for actual termination and settlement, optionally bounded by a deadline.
     public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
         let receipt = close()
-        while !isQuiescent || processedOrdinal < receipt.ordinal {
+        while !isQuiescent || processedRevision < receipt.revision {
             if let deadline, ContinuousClock.now >= deadline { return false }
             await waitForChange(deadline: deadline)
         }

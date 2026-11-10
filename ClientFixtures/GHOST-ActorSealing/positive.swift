@@ -14,6 +14,6 @@ nonisolated func legal() async throws {
         )
     )
     _ = try await owner.send(.load(ProfileRequest(userID: user)))
-    print(await owner.snapshot().ordinal)
+    print(await owner.snapshot().revision)
     await owner.shutdown()
 }

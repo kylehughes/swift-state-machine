@@ -2,7 +2,7 @@
 // execute after the installation primitive has released its lock.
 nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
     private struct Envelope: Sendable {
-        let ordinal: UInt64
+        let revision: UInt64
         let value: Value
         let terminal: Bool
     }
@@ -18,15 +18,15 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
 
     package init(
         initial: Value,
-        ordinal: UInt64,
+        revision: UInt64,
         terminal: Bool,
         receive: @escaping @Sendable (Value) -> Void,
         finish: @escaping @Sendable () -> Void
     ) {
         storage = AtomicRecordStorage(
             State(
-                watermark: ordinal,
-                pending: Envelope(ordinal: ordinal, value: initial, terminal: terminal)
+                watermark: revision,
+                pending: Envelope(revision: revision, value: initial, terminal: terminal)
             )
         )
         self.receive = receive
@@ -48,15 +48,15 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
         }
     }
 
-    package func offer(_ value: Value, ordinal: UInt64, terminal: Bool) {
+    package func offer(_ value: Value, revision: UInt64, terminal: Bool) {
         while true {
             let previous = storage.load()
             guard !previous.value.closed,
-                previous.value.watermark.map({ ordinal > $0 }) ?? true
+                previous.value.watermark.map({ revision > $0 }) ?? true
             else { return }
             var next = previous.value
-            next.watermark = ordinal
-            next.pending = Envelope(ordinal: ordinal, value: value, terminal: terminal)
+            next.watermark = revision
+            next.pending = Envelope(revision: revision, value: value, terminal: terminal)
             let wake = !next.scheduled
             next.scheduled = true
             if storage.install(AtomicRecordStorage.Version(next), replacing: previous) {

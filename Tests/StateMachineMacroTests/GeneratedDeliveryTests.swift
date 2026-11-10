@@ -153,7 +153,7 @@ nonisolated private enum DeliveryFlow: Sendable {
         guard case .loading(let beforeLoading) = beforeDuplicates else { throw Failure.unexpected }
         #expect(beforeLoading.value.request == 7)
         #expect(beforeLoading.value.presentation == 0)
-        #expect(beforeDuplicates.ordinal == 1)
+        #expect(beforeDuplicates.revision == 1)
         let duplicates = OSAllocatedUnfairLock(initialState: 0)
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
             if case .pending(_, .preparing) = owner.deliver(completion) { duplicates.withLock { $0 += 1 } }
@@ -162,7 +162,7 @@ nonisolated private enum DeliveryFlow: Sendable {
         guard case .loading(let afterDuplicates) = owner.snapshot() else { throw Failure.unexpected }
         #expect(afterDuplicates.value.request == beforeLoading.value.request)
         #expect(afterDuplicates.value.presentation == beforeLoading.value.presentation)
-        #expect(owner.snapshot().ordinal == beforeDuplicates.ordinal)
+        #expect(owner.snapshot().revision == beforeDuplicates.revision)
         guard case .loading(let loading) = owner.snapshot(), case .committed = owner.commit(try loading.edit(9)) else {
             throw Failure.unexpected
         }
@@ -180,14 +180,14 @@ nonisolated private enum DeliveryFlow: Sendable {
         guard case .loading(let beforeReconciliation) = owner.snapshot() else { throw Failure.unexpected }
         #expect(beforeReconciliation.value.request == 7)
         #expect(beforeReconciliation.value.presentation == 9)
-        #expect(owner.snapshot().ordinal == 2)
+        #expect(owner.snapshot().revision == 2)
         #expect(gate.counts.0 == 1)
         guard case .committed = owner.reconcile(id: pending.id), case .loaded(let loaded) = owner.snapshot() else {
             throw Failure.unexpected
         }
         #expect(loaded.value.result == 7)
         #expect(loaded.value.presentation == 9)
-        #expect(owner.snapshot().ordinal == 3)
+        #expect(owner.snapshot().revision == 3)
         let terminalDuplicates = OSAllocatedUnfairLock(initialState: 0)
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
             if case .stale = owner.deliver(completion) { terminalDuplicates.withLock { $0 += 1 } }
@@ -196,9 +196,9 @@ nonisolated private enum DeliveryFlow: Sendable {
         guard case .loaded(let afterTerminalDuplicates) = owner.snapshot() else { throw Failure.unexpected }
         #expect(afterTerminalDuplicates.value.result == 7)
         #expect(afterTerminalDuplicates.value.presentation == 9)
-        #expect(owner.snapshot().ordinal == 3)
+        #expect(owner.snapshot().revision == 3)
         guard case .notPending = owner.reconcile(id: pending.id) else { throw Failure.unexpected }
-        #expect(owner.snapshot().ordinal == 3)
+        #expect(owner.snapshot().revision == 3)
         #expect(gate.counts.0 == 2)
         #expect(gate.counts.1 == 1)
         #expect(owner.pendingCompletions().isEmpty)
@@ -259,12 +259,12 @@ extension GeneratedDeliveryTests {
             case .audit(let audit) = owner.drainCommands(limit: 1).first?.commands.first,
             case .success(let alternate) = audit.succeeded(9)
         else { throw Failure.unexpected }
-        let before = owner.snapshot().ordinal
+        let before = owner.snapshot().revision
         gate.select(.input)
         guard case .pending(let id, .reconciliationRequired) = owner.deliver(.fetch(fetch.succeeded(7))) else {
             throw Failure.unexpected
         }
-        #expect(owner.snapshot().ordinal == before)
+        #expect(owner.snapshot().revision == before)
         let first = try #require(owner.pendingCompletions().first)
         guard case .preparation(.plan(.invalidPlan)) = first.lastRejection,
             case .fetch(.success(let retained)) = first.outcome
@@ -278,7 +278,7 @@ extension GeneratedDeliveryTests {
             throw Failure.unexpected
         }
         #expect(sameID == id)
-        #expect(owner.snapshot().ordinal == before)
+        #expect(owner.snapshot().revision == before)
         let second = try #require(owner.pendingCompletions().first)
         guard case .preparation(.plan(.invalidPlan)) = second.lastRejection else { throw Failure.unexpected }
         #expect(second.attempts == 2)
