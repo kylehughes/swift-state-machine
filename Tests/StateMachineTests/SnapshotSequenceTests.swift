@@ -210,6 +210,175 @@ private struct Signal: Sendable {
     }
 }
 
+/// Collects from any sequence through the generic `AsyncSequence` interface.
+private func collect<Source: AsyncSequence & Sendable>(
+    _ source: Source,
+    first count: Int
+) async throws -> [Source.Element] where Source.Element: Sendable {
+    var elements: [Source.Element] = []
+    for try await element in source.prefix(count) { elements.append(element) }
+    return elements
+}
+
+@MainActor @Suite(.timeLimit(.minutes(1))) struct MainActorSendableSnapshotSequenceTests {
+    @Test func deliversInitialAcceptedAndTerminalSnapshotsThenEnds() async throws {
+        let owner = try makeMainHost()
+        let detached = Signal()
+        var iterator = try owner.sendableSnapshots({ $0 }, onDetach: { detached.raise() }).makeAsyncIterator()
+        #expect(await iterator.next()?.revision == 0)
+        try owner.advance()
+        #expect(await iterator.next()?.revision == 1)
+        let closed = owner.close()
+        let final = await iterator.next()
+        #expect(final?.revision == closed.revision && final?.isClosed == true)
+        #expect(await iterator.next() == nil)
+        #expect(await iterator.next() == nil)
+        // Cleanup edge: the owner has released this sequence's callbacks.
+        await detached.wait()
+        #expect(owner.subscriberCount == 0)
+        await owner.shutdown()
+    }
+
+    @Test func closedOwnerYieldsItsFinalSnapshotThenEnds() async throws {
+        let owner = try makeMainHost(subscribers: 1)
+        let closed = owner.close()
+        #expect(await owner.flush(through: closed))
+        var revisions: [UInt64] = []
+        for await snapshot in try owner.sendableSnapshots() { revisions.append(snapshot.revision) }
+        #expect(revisions == [closed.revision])
+        await owner.shutdown()
+    }
+
+    @Test func unreadSnapshotsCoalesceToTheFinalSnapshot() async throws {
+        let owner = try makeMainHost()
+        let snapshots = try owner.sendableSnapshots()
+        try owner.advance()
+        try owner.advance()
+        let closed = owner.close()
+        // Completion edge: the owner has delivered every batch through the close.
+        #expect(await owner.flush(through: closed))
+        var observed: [Engine.Snapshot] = []
+        for await snapshot in snapshots { observed.append(snapshot) }
+        #expect(observed.map(\.revision) == [closed.revision])
+        #expect(observed.last?.isClosed == true)
+        await owner.shutdown()
+    }
+
+    @Test func sendingFromInsideTheLoopObservesEveryRevisionInOrder() async throws {
+        let owner = try makeMainHost()
+        var revisions: [UInt64] = []
+        for await snapshot in try owner.sendableSnapshots() {
+            revisions.append(snapshot.revision)
+            if snapshot.revision < 2 { try owner.advance() } else if !snapshot.isClosed { _ = owner.close() }
+        }
+        #expect(revisions == [0, 1, 2, 3])
+        await owner.shutdown()
+    }
+
+    @Test func cancellingTheConsumerEndsTheSequenceAndFreesItsSlot() async throws {
+        let owner = try makeMainHost(subscribers: 1)
+        let detached = Signal()
+        let snapshots = try owner.sendableSnapshots({ $0 }, onDetach: { detached.raise() })
+        let received = Signal()
+        let consumer = Task {
+            var revisions: [UInt64] = []
+            for await snapshot in snapshots {
+                revisions.append(snapshot.revision)
+                received.raise()
+            }
+            return revisions
+        }
+        await received.wait()
+        consumer.cancel()
+        #expect(await consumer.value == [0])
+        // Cleanup edge: the registration is removed on a later main-actor turn.
+        await detached.wait()
+        #expect(owner.subscriberCount == 0)
+        _ = try owner.sendableSnapshots()
+        await owner.shutdown()
+    }
+
+    @Test func releasingTheSequenceFreesItsSlot() async throws {
+        let owner = try makeMainHost(subscribers: 1)
+        let detached = Signal()
+        do {
+            let snapshots = try owner.sendableSnapshots({ $0 }, onDetach: { detached.raise() })
+            #expect(throws: RuntimeHostSubscriptionFailure.capacityExceeded) { try owner.sendableSnapshots() }
+            _ = snapshots
+        }
+        // Cleanup edge: the owner has released this sequence's callbacks.
+        await detached.wait()
+        #expect(owner.subscriberCount == 0)
+        await owner.shutdown()
+    }
+
+    @Test func releasingAnUnclosedOwnerEndsASuspendedConsumer() async throws {
+        var owner: MainHost? = try makeMainHost()
+        weak let released = owner
+        let snapshots = try #require(owner).sendableSnapshots()
+        let received = Signal()
+        let consumer = Task {
+            var observed: [Engine.Snapshot] = []
+            for await snapshot in snapshots {
+                observed.append(snapshot)
+                received.raise()
+            }
+            return observed.map(\.isClosed)
+        }
+        await received.wait()
+        owner = nil
+        #expect(released == nil)
+        #expect(await consumer.value == [false])
+    }
+
+    @Test func onlyTheFirstIteratorReceivesElements() async throws {
+        let owner = try makeMainHost()
+        let snapshots = try owner.sendableSnapshots()
+        var first = snapshots.makeAsyncIterator()
+        var second = snapshots.makeAsyncIterator()
+        #expect(await second.next() == nil)
+        #expect(await first.next()?.revision == 0)
+        await owner.shutdown()
+    }
+
+    @Test func composesWithSequenceOperators() async throws {
+        let owner = try makeMainHost()
+        var revisions: [UInt64] = []
+        for await revision in try owner.sendableSnapshots().map({ $0.revision }).prefix(3) {
+            revisions.append(revision)
+            try owner.advance()
+        }
+        #expect(revisions == [0, 1, 2])
+        await owner.shutdown()
+    }
+
+    @Test func feedsAGenericAsyncSequenceConsumer() async throws {
+        let owner = try makeMainHost()
+        let closed = owner.close()
+        #expect(await owner.flush(through: closed))
+        let observed = try await collect(try owner.sendableSnapshots(), first: 2)
+        #expect(observed.map(\.revision) == [closed.revision])
+        await owner.shutdown()
+    }
+
+    @Test func projectsSnapshotsThatAreNotSendable() async throws {
+        let owner = RuntimeMainActorHost<Box, Int, RuntimeTicket, Never>(
+            Box(1),
+            scopes: [],
+            driver: { $0.ticket },
+            ticket: { $0 },
+            prepare: { _ in .failure(.plan(.invalidPlan)) }
+        )
+        var values: [Int] = []
+        for await value in try owner.sendableSnapshots({ $0.model.value }).prefix(2) {
+            values.append(value)
+            _ = owner.commit(try RuntimeState<Box, Int>.prepare(on: owner.snapshot(), next: Box(2)))
+        }
+        #expect(values == [1, 2])
+        await owner.shutdown()
+    }
+}
+
 @Suite(.timeLimit(.minutes(1))) struct ActorSnapshotSequenceTests {
     @Test func deliversInitialAcceptedAndTerminalSnapshotsThenEnds() async throws {
         let owner = try makeActorHost()

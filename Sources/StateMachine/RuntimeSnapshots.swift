@@ -19,12 +19,21 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
 
         /// Returns the latest unread snapshot, waiting for one when none is pending.
         ///
+        /// Returns `nil` once the sequence has ended, and removes the registration. The call
+        /// runs on the caller's actor.
+        nonisolated(nonsending) public mutating func next() async -> Element? { await step() }
+
+        /// Returns the latest unread snapshot on `actor`, waiting for one when none is pending.
+        ///
         /// Returns `nil` once the sequence has ended, and removes the registration.
-        public mutating func next() async -> Element? {
+        @available(iOS 18, macOS 15, tvOS 18, watchOS 11, visionOS 2, *)
+        public mutating func next(isolation actor: isolated (any Actor)?) async -> Element? { await step() }
+
+        nonisolated(nonsending) private mutating func step() async -> Element? {
             guard let current = lifetime else { return nil }
             if let element = await current.mailbox.next() { return element }
             lifetime = nil
-            current.token.cancel()
+            current.cancel()
             return nil
         }
     }
@@ -99,7 +108,7 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
             }
         }
 
-        func next() async -> Element? {
+        nonisolated(nonsending) func next() async -> Element? {
             await withTaskCancellationHandler {
                 await withCheckedContinuation { wait($0) }
             } onCancel: {
@@ -150,13 +159,16 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
         }
     }
 
+    // Releasing the token removes the registration; `cancel` removes it early.
     fileprivate final class Lifetime: Sendable {
         let mailbox: Mailbox
-        let token: RuntimeSubscription
+        let cancel: @Sendable () -> Void
+        private let token: any Sendable
 
-        init(_ mailbox: Mailbox, _ token: RuntimeSubscription) {
+        init(_ mailbox: Mailbox, _ token: any Sendable, cancel: @escaping @Sendable () -> Void) {
             self.mailbox = mailbox
             self.token = token
+            self.cancel = cancel
         }
     }
 
@@ -176,7 +188,26 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
         let mailbox = Mailbox()
         let feeder = Feeder(mailbox, onDetach: onDetach)
         let token = try register({ feeder.mailbox.offer(transform($0)) }, { feeder.mailbox.finish() })
-        lifetime = Lifetime(mailbox, token)
+        lifetime = Lifetime(mailbox, token) { token.cancel() }
+    }
+
+    /// Registers with a `MainActor` owner through `register` and projects each raw observation
+    /// with `transform` on the main actor.
+    ///
+    /// `onDetach` runs once the owner has released this sequence's callbacks.
+    @MainActor package init<Raw>(
+        mainActor transform: @escaping @MainActor (Raw) -> Element,
+        onDetach: @escaping @Sendable () -> Void = {},
+        register: (
+            _ receive: @escaping @MainActor (Raw) -> Void,
+            _ finish: @escaping @MainActor () -> Void
+        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription
+    ) throws(RuntimeHostSubscriptionFailure) {
+        let mailbox = Mailbox()
+        let feeder = Feeder(mailbox, onDetach: onDetach)
+        let token = try register({ feeder.mailbox.offer(transform($0)) }, { feeder.mailbox.finish() })
+        // The consumer may finish on any actor; the registration is removed on the main actor.
+        lifetime = Lifetime(mailbox, token) { Task { @MainActor in token.cancel() } }
     }
 
     /// Claims the sequence for one consumer; a later iterator ends immediately.
@@ -201,7 +232,8 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
 /// The conformance to `AsyncSequence` is isolated to the main actor. Iterating with `for await`
 /// is available on every supported OS version. Sequence operators such as `map` and generic
 /// `AsyncSequence` algorithms require a deployment target of iOS 18, macOS 15, tvOS 18,
-/// watchOS 11 or visionOS 2.
+/// watchOS 11 or visionOS 2. A `Sendable` element has no such requirement when it is observed
+/// through ``RuntimeMainActorHost/sendableSnapshots()`` or a `Sendable` projection.
 nonisolated public struct RuntimeMainActorSnapshots<Element> {
     // Confined to the main actor, except for the waiter slot that a task cancellation
     // handler reaches from any thread.
@@ -430,6 +462,33 @@ extension RuntimeMainActorHost {
         onDetach: @escaping @Sendable () -> Void
     ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSnapshots<Element> {
         try RuntimeMainActorSnapshots(transform, onDetach: onDetach) {
+            (receive, finish) throws(RuntimeHostSubscriptionFailure) in
+            try subscribe(receive, onFinish: finish)
+        }
+    }
+
+    /// Registers a single-pass latest-value sequence of complete `Sendable` snapshots.
+    ///
+    /// The sequence supports every `AsyncSequence` operator on every supported OS version.
+    public func sendableSnapshots() throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Engine.Snapshot>
+    where Engine.Snapshot: Sendable {
+        try sendableSnapshots { $0 }
+    }
+    /// Registers a single-pass latest-value sequence of `Sendable` projections.
+    ///
+    /// `transform` runs on the main actor when a snapshot is delivered. The sequence supports
+    /// every `AsyncSequence` operator on every supported OS version.
+    public func sendableSnapshots<Element: Sendable>(
+        _ transform: @escaping @MainActor (Engine.Snapshot) -> Element
+    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Element> {
+        try sendableSnapshots(transform, onDetach: {})
+    }
+    /// Registers a sequence and reports when this host has released its callbacks.
+    package func sendableSnapshots<Element: Sendable>(
+        _ transform: @escaping @MainActor (Engine.Snapshot) -> Element,
+        onDetach: @escaping @Sendable () -> Void
+    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Element> {
+        try RuntimeSnapshots(mainActor: transform, onDetach: onDetach) {
             (receive, finish) throws(RuntimeHostSubscriptionFailure) in
             try subscribe(receive, onFinish: finish)
         }
