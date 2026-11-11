@@ -32,7 +32,9 @@ func approveDraft() {
 }
 ```
 
-The generated `Owned<Draft>` exposes `approve`; `Owned<Approved>` does not.
+`Approval.owned(_:)` creates an owner in the initial phase, and `withValue`
+reads the payload an owner holds. The generated `Owned<Draft>` exposes
+`approve`; `Owned<Approved>` does not.
 Calling the edge consumes the draft owner and returns `Owned<Approved>`. An edge
 that starts nothing returns its destination payload directly, and the macro
 derives the edge's endpoints from its signature: `approve` takes a `Draft` and
@@ -145,6 +147,33 @@ actor without becoming `Sendable`. In `ownedOnly` mode, phase payloads may be
 noncopyable resources; they do not receive copyable snapshots or shared
 storage.
 
+An `isolated` schema is declared the same way. The enum stays `nonisolated`, and
+its payloads and inputs do not need to be `Sendable`; this example says so with
+`~Sendable`. The owner confines the values, so a `MainActorHost` keeps them on
+the main actor:
+
+```swift
+@StateMachine(mode: .isolated)
+nonisolated enum Note {
+    struct Draft: ~Sendable { let text: String }
+    struct Saved: ~Sendable { let text: String }
+
+    @Initial case draft(Draft)
+    case saved(Saved)
+
+    enum Input: ~Sendable { case save }
+
+    @Transition(on: Input.save)
+    fileprivate static func save(_ source: Draft) -> Saved { Saved(text: source.text) }
+}
+
+@MainActor
+func saveNote() throws {
+    let host = Note.MainActorHost(.init(text: "Outline"), drivers: .init())
+    try host.send(.save)
+}
+```
+
 A managed owner takes a driver for each operation when it is created. A driver
 returns `Result<Output, Failure>`:
 
@@ -163,8 +192,8 @@ func search() async throws {
 }
 ```
 
-Every hosted owner has `send(_:) throws(SendRejection) -> Receipt`. It routes,
-prepares, and admits the input, and a rejection is one of two cases:
+Every owner except `Owned` has `send(_:) throws(SendRejection) -> Receipt`. It
+routes, prepares, and admits the input, and a rejection is one of two cases:
 `.preparation(PreparationRejection)` when the input has no edge from the current
 phase (`invalidPhase`) or the edge declined it, and `.commit(CommitRejection)`
 when the owner refused the prepared change. `Shared.send` makes exactly one
@@ -179,10 +208,11 @@ revision. Use that explicit path when a caller needs to separate preparation
 from admission. A rejected commit changes neither model data nor operation
 authority.
 
-Each hosted owner except `Local` also offers `snapshots()`, which registers an
-observer and returns a single-pass asynchronous sequence of complete snapshots.
-Creating it throws `SubscriptionFailure` when subscriber capacity is exhausted;
-iterating never throws. `ActorHost.snapshots()` is `async`.
+`MainActorHost`, `ActorHost`, and `Shared` also offer `snapshots()`, which
+registers an observer and returns a single-pass asynchronous sequence of
+complete snapshots. Creating it throws `SubscriptionFailure` when subscriber
+capacity is exhausted; iterating never throws. `ActorHost.snapshots()` is
+`async`.
 
 ```swift
 @MainActor
@@ -251,7 +281,41 @@ enter a phase that is not reachable from the initial factory.
 
 An edge may use typed `throws(Failure)`. The generated `Owned` edge returns an
 `Advance` that gives back the original owner on rejection, and hosted
-preparation reports the failure as a `PreparationRejection` case.
+preparation reports the failure as a `PreparationRejection` case named after the
+edge:
+
+```swift
+@StateMachine(mode: .shared)
+nonisolated enum Rename: Sendable {
+    struct Draft: Sendable { let title: String }
+
+    @Initial case draft(Draft)
+
+    enum Input: Sendable { case rename(String) }
+    enum RenameFailure: Error, Sendable { case empty }
+
+    @Transition(on: Input.rename)
+    fileprivate static func rename(
+        _ source: Draft,
+        _ title: String
+    ) throws(RenameFailure) -> Draft {
+        guard !title.isEmpty else { throw .empty }
+        return Draft(title: title)
+    }
+}
+
+@MainActor
+func renameDraft() {
+    let host = Rename.MainActorHost(.init(title: "Notes"), drivers: .init())
+    do {
+        try host.send(.rename(""))
+    } catch .preparation(.rename(.empty)) {
+        print("A title cannot be empty")
+    } catch {
+        print("Rename was not accepted: \(error)")
+    }
+}
+```
 
 An `ownedOnly` edge consumes its source with `consuming`. If it can fail, it
 returns `Advance<Source, Destination, Effect, Failure>`, where the effect
@@ -259,6 +323,39 @@ argument is `Never` or `Effect.<Edge>`, so a rejection can return the original
 resource. An infallible `ownedOnly` edge returns the destination or a `Change`.
 A consuming function that throws after losing its predecessor cannot provide
 that recovery contract.
+
+```swift
+@StateMachine(mode: .ownedOnly)
+nonisolated enum Upload: ~Copyable {
+    struct Open: ~Copyable { let handle: Int32 }
+    struct Sealed: ~Copyable { let handle: Int32 }
+
+    @Initial case open(Open)
+    case sealed(Sealed)
+
+    enum Input { case seal(Bool) }
+    enum SealFailure: Error { case incomplete }
+
+    @Transition(on: Input.seal)
+    fileprivate static func seal(
+        _ source: consuming Open,
+        _ complete: Bool
+    ) -> Advance<Open, Sealed, Never, SealFailure> {
+        guard complete else { return .rejected(.incomplete, source) }
+        return .advanced(Sealed(handle: source.handle), effects: [])
+    }
+}
+
+func sealUpload() {
+    switch Upload.owned(.init(handle: 3)).seal(false) {
+    case .advanced(let sealed, _):
+        sealed.withValue { print("Sealed \($0.handle)") }
+    case .rejected(let failure, let open):
+        // The original owner comes back and can be advanced again.
+        open.withValue { print("\(failure): still holding \($0.handle)") }
+    }
+}
+```
 
 Inputs have zero or one unlabeled payload. Every phase case has one unlabeled
 payload, whose distinct struct or enum is declared directly inside the schema.

@@ -180,7 +180,7 @@ on the main actor because its snapshots are not `Sendable`. Using `for await`
 works on every supported OS. Operators need a deployment target of iOS 18,
 macOS 15, tvOS 18, watchOS 11, or visionOS 2. For an earlier target, pass a
 closure that projects each snapshot to a `Sendable` value, as in
-`host.snapshots { $0.revision }`. The closure runs on the main actor and the
+`host.snapshots({ $0.revision })`. The closure runs on the main actor and the
 result is an ordinary sequence of the projected values.
 
 For Combine, `$snapshot` on a ``StateMachinePresentation`` is the publisher.

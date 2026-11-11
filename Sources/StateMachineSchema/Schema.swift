@@ -106,8 +106,8 @@ public macro Route(on: Any) = #externalMacro(module: "StateMachineMacros", type:
 
 /// Chooses among the edges that share a source phase and an operation's success.
 ///
-/// The router receives the operation's `Output` value; the selected edge receives the sealed
-/// completion.
+/// The router takes the source phase payload and the operation's `Output` value, the same
+/// parameters as the edge it selects.
 ///
 /// - Parameter onSuccess: The completing operation, written `<Operation>.self`.
 @attached(peer)
@@ -115,8 +115,8 @@ public macro Route(onSuccess: Any.Type) = #externalMacro(module: "StateMachineMa
 
 /// Chooses among the edges that share a source phase and an operation's failure.
 ///
-/// The router receives the operation's `Failure` value; the selected edge receives the sealed
-/// completion.
+/// The router takes the source phase payload and the operation's `Failure` value, the same
+/// parameters as the edge it selects.
 ///
 /// - Parameter onFailure: The completing operation, written `<Operation>.self`.
 @attached(peer)

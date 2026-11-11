@@ -2,7 +2,9 @@
 
 Persist validated model data and create new authority when it is restored.
 
-``ReferenceProfile/Archive`` stores a model and its presentation field. It
+``ReferenceProfile`` is the handwritten form of the profile graph that
+``GeneratedProfile`` declares with the macro. Its ``ReferenceProfile/Archive``
+stores a model and its presentation field. It
 cannot store a loading phase: the interrupted request has no live execution
 to restore. Choose an application recovery state before creating the archive.
 Idle, loaded, and failed models can be archived.

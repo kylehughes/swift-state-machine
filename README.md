@@ -128,7 +128,7 @@ effects themselves.
 
 Choose `shared` for concurrent access with checked `Sendable` data, `isolated`
 for copyable values that stay within their permitted actor, or `ownedOnly` for
-noncopyable resources. Every hosted owner has
+noncopyable resources. Every owner except `Owned` has
 `send(_:) throws(SendRejection) -> Receipt`. A rejection is either
 `.preparation` (the input has no edge from the current phase, or the edge
 declined it) or `.commit` (the owner refused the prepared change). The receipt
@@ -138,10 +138,11 @@ carries the accepted `revision` and the snapshot it produced.
 prepares, and admits a change in one isolated turn. For asynchronous work, a
 driver supplies a `Result` and the host revalidates it when it returns.
 
-The bundled `ResourceWorkflow` shows a recoverable resource transition with
-`Owned`: failure returns the original owner, and success returns the next owner
-and every effect value in order for the caller to handle. Dropping an owner is
-legal; ownership does not require completing the workflow.
+The `StateMachineExamples` module holds the examples this guide refers to. Its
+`ResourceWorkflow` shows a recoverable resource transition with `Owned`: failure
+returns the original owner, and success returns the next owner and every effect
+value in order for the caller to handle. Dropping an owner is legal; ownership
+does not require completing the workflow.
 
 ### Present state on MainActor
 
@@ -151,7 +152,7 @@ baseline. It wraps a generated `MainActorHost` and exposes `snapshot`,
 accepted by `send` is visible in the same turn as the button's input, and a
 delayed observation cannot replace it with an older revision.
 
-The bundled `ProfileEditor` wraps a `StateMachinePresentation` over a generated
+The `ProfileEditor` example wraps a `StateMachinePresentation` over a generated
 `MainActorHost`. Its load, retry, cancel, and account-change actions use the
 same profile graph as the other examples. Disposing the editor removes
 observation and closes its work authority. The [UI guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineui/presentingstate)
@@ -313,8 +314,8 @@ snapshot and commits it, and acceptance atomically installs the complete model,
 operation authority, and ordered command batch. `Shared` is the only owner where
 a competing write can make the attempt fail with `.commit(.conflict)`; the
 rejection leaves all three unchanged. The explicit two-step path is also
-available: an `Observed<Phase>` edge method returns a `Prepared` proposal, and
-`commit(_:)` returns a `CommitResult`.
+available: each case of a snapshot holds an `Observed<Phase>`, whose edge
+methods return a `Prepared` proposal, and `commit(_:)` returns a `CommitResult`.
 
 ### Handle conflicts and capacity explicitly
 
@@ -326,11 +327,11 @@ reports `inProgress`. Duplicate delivery does not replace the retained outcome.
 A completion whose operation no longer has authority, or whose outcome was
 already settled, reports `.stale`.
 
-Select `completionPolicy: .retryPure` only when completion preparation is
-deterministic and effect-free. It permits reevaluation against a newer root,
-with at most four preparations per turn before yielding. Capture network
-responses, decoded values, time, and other external inputs once. The compiler
-does not prove purity.
+Pass `completionPolicy: .retryPure` to the owner's initializer only when
+completion preparation is deterministic and effect-free. It permits reevaluation
+against a newer root, with at most four preparations per turn before yielding.
+Capture network responses, decoded values, time, and other external inputs once.
+The compiler does not prove purity.
 
 An occupied queue or execution bound produces `capacityExceeded`. Managed
 delivery retains the prepared candidate and retries admission when capacity
@@ -383,9 +384,10 @@ confinement does not make a mutable reference into an independent historical
 value. Use immutable data, value storage, or detached projections.
 
 Restoration accepts validated data and creates fresh authority; live tickets,
-tasks, and prepared transitions are not persistence formats. The profile
-example's versioned `Archive` validates decoded data, migrates its
-legacy format, and rejects interrupted loading. See
+tasks, and prepared transitions are not persistence formats. `ReferenceProfile`,
+the handwritten form of the profile graph, has a versioned `Archive` that
+validates decoded data, migrates its legacy format, and rejects interrupted
+loading. See
 [Save and restore profile data](https://kylehughes.github.io/swift-state-machine/documentation/statemachineexamples/persistence)
 for the format and the distinct restore, reset, and fork lifetimes.
 

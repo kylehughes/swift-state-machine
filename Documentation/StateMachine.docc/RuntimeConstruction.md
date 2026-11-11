@@ -94,7 +94,7 @@ observation and excludes other preparations for the same retained outcome.
 Install ledger changes together with their engine changes.
 
 A terminal candidate must both require and retire its operation's ticket.
-Returning an input transition or another operation's transition from a router
+Preparing an input transition or another operation's transition for a completion
 cannot settle the pending result. That invalid plan leaves the first outcome
 available for explicit reconciliation. A candidate's rejected authority also
 does not discard an outcome whose own operation remains active.
