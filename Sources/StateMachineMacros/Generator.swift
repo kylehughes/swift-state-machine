@@ -231,10 +231,10 @@ struct Generator {
         let routeNamespace =
             choices.isEmpty ? "" : "/// The edges each router may choose among.\n\(access)enum Route { \(choices) }"
         let methods = schema.transitions.map(observedMethod).joined(separator: "\n")
-        let sharedSnapshots =
+        let snapshotSequence =
             schema.mode == .shared
-            ? "/// A single-pass latest-value sequence of a shared or actor owner's snapshots.\n\(access)typealias Snapshots = RuntimeSnapshots<Snapshot>"
-            : ""
+            ? "/// A single-pass latest-value sequence of an owner's snapshots.\n\(access)typealias Snapshots = RuntimeSnapshots<Snapshot>"
+            : "/// A single-pass latest-value sequence of a MainActor owner's snapshots.\n\(access)typealias MainActorSnapshots = RuntimeMainActorSnapshots<Snapshot>"
         return """
             fileprivate typealias _StateMachineEngine = \(engine)
             /// Validated bounds for managed admission and serial subscriptions.
@@ -247,9 +247,7 @@ struct Generator {
             \(access)typealias MainActorSubscription = RuntimeMainActorSubscription
             /// Failure to register another live observer.
             \(access)typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
-            /// A single-pass latest-value sequence of a MainActor owner's snapshots.
-            \(access)typealias MainActorSnapshots = RuntimeMainActorSnapshots<Snapshot>
-            \(sharedSnapshots)
+            \(snapshotSequence)
             /// Whether a managed owner retries a conflicting completion or waits for reconciliation.
             \(access)typealias CompletionPolicy = RuntimeCompletionPolicy
             /// The disposition of a retained completion.
@@ -767,6 +765,22 @@ struct Generator {
                 \(access)init(\(params)) { \(assignments) }
             }
             """ : ""
+        let confined = mainActor && schema.mode != .shared
+        let projection =
+            mainActor
+            ? [
+                "/// Registers a single-pass sequence of the latest `Sendable` projections of complete snapshots.",
+                "///",
+                "/// `transform` runs on the main actor when a snapshot is delivered. The sequence supports every",
+                "/// `AsyncSequence` operator on every supported OS version.",
+                "\(access)func snapshots<Projection: Sendable>(",
+                "    _ transform: @escaping @MainActor (Snapshot) -> Projection",
+                ") throws(SubscriptionFailure) -> RuntimeSnapshots<Projection> {",
+                "    try host.sendableSnapshots { transform(_stateMachineSnapshot($0)) }",
+                "}",
+            ]
+            .joined(separator: "\n")
+            : ""
         return """
             \(driverDeclaration)
             /// A sealed sole-writer \(mainActor ? "MainActor" : "native actor") owner with managed execution.
@@ -813,9 +827,10 @@ struct Generator {
                 /// Registers a single-pass sequence of the latest complete snapshots.
                 ///
                 /// The sequence ends after the closed snapshot, when its task is cancelled, or when this owner is released.
-                \(access)func snapshots()\(asynchronous) throws(SubscriptionFailure) -> \(mainActor ? "MainActorSnapshots" : "Snapshots") {
-                    try \(awaiting)host.snapshots { _stateMachineSnapshot($0) }
+                \(access)func snapshots()\(asynchronous) throws(SubscriptionFailure) -> \(confined ? "MainActorSnapshots" : "Snapshots") {
+                    try \(awaiting)host.\(mainActor && !confined ? "sendableSnapshots" : "snapshots") { _stateMachineSnapshot($0) }
                 }
+                \(projection)
                 /// Retains the first terminal outcome and validates current authority.
                 \(access)func deliver(_ completion: Completion)\(asynchronous) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(\(awaiting)host.deliver(completion))") }
                 \(operationDeliveries(prefix: "", asynchronous: asynchronous, awaiting: awaiting))

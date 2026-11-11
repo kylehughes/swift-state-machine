@@ -74,10 +74,7 @@ internal typealias MainActorSubscription = RuntimeMainActorSubscription
 /// Failure to register another live observer.
 internal typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
 
-/// A single-pass latest-value sequence of a MainActor owner's snapshots.
-internal typealias MainActorSnapshots = RuntimeMainActorSnapshots<Snapshot>
-
-/// A single-pass latest-value sequence of a shared or actor owner's snapshots.
+/// A single-pass latest-value sequence of an owner's snapshots.
 internal typealias Snapshots = RuntimeSnapshots<Snapshot>
 
 /// Whether a managed owner retries a conflicting completion or waits for reconciliation.
@@ -536,10 +533,21 @@ internal struct Local: ~Copyable {
     /// Registers a single-pass sequence of the latest complete snapshots.
     ///
     /// The sequence ends after the closed snapshot, when its task is cancelled, or when this owner is released.
-    internal func snapshots() throws(SubscriptionFailure) -> MainActorSnapshots {
-        try host.snapshots {
+    internal func snapshots() throws(SubscriptionFailure) -> Snapshots {
+        try host.sendableSnapshots {
             _stateMachineSnapshot($0)
         }
+    }
+        /// Registers a single-pass sequence of the latest `Sendable` projections of complete snapshots.
+    ///
+    /// `transform` runs on the main actor when a snapshot is delivered. The sequence supports every
+    /// `AsyncSequence` operator on every supported OS version.
+    internal func snapshots<Projection: Sendable>(
+        _ transform: @escaping @MainActor (Snapshot) -> Projection
+    ) throws(SubscriptionFailure) -> RuntimeSnapshots<Projection> {
+        try host.sendableSnapshots {
+        transform(_stateMachineSnapshot($0))
+    }
     }
     /// Retains the first terminal outcome and validates current authority.
     internal func deliver(_ completion: Completion) -> DeliveryResult {
@@ -792,6 +800,7 @@ internal final class ActorHost: Sendable {
             _stateMachineSnapshot($0)
         }
     }
+
     /// Retains the first terminal outcome and validates current authority.
     internal func deliver(_ completion: Completion) async -> DeliveryResult {
     }

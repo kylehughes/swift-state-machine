@@ -292,6 +292,12 @@ nonisolated public enum IsolatedNote {
         public func snapshots() throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSnapshots<Snapshot> {
             try host.snapshots { project($0) }
         }
+        /// Registers a single-pass sequence of the latest `Sendable` projections of complete observations.
+        public func snapshots<Projection: Sendable>(
+            _ transform: @escaping @MainActor (Snapshot) -> Projection
+        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Projection> {
+            try host.sendableSnapshots { transform(project($0)) }
+        }
         /// Retains a terminal outcome with its existing operation authority.
         public func deliver(_ completion: Completion) -> DeliveryResult { project(host.deliver(completion)) }
         /// Reads immutable first-outcome records.

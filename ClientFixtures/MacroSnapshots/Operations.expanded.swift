@@ -160,10 +160,7 @@ public typealias MainActorSubscription = RuntimeMainActorSubscription
 /// Failure to register another live observer.
 public typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
 
-/// A single-pass latest-value sequence of a MainActor owner's snapshots.
-public typealias MainActorSnapshots = RuntimeMainActorSnapshots<Snapshot>
-
-/// A single-pass latest-value sequence of a shared or actor owner's snapshots.
+/// A single-pass latest-value sequence of an owner's snapshots.
 public typealias Snapshots = RuntimeSnapshots<Snapshot>
 
 /// Whether a managed owner retries a conflicting completion or waits for reconciliation.
@@ -1098,10 +1095,21 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
     /// Registers a single-pass sequence of the latest complete snapshots.
     ///
     /// The sequence ends after the closed snapshot, when its task is cancelled, or when this owner is released.
-    public func snapshots() throws(SubscriptionFailure) -> MainActorSnapshots {
-        try host.snapshots {
+    public func snapshots() throws(SubscriptionFailure) -> Snapshots {
+        try host.sendableSnapshots {
             _stateMachineSnapshot($0)
         }
+    }
+        /// Registers a single-pass sequence of the latest `Sendable` projections of complete snapshots.
+    ///
+    /// `transform` runs on the main actor when a snapshot is delivered. The sequence supports every
+    /// `AsyncSequence` operator on every supported OS version.
+    public func snapshots<Projection: Sendable>(
+        _ transform: @escaping @MainActor (Snapshot) -> Projection
+    ) throws(SubscriptionFailure) -> RuntimeSnapshots<Projection> {
+        try host.sendableSnapshots {
+        transform(_stateMachineSnapshot($0))
+    }
     }
     /// Retains the first terminal outcome and validates current authority.
     public func deliver(_ completion: Completion) -> DeliveryResult {
@@ -1411,6 +1419,7 @@ public final class ActorHost: Sendable {
             _stateMachineSnapshot($0)
         }
     }
+
     /// Retains the first terminal outcome and validates current authority.
     public func deliver(_ completion: Completion) async -> DeliveryResult {
         return Self.project(await host.deliver(completion))

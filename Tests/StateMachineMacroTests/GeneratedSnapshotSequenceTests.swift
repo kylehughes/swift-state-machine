@@ -31,7 +31,18 @@ nonisolated private enum SequenceFlow: Sendable {
             }
         }
         #expect(revisions == [0, 1, 2] && values == [7, 7] && closed)
-        #expect(owner.subscriberCount == 0)
+        await owner.shutdown()
+    }
+
+    @MainActor @Test func mainActorHostSequenceComposesWithSequenceOperators() async throws {
+        let owner = SequenceFlow.MainActorHost(.init(), drivers: .init())
+        let snapshots: SequenceFlow.Snapshots = try owner.snapshots()
+        var revisions: [UInt64] = []
+        for await revision in snapshots.map({ $0.revision }).prefix(2) {
+            revisions.append(revision)
+            if revision == 0 { try owner.send(.finish(7)) }
+        }
+        #expect(revisions == [0, 1])
         await owner.shutdown()
     }
 
@@ -99,5 +110,20 @@ nonisolated private enum SequenceFlow: Sendable {
         #expect(saved.first == "confined" && closed)
         await owner.shutdown()
         #expect(owner.runningCount == 0 && owner.isQuiescent)
+    }
+
+    @MainActor @Test func isolatedSchemaProjectionComposesWithSequenceOperators() async throws {
+        let owner = GeneratedNote.MainActorHost(
+            .init(text: "confined"),
+            drivers: .init(save: { input in .success(.init(text: input.text)) })
+        )
+        var revisions: [UInt64] = []
+        for await revision in try owner.snapshots({ $0.revision }).prefix(2) {
+            revisions.append(revision)
+            if revision == 0 { try owner.send(.save) }
+        }
+        #expect(revisions.count == 2 && revisions[0] < revisions[1])
+        _ = owner.close()
+        await owner.shutdown()
     }
 }

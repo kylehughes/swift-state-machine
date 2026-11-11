@@ -722,6 +722,17 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
             _stateMachineSnapshot($0)
         }
     }
+        /// Registers a single-pass sequence of the latest `Sendable` projections of complete snapshots.
+    ///
+    /// `transform` runs on the main actor when a snapshot is delivered. The sequence supports every
+    /// `AsyncSequence` operator on every supported OS version.
+    internal func snapshots<Projection: Sendable>(
+        _ transform: @escaping @MainActor (Snapshot) -> Projection
+    ) throws(SubscriptionFailure) -> RuntimeSnapshots<Projection> {
+        try host.sendableSnapshots {
+        transform(_stateMachineSnapshot($0))
+    }
+    }
     /// Retains the first terminal outcome and validates current authority.
     internal func deliver(_ completion: Completion) -> DeliveryResult {
         return Self.project(host.deliver(completion))
