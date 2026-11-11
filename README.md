@@ -465,7 +465,7 @@ State Machine is not accepting source contributions at this time.
 State Machine was produced with the Swift Package Factory from a specification
 supplied by Kyle Hughes.
 
-## Author
+## "Author"
 
 [Kyle Hughes](https://kylehugh.es)
 
