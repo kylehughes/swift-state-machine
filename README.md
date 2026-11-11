@@ -206,10 +206,24 @@ let cancellable = presentation.$snapshot.sink { render($0) }
 
 `$snapshot` does not complete. `$isObserving` becoming `false` signals the end.
 
-`MainActorHost.snapshots()` returns a `MainActorSnapshots`, which is iterated on
-the main actor and can carry snapshots that are not `Sendable`. `for await` works
-on every supported OS. Operators such as `map` and `prefix` on it need a
-deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or visionOS 2.
+In a `shared` schema every owner returns the same `Snapshots` type. It works
+with `map`, `prefix`, and generic `AsyncSequence` code on every supported OS, and
+a `for await` loop over it runs on the caller's actor:
+
+```swift
+for await revision in try host.snapshots().map(\.revision) { /* ... */ }
+```
+
+In an `isolated` schema, `MainActorHost.snapshots()` returns a
+`MainActorSnapshots`, which is iterated on the main actor and carries snapshots
+that are not `Sendable`. `for await` works on every supported OS. Operators on
+it need a deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or
+visionOS 2. For an earlier target, project each snapshot to a `Sendable` value;
+the result is an ordinary sequence:
+
+```swift
+for await revision in try host.snapshots({ $0.revision }).prefix(3) { /* ... */ }
+```
 
 ## Manage shared state and asynchronous work
 

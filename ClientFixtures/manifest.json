@@ -266,6 +266,16 @@
     "scope": "G5 normal-import confined snapshot sequence iterated off the main actor"
   },
   {
+    "id": "GHOST-IsolatedSequenceOperators",
+    "pattern": "main actor-isolated conformance",
+    "scope": "G5 confined snapshot sequence passed to a sequence operator below the isolated-iteration OS floor"
+  },
+  {
+    "id": "GHOST-SharedSnapshots",
+    "pattern": "no member|not a member type",
+    "scope": "G5 shared mode emits no confined snapshot sequence"
+  },
+  {
     "id": "GHOST-IsolatedSnapshots",
     "pattern": "no member|not a member type",
     "scope": "G5 isolated mode emits no Sendable snapshot sequence"

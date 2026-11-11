@@ -171,9 +171,17 @@ ends when the host is released without closing; in that case no element has
 needs the result in the same turn uses the receipt from `send`, or a
 presentation.
 
-The sequence of a `MainActorHost` is iterated on the main actor. Using
-`for await` works on every supported OS. Operators such as `map` and `prefix`
-need a deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or visionOS 2.
+In a `shared` schema the sequence is a `Snapshots` value. It works with `map`,
+`prefix`, and generic `AsyncSequence` code on every supported OS, and a
+`for await` loop over it runs on the caller's actor.
+
+In an `isolated` schema the sequence is a `MainActorSnapshots` value, iterated
+on the main actor because its snapshots are not `Sendable`. Using `for await`
+works on every supported OS. Operators need a deployment target of iOS 18,
+macOS 15, tvOS 18, watchOS 11, or visionOS 2. For an earlier target, pass a
+closure that projects each snapshot to a `Sendable` value, as in
+`host.snapshots { $0.revision }`. The closure runs on the main actor and the
+result is an ordinary sequence of the projected values.
 
 For Combine, `$snapshot` on a ``StateMachinePresentation`` is the publisher.
 It does not complete; `$isObserving` becoming `false` signals the end:

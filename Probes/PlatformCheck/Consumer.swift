@@ -82,6 +82,7 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
         drivers: .init(save: { .success(.init(text: $0.text)) })
     )
     var last: UInt64 = 0
+    for await revision in try note.snapshots({ $0.revision }).prefix(1) { last += revision }
     for await snapshot in try note.snapshots() {
         last = snapshot.revision
         if !snapshot.isClosed { _ = note.close() }
@@ -106,6 +107,15 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
         last += snapshot.revision
         if !snapshot.isClosed { _ = await actor.close() }
     }
+    let main = GeneratedProfile.MainActorHost(
+        .init(userID: user),
+        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+    )
+    let sequence: GeneratedProfile.Snapshots = try main.snapshots()
+    for await revision in sequence.map({ $0.revision }).prefix(1) { last += revision }
+    presentation.observe(try main.snapshots())
+    presentation.stopObserving()
+    await main.shutdown()
     await note.shutdown()
     await shared.shutdown()
     await actor.shutdown()

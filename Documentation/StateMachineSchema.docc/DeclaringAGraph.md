@@ -200,7 +200,7 @@ The runtime types behind the generated owners are available through aliases
 inside the schema: `Subscription`, `MainActorSubscription`,
 `SubscriptionFailure`, `MainActorSnapshots`, `Snapshots`, `CompletionPolicy`,
 `PendingStatus`, `Configuration`, and `LocalConfiguration`. `Snapshots` exists in
-`shared` mode only.
+`shared` mode and `MainActorSnapshots` in `isolated` mode.
 
 Actor isolation does not prevent two snapshots from sharing a mutable reference.
 Use value storage, immutable objects, or detached projections when a graph
