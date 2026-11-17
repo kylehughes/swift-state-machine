@@ -190,6 +190,7 @@ import os
         let started = Signal()
         let observing = presentation.$isObserving.dropFirst().sink { if $0 { started.raise() } }
         let detached = Signal()
+        // The test keeps the sequence alive, so only the cancelled iterator can free the slot.
         let snapshots = try owner.snapshots({ $0 }, onDetach: { detached.raise() })
         let following = Task { await presentation.follow(snapshots) }
         // Attachment edge: `follow` has taken ownership of the observation.

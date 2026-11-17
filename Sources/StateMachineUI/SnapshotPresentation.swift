@@ -61,8 +61,10 @@ import StateMachine
         observation = Task { [weak self] in
             for await next in snapshots {
                 // `stopObserving` cancels on the main actor, so a value that was already
-                // in flight is discarded here and never applied after the stop.
-                guard !Task.isCancelled, let self else { return }
+                // in flight is discarded here and never applied after the stop. The loop
+                // continues so that the cancelled iterator ends and removes its registration.
+                if Task.isCancelled { continue }
+                guard let self else { return }
                 self.apply(next)
             }
             if !Task.isCancelled { self?.isObserving = false }
@@ -159,8 +161,10 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         observation = Task { [weak self] in
             for await next in snapshots {
                 // `stopObserving` cancels on the main actor, so a value that was already
-                // in flight is discarded here and never applied after the stop.
-                guard !Task.isCancelled, let self else { return }
+                // in flight is discarded here and never applied after the stop. The loop
+                // continues so that the cancelled iterator ends and removes its registration.
+                if Task.isCancelled { continue }
+                guard let self else { return }
                 self.apply(next)
             }
             if !Task.isCancelled { self?.isObserving = false }
