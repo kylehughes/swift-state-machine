@@ -1,4 +1,7 @@
-"""Build public package products and run a smoke app on an owned iOS 17 Simulator.
+"""Build public package products and run a smoke app on an owned iOS Simulator.
+
+The default runtime is iOS 17.5. Pass --runtime and a compatible --device-type to run on
+another installed runtime; the app must report the selected runtime's version.
 
 The app writes Documents/result.json with a status, systemVersion, and named
 checks. Every expected check must pass. The helper always deletes its own device.
@@ -19,9 +22,11 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def validate_result(result, expected):
-    if result.get("status") != "pass" or not result.get("systemVersion", "").startswith("17."):
-        raise ValueError("The app did not report success on iOS 17")
+def validate_result(result, expected, version):
+    """Require success on the selected runtime: `version` is its major.minor, such as 17.5."""
+    reported = result.get("systemVersion", "")
+    if result.get("status") != "pass" or not (reported == version or reported.startswith(version + ".")):
+        raise ValueError(f"The app did not report success on iOS {version}: reported {reported!r}")
     checks = result.get("checks", [])
     if not isinstance(checks, list) or not checks:
         raise ValueError("The app reported no individual checks")
@@ -172,8 +177,8 @@ def main():
         report["app_sha256"] = digest(executable)
         runtimes = json.loads(run("runtime-inventory", ["xcrun", "simctl", "list", "runtimes", "--json"]))
         selected = next((item for item in runtimes["runtimes"] if item["identifier"] == args.runtime), None)
-        if not selected or not selected.get("isAvailable") or not selected["version"].startswith("17."):
-            raise ValueError("The required iOS 17 runtime is unavailable")
+        if not selected or not selected.get("isAvailable") or selected.get("platform", "iOS") != "iOS":
+            raise ValueError(f"The iOS runtime {args.runtime} is unavailable")
         report["selected_runtime"] = selected
         run("devices-before", ["xcrun", "simctl", "list", "devices", "--json"])
         device = run("create", ["xcrun", "simctl", "create", "StateMachine-Smoke", args.device_type, args.runtime])
@@ -194,7 +199,7 @@ def main():
         result = json.loads(result_path.read_text())
         (evidence / "runtime-result.json").write_text(json.dumps(result, indent=2) + "\n")
         report["runtime_result"] = result
-        validate_result(result, args.expect)
+        validate_result(result, args.expect, ".".join(selected["version"].split(".")[:2]))
         if any(not Path(path).is_file() or digest(Path(path)) != value
                for path, value in report["input_sha256"].items()):
             raise ValueError("A build input changed during the runtime check")

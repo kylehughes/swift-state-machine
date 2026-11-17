@@ -49,18 +49,120 @@ def generate_source(phases, edges, name):
     return "\n".join(lines)
 
 
+def generate_sparse_source(phases, edges, name):
+    """Create edges that each use their own input case, so most (input, phase) pairs have no edge."""
+    lines = [
+        "import StateMachine",
+        "import StateMachineSchema",
+        "",
+        "@StateMachine(mode: .shared)",
+        f"nonisolated enum {name}: Sendable {{",
+    ]
+    for phase in range(phases):
+        lines.append(f"    struct Phase{phase}: Sendable {{ let value: Int }}")
+    for phase in range(phases):
+        lines.append(f"    {'@Initial ' if phase == 0 else ''}case phase{phase}(Phase{phase})")
+    lines.append("    enum Input: Sendable {")
+    for edge in range(edges):
+        lines.append(f"        case event{edge}")
+    lines.append("    }")
+    for edge in range(edges):
+        source = edge % phases
+        destination = (source + 1) % phases
+        lines.extend([
+            f"    @Transition(on: Input.event{edge})",
+            f"    fileprivate static func step{edge}(_ source: Phase{source}) -> Phase{destination} {{",
+            f"        Phase{destination}(value: source.value + 1)",
+            "    }",
+        ])
+    lines.extend(["}", ""])
+    return "\n".join(lines)
+
+
+def generate_operation_source(phases, operations, span, name):
+    """Create a ring on one input plus operations, each active in `span` consecutive phases."""
+    stride = max(1, phases // operations)
+    lines = [
+        "import StateMachine",
+        "import StateMachineSchema",
+        "",
+        "@StateMachine(mode: .shared)",
+        f"nonisolated enum {name}: Sendable {{",
+        "    enum Problem: Error, Sendable { case failed }",
+        f"    enum Scope {{ case {', '.join(f'work{op}' for op in range(operations))} }}",
+    ]
+    for phase in range(phases):
+        lines.append(f"    struct Phase{phase}: Sendable {{ let value: Int }}")
+    for phase in range(phases):
+        lines.append(f"    {'@Initial ' if phase == 0 else ''}case phase{phase}(Phase{phase})")
+    lines.append("    enum Input: Sendable {")
+    lines.append("        case next, start")
+    lines.append("    }")
+    for op in range(operations):
+        active = [(op * stride + offset) % phases for offset in range(span)]
+        lines.extend([
+            f"    @Operation(scope: Scope.work{op}, activeIn: [{', '.join(f'Phase{p}.self' for p in active)}], admission: .latest)",
+            f"    enum Op{op} {{",
+            "        typealias Input = Int",
+            "        typealias Output = Int",
+            f"        typealias Failure = {'Problem' if op % 2 == 0 else 'Never'}",
+            "    }",
+        ])
+    for phase in range(phases):
+        lines.extend([
+            "    @Transition(on: Input.next)",
+            f"    fileprivate static func next{phase}(_ source: Phase{phase}) -> Phase{(phase + 1) % phases} {{",
+            f"        Phase{(phase + 1) % phases}(value: source.value + 1)",
+            "    }",
+        ])
+    for op in range(operations):
+        first = (op * stride) % phases
+        lines.extend([
+            f"    @Transition(on: Input.start, starts: [Op{op}.self])",
+            f"    fileprivate static func start{op}(_ source: Phase{first}) -> Change<Phase{first}, Effect.Start{op}> {{",
+            f"        Change(source, effects: [.op{op}(source.value)])",
+            "    }",
+        ])
+        for offset in range(span):
+            phase = (op * stride + offset) % phases
+            lines.extend([
+                f"    @Transition(onSuccess: Op{op}.self)",
+                f"    fileprivate static func done{op}in{phase}(_ source: Phase{phase}, _ output: Op{op}.Output) -> Phase{phase} {{",
+                "        source",
+                "    }",
+            ])
+            if op % 2 == 0:
+                lines.extend([
+                    f"    @Transition(onFailure: Op{op}.self)",
+                    f"    fileprivate static func fail{op}in{phase}(_ source: Phase{phase}, _ reason: Op{op}.Failure) -> Phase{phase} {{",
+                    "        source",
+                    "    }",
+                ])
+    lines.extend(["}", ""])
+    return "\n".join(lines)
+
+
 def captured(command):
     return subprocess.check_output(command, cwd=ROOT, text=True, timeout=120).strip()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phases", type=int, default=128)
-    parser.add_argument("--edges", type=int, default=512)
+    parser.add_argument("--phases", type=int, help="Phase count (default: the variant's, else 128)")
+    parser.add_argument("--edges", type=int, help="Edge count (default: the variant's, else 512)")
+    parser.add_argument("--variant", choices=("dense", "sparse-input", "operation-heavy"), default="dense",
+                        help="dense is the default graph; the others use the shapes in graphs.json under variants")
+    parser.add_argument("--operations", type=int, help="Override the operation count of the operation-heavy variant")
+    parser.add_argument("--keep-expansions", action="store_true", help="Also retain the compiler's macro expansion text")
     parser.add_argument("--output", type=Path, help="Fresh evidence directory outside the package")
     parser.add_argument("--build-root", type=Path, help="Existing native SwiftPM binary directory containing Modules and StateMachineMacros-tool")
     parser.add_argument("--configuration", choices=("debug", "release"), default="debug")
     args = parser.parse_args()
+    shape = json.loads(INPUTS.read_text()).get("variants", {}).get(args.variant, {})
+    if args.phases is None:
+        args.phases = shape.get("phases", 128)
+    if args.edges is None:
+        args.edges = shape.get("edges", 512)
     if args.phases < 1 or args.edges < 0:
         parser.error("--phases must be positive and --edges must be nonnegative")
     output = args.output.resolve() if args.output else Path(tempfile.mkdtemp(prefix="atomic-macro-stress-"))
@@ -83,7 +185,18 @@ def main():
     sdk = captured(["xcrun", "--sdk", "macosx", "--show-sdk-path"])
     version = subprocess.check_output([swiftc, "--version"], cwd=ROOT, text=True, stderr=subprocess.STDOUT, timeout=120).strip()
     source = output / "MacroStressGraph.swift"
-    source.write_text(generate_source(args.phases, args.edges, inputs["schema"]))
+    graph_inputs, graph_operations = (args.edges if args.variant == "sparse-input" else (args.edges + args.phases - 1) // args.phases), 0
+    if args.variant == "sparse-input":
+        source.write_text(generate_sparse_source(args.phases, args.edges, inputs["schema"]))
+    elif args.variant == "operation-heavy":
+        shape = inputs["variants"]["operation-heavy"]
+        operations = args.operations if args.operations is not None else shape["operations"]
+        span = shape["operationSpan"]
+        graph_inputs, graph_operations = 2, operations
+        args.edges = args.phases + operations + operations * span + (operations + 1) // 2 * span
+        source.write_text(generate_operation_source(args.phases, operations, shape["operationSpan"], inputs["schema"]))
+    else:
+        source.write_text(generate_source(args.phases, args.edges, inputs["schema"]))
     object_file = output / "MacroStressGraph.o"
     command = [
         swiftc, "-swift-version", "6", "-strict-concurrency=complete", "-warnings-as-errors",
@@ -92,6 +205,8 @@ def main():
         "-I", str(modules), "-load-plugin-executable", f"{plugin}#StateMachineMacros",
         "-module-name", "MacroStressClient", "-c", str(source), "-o", str(object_file),
     ]
+    if args.keep_expansions:
+        command += ["-Xfrontend", "-dump-macro-expansions"]
     resources = output / "resources.log"
     measured_command = ["/usr/bin/time", "-l", "-o", str(resources), *command]
     (output / "command.json").write_text(json.dumps(measured_command, indent=2) + "\n")
@@ -111,7 +226,10 @@ def main():
     status = "timeout" if timed_out else "pass" if exit_code == 0 and object_file.exists() else "fail"
     results = {
         "status": status,
+        "variant": args.variant,
         "phases": args.phases,
+        "inputs": graph_inputs,
+        "operations": graph_operations,
         "edges": args.edges,
         "configuration": args.configuration,
         "duration_seconds": duration,

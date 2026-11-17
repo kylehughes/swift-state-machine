@@ -1,13 +1,36 @@
 {
-  "schema": "MacroStressGraph",
-  "mode": "shared",
-  "initialPhase": 0,
-  "edgeSource": "edgeIndex % phases",
-  "edgeDestination": "(edgeSource + 1) % phases",
-  "inputGroup": "edgeIndex // phases",
-  "graphs": [
-    {"phases": 2, "edges": 1},
-    {"phases": 32, "edges": 128},
-    {"phases": 128, "edges": 512}
-  ]
+    "schema": "MacroStressGraph",
+    "mode": "shared",
+    "initialPhase": 0,
+    "edgeSource": "edgeIndex % phases",
+    "edgeDestination": "(edgeSource + 1) % phases",
+    "inputGroup": "edgeIndex // phases",
+    "graphs": [
+        {
+            "phases": 2,
+            "edges": 1
+        },
+        {
+            "phases": 32,
+            "edges": 128
+        },
+        {
+            "phases": 128,
+            "edges": 512
+        }
+    ],
+    "variants": {
+        "sparse-input": {
+            "phases": 128,
+            "edges": 512,
+            "inputs": 512,
+            "note": "every edge has its own input, so almost every input and phase pair has no edge"
+        },
+        "operation-heavy": {
+            "phases": 128,
+            "operations": 32,
+            "operationSpan": 8,
+            "note": "next ring edges, one start edge per operation, success edges per active phase, failure edges for even operations"
+        }
+    }
 }

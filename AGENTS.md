@@ -56,6 +56,8 @@ python3 Scripts/check-tests.py --macro-implementation
 python3 Scripts/check-compiler-fixtures.py
 python3 Scripts/check-macro-expansions.py --output /tmp/state-machine-expansions
 python3 Scripts/check-macro-fixtures.py --output /tmp/state-machine-graph
+python3 Scripts/check-macro-fixtures.py --variant sparse-input --output /tmp/state-machine-graph-sparse
+python3 Scripts/check-macro-fixtures.py --variant operation-heavy --output /tmp/state-machine-graph-operations
 xcrun swift-format lint --strict --recursive Sources Tests Package.swift
 ```
 
@@ -86,8 +88,11 @@ separate from instrumented builds and concurrent compilation.
 
 For platform or distribution changes, run `Scripts/check-platforms.py` and its
 `--interfaces` and `--device` modes. Build evidence does not establish execution
-on an OS version. `Scripts/check-ios.py` runs a public-import app on its own iOS
-17 Simulator; its expected check list must match every reported app check.
+on an OS version. `Scripts/check-ios.py` runs a public-import app on its own
+Simulator, iOS 17.5 by default; `--runtime` and `--device-type` select another
+installed runtime, and the app must report that runtime's version. Its expected
+check list must match every reported app check. Execution on the iOS 16 floor
+is unestablished until a run on an iOS 16 runtime is retained.
 For documentation changes, use `python3 Scripts/docs.py --output PATH` with a
 fresh output path and check the generated navigation and links.
 
