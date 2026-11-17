@@ -323,23 +323,41 @@ observation and closes its work authority. The
 [UI guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineui/presentingstate)
 shows a SwiftUI screen and explains the separate lifetime of a running driver.
 
-To show a shared or actor owner on `MainActor`, create a `SnapshotPresentation`
-from its current snapshot and observe the sequence:
+To show a shared or actor owner on `MainActor`, create an
+`ObservableSnapshotPresentation` from its current snapshot, as in
+`ObservableSnapshotPresentation(machine.snapshot())`, and follow the owner's
+sequence from the view's task:
 
 ```swift
 @MainActor
-func present(_ machine: GeneratedProfile.Shared) throws -> SnapshotPresentation<GeneratedProfile.Snapshot> {
-    let presentation = SnapshotPresentation(machine.snapshot())
-    presentation.observe(try machine.snapshots())
-    return presentation
+struct ProfileName: View {
+    let machine: GeneratedProfile.Shared
+    let profile: ObservableSnapshotPresentation<GeneratedProfile.Snapshot>
+
+    var body: some View {
+        Group {
+            if case .loaded(let loaded) = profile.snapshot {
+                Text(loaded.value.profile.name)
+            } else {
+                ProgressView()
+            }
+        }
+        .task {
+            guard let snapshots = try? machine.snapshots() else { return }
+            await profile.follow(snapshots)
+        }
+    }
 }
 ```
 
-The presentation applies each snapshot on `MainActor`, sets `isObserving` to
-`false` when the sequence ends, and publishes through `$snapshot`.
-`stopObserving()` ends the observation. `MainActorSnapshotIngress` is the
-lower-level piece for owners that deliver `Sendable` snapshots through a
-callback.
+`follow(_:)` applies each snapshot on `MainActor` and returns when the sequence
+ends or the task is cancelled, so the observation lasts exactly as long as the
+view is on screen. `observe(_:)` starts the same observation in a task the
+presentation owns, until `stopObserving()`. `isObserving` becomes `false` when
+the sequence ends. `SnapshotPresentation` is the `ObservableObject` counterpart
+for the iOS 16 and macOS 13 baseline, with the same members and `$snapshot` as
+its publisher. `MainActorSnapshotIngress` is the lower-level piece for owners
+that deliver `Sendable` snapshots through a callback.
 
 ### Observe from UIKit
 

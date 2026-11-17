@@ -17,7 +17,9 @@ observation and closing work authority are separate operations.
 
 ``SnapshotPresentation`` presents shared and actor owners, and any other owner
 that does not conform to `MainActorStateMachineHost`. It observes the owner's
-snapshot sequence and applies each snapshot on `MainActor`. Use
+snapshot sequence and applies each snapshot on `MainActor`.
+``ObservableSnapshotPresentation`` offers the same members as an `@Observable`
+class. Use
 ``MainActorSnapshotIngress`` as the lower-level bridge when `Sendable` snapshots
 arrive from a host outside `MainActor` through a callback. It retains only the
 newest pending snapshot and schedules one responsible delivery task per active
@@ -35,6 +37,7 @@ coalescing bridge.
 ### Present any snapshot or sequence
 
 - ``SnapshotPresentation``
+- ``ObservableSnapshotPresentation``
 
 ### Receive background snapshots
 

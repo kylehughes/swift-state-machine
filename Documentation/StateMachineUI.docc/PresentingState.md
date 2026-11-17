@@ -2,10 +2,11 @@
 
 Keep one complete snapshot observable and give its owner an explicit lifetime.
 
-``StateMachinePresentation`` wraps a generated `MainActorHost`. It is an
-`ObservableObject`, so it works at the iOS 16 baseline. Pass the host to its
-initializer, read ``StateMachinePresentation/snapshot`` from a view, and call
-``StateMachinePresentation/send(_:)`` from actions:
+``ObservableStateMachinePresentation`` wraps a generated `MainActorHost` as an
+`@Observable` model. It requires iOS 17, macOS 14, tvOS 17, watchOS 10, or
+visionOS 1. Pass the host to its initializer, read
+``ObservableStateMachinePresentation/snapshot`` from a view, and call
+``ObservableStateMachinePresentation/send(_:)`` from actions:
 
 ```swift
 import StateMachine
@@ -14,7 +15,7 @@ import StateMachineUI
 import SwiftUI
 
 @MainActor
-func makePresentation() throws -> StateMachinePresentation<GeneratedProfile.MainActorHost> {
+func makePresentation() throws -> ObservableStateMachinePresentation<GeneratedProfile.MainActorHost> {
     let user = try UserID("taylor")
     let host = GeneratedProfile.MainActorHost(
         .init(userID: user),
@@ -25,12 +26,12 @@ func makePresentation() throws -> StateMachinePresentation<GeneratedProfile.Main
             audit: { _ in .failure(.unavailable) }
         )
     )
-    return try StateMachinePresentation(host)
+    return try ObservableStateMachinePresentation(host)
 }
 
 @MainActor
 struct ProfileScreen: View {
-    @ObservedObject var presentation: StateMachinePresentation<GeneratedProfile.MainActorHost>
+    let presentation: ObservableStateMachinePresentation<GeneratedProfile.MainActorHost>
     let request: ProfileRequest
     @State private var inputFailure: String?
 
@@ -41,12 +42,17 @@ struct ProfileScreen: View {
                 Button("Load profile") { send(.load(request)) }
             case .loading:
                 ProgressView("Loading profile")
-                Button("Cancel") { send(.cancel) }
+                Button("Cancel", role: .cancel) { send(.cancel) }
             case .loaded(let loaded):
                 Text(loaded.value.profile.name)
             case .failed(let failed):
-                Text("Request failed: \(failed.value.failure.rawValue)")
-                Button("Retry") { send(.retry) }
+                ContentUnavailableView {
+                    Label("Profile Unavailable", systemImage: "person.slash")
+                } description: {
+                    Text(failed.value.failure.rawValue)
+                } actions: {
+                    Button("Retry") { send(.retry) }
+                }
             }
             if let inputFailure { Text(inputFailure) }
         }
@@ -65,17 +71,17 @@ struct ProfileScreen: View {
 ```
 
 Creating the presentation starts no request. Keep it for the screen's lifetime,
-for example in a `@StateObject` or in the object that owns the feature, and
+for example in `@State` or in the model that owns the feature, and
 create a new one when returning after `close()`. This example ends that
 lifetime in `onDisappear`; an application that keeps work alive across
 navigation should put ownership in the longer-lived feature instead.
 
-``ObservableStateMachinePresentation`` is the `@Observable` counterpart for apps
-that target iOS 17, macOS 14, or later. It has the same initializer and members,
-and a view reads its `snapshot` without `@ObservedObject`.
+``StateMachinePresentation`` is the `ObservableObject` counterpart for the
+iOS 16 and macOS 13 baseline. It has the same initializer and members, and a
+view holds it with `@StateObject` or `@ObservedObject`.
 
-The `ProfileEditor` example in `StateMachineExamples` wraps this pattern in a
-screen-scoped object with named actions such as `load()`, `retry()`, and
+The `ProfileEditor` example in `StateMachineExamples` wraps a
+``StateMachinePresentation`` in a screen-scoped object with named actions such as `load()`, `retry()`, and
 `cancel()`.
 
 ## Accept input and publish without suspension
@@ -117,10 +123,12 @@ synchronous.
 
 ## Drive a UIKit view
 
-A view controller can iterate the host's snapshot sequence in a task. Creating the sequence throws
-`SubscriptionFailure` when subscriber capacity is exhausted; iterating never
-throws. A task created in a `@MainActor` method runs on the main actor, and
-cancelling it ends the sequence and removes the registration:
+A view controller can iterate the host's snapshot sequence in a task. Creating
+the sequence throws `SubscriptionFailure` when subscriber capacity is
+exhausted; iterating never throws. A task created in a `@MainActor` method runs
+on the main actor, and cancelling it ends the sequence and removes the
+registration. `UIContentUnavailableConfiguration` requires iOS 17, tvOS 17,
+Mac Catalyst 17, or visionOS 1:
 
 ```swift
 import StateMachine
@@ -132,8 +140,6 @@ final class ProfileViewController: UIViewController {
     private let host: GeneratedProfile.MainActorHost
     private var observation: Task<Void, Never>?
     private let nameLabel = UILabel()
-    private let spinner = UIActivityIndicatorView(style: .medium)
-    private let retryButton = UIButton(type: .system)
 
     init(host: GeneratedProfile.MainActorHost) {
         self.host = host
@@ -142,15 +148,16 @@ final class ProfileViewController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        observation?.cancel()
         observation = Task {
             do {
                 for await snapshot in try self.host.snapshots() {
                     self.render(snapshot)
                 }
             } catch {
-                self.showUnavailable()
+                self.showUnavailable(retry: nil)
             }
         }
     }
@@ -165,26 +172,30 @@ final class ProfileViewController: UIViewController {
         switch snapshot {
         case .idle:
             nameLabel.text = nil
-            spinner.stopAnimating()
-            retryButton.isHidden = true
+            contentUnavailableConfiguration = nil
         case .loading:
-            spinner.startAnimating()
-            retryButton.isHidden = true
+            nameLabel.text = nil
+            contentUnavailableConfiguration = UIContentUnavailableConfiguration.loading()
         case .loaded(let loaded):
             nameLabel.text = loaded.value.profile.name
-            spinner.stopAnimating()
-            retryButton.isHidden = true
+            contentUnavailableConfiguration = nil
         case .failed:
-            nameLabel.text = nil
-            spinner.stopAnimating()
-            retryButton.isHidden = false
+            let retry = UIAction(title: "Retry") { [weak self] _ in
+                _ = try? self?.host.send(.retry)
+            }
+            showUnavailable(retry: retry)
         }
     }
 
-    private func showUnavailable() {
+    private func showUnavailable(retry: UIAction?) {
         nameLabel.text = nil
-        spinner.stopAnimating()
-        retryButton.isHidden = true
+        var unavailable = UIContentUnavailableConfiguration.empty()
+        unavailable.text = "Profile Unavailable"
+        if let retry {
+            unavailable.button = .plain()
+            unavailable.buttonProperties.primaryAction = retry
+        }
+        contentUnavailableConfiguration = unavailable
     }
 }
 ```
@@ -228,7 +239,8 @@ Retain the returned `AnyCancellable` for as long as the view observes.
 
 ## Present an owner without a hosting protocol
 
-``SnapshotPresentation`` publishes snapshots of any type. For a generated
+``ObservableSnapshotPresentation`` and its `ObservableObject` counterpart
+``SnapshotPresentation`` present snapshots of any type. For a generated
 snapshot, create it from the owner's current snapshot. For another type, also
 pass a closure that reads a snapshot's revision. Register an owner's
 subscription with `observe(_:)`, or apply snapshots
@@ -239,16 +251,45 @@ removes only the registration.
 
 ## Bridge a shared or actor host
 
-A `Shared` or `ActorHost` owner is not confined to `MainActor`. Create a
-``SnapshotPresentation`` from its current snapshot and observe its snapshot
-sequence. The presentation applies each snapshot on `MainActor` through the
-revision check:
+A `Shared` or `ActorHost` owner is not confined to `MainActor`. Create an
+``ObservableSnapshotPresentation`` from its current snapshot, as in
+`ObservableSnapshotPresentation(machine.snapshot())`, and follow the owner's
+snapshot sequence from the view's task. The presentation applies each snapshot
+on `MainActor` through the revision check:
 
 ```swift
 import StateMachine
 import StateMachineExamples
 import StateMachineUI
+import SwiftUI
 
+@MainActor
+struct ProfileName: View {
+    let machine: GeneratedProfile.Shared
+    let profile: ObservableSnapshotPresentation<GeneratedProfile.Snapshot>
+
+    var body: some View {
+        Group {
+            if case .loaded(let loaded) = profile.snapshot {
+                Text(loaded.value.profile.name)
+            } else {
+                ProgressView()
+            }
+        }
+        .task {
+            guard let snapshots = try? machine.snapshots() else { return }
+            await profile.follow(snapshots)
+        }
+    }
+}
+```
+
+``ObservableSnapshotPresentation/follow(_:)`` returns when the sequence ends or
+the task is cancelled, so the observation lasts as long as the view is on
+screen. ``SnapshotPresentation`` has the same members at the iOS 16 baseline,
+and `observe(_:)` starts the observation in a task the presentation owns:
+
+```swift
 @MainActor
 func present(
     _ shared: GeneratedProfile.Shared
