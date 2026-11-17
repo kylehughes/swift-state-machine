@@ -352,6 +352,34 @@ private func collect<Source: AsyncSequence & Sendable>(
         await owner.shutdown()
     }
 
+    // A job queued on the main actor runs only when the test leaves it. Taking an element that is
+    // already buffered therefore finishes first unless `next()` hops off the caller's actor.
+    @Test func takingABufferedElementStaysOnTheCallersActor() async throws {
+        let owner = try makeMainHost()
+        var iterator = try owner.sendableSnapshots().makeAsyncIterator()
+        let interleaved = Box(0)
+        let queued = Task { @MainActor in interleaved.value += 1 }
+        #expect(await iterator.next()?.revision == 0)
+        #expect(interleaved.value == 0)
+        await queued.value
+        #expect(interleaved.value == 1)
+        await owner.shutdown()
+    }
+
+    // `prefix` forwards the caller's isolation to the base iterator.
+    @available(iOS 18, macOS 15, tvOS 18, watchOS 11, visionOS 2, *)
+    @Test func anOperatorThatForwardsIsolationStaysOnTheCallersActor() async throws {
+        let owner = try makeMainHost()
+        var iterator = try owner.sendableSnapshots().prefix(1).makeAsyncIterator()
+        let interleaved = Box(0)
+        let queued = Task { @MainActor in interleaved.value += 1 }
+        #expect(await iterator.next(isolation: MainActor.shared)?.revision == 0)
+        #expect(interleaved.value == 0)
+        await queued.value
+        #expect(interleaved.value == 1)
+        await owner.shutdown()
+    }
+
     @Test func feedsAGenericAsyncSequenceConsumer() async throws {
         let owner = try makeMainHost()
         let closed = owner.close()
