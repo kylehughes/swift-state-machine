@@ -81,6 +81,105 @@ import os
         await model.host.shutdown()
         #expect(model.host.isQuiescent)
     }
+
+    @Test func commitAdmitsATypedEdgeInTheSameTurnAndRejectsAStaleObservation() async throws {
+        let user = try UserID("kyle")
+        let presentation = try StateMachinePresentation(host(user))
+        guard case .idle(let idle) = presentation.snapshot else { throw Failure.unexpected }
+        let request = try ProfileRequest(userID: user)
+        guard case .committed(let receipt) = presentation.commit(try idle.begin(request)) else {
+            throw Failure.unexpected
+        }
+        #expect(presentation.snapshot.revision == receipt.revision)
+        guard case .loading = presentation.snapshot else { throw Failure.unexpected }
+        // The edge still exists on the old observation, but that observation is no longer current.
+        guard case .rejected(.conflict, let current) = presentation.commit(try idle.begin(request)) else {
+            throw Failure.unexpected
+        }
+        #expect(current.revision == receipt.revision)
+        #expect(presentation.snapshot.revision == receipt.revision)
+        if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            let model = try ObservableStateMachinePresentation(presentation.host)
+            guard case .loading(let loading) = model.snapshot, case .committed = model.commit(try loading.cancel())
+            else { throw Failure.unexpected }
+            guard case .idle = model.snapshot else { throw Failure.unexpected }
+        }
+        presentation.close()
+        await presentation.host.shutdown()
+    }
+
+    @Test func aRegistrationTokenRunsItsActionOnceAcrossCancelAndRelease() async throws {
+        var count = 0
+        var cancelled: RuntimeMainActorSubscription? = RuntimeMainActorSubscription(onCancel: { count += 1 })
+        cancelled?.cancel()
+        cancelled?.cancel()
+        cancelled = nil
+        var released: RuntimeMainActorSubscription? = RuntimeMainActorSubscription(onCancel: { count += 10 })
+        #expect(released != nil)
+        released = nil
+        // Main-actor jobs run in order, so both releases' actions, if any, ran before this one.
+        await Task { @MainActor in }.value
+        #expect(count == 11)
+    }
+
+    @Test func snapshotsDescribeTheirPhaseAndRevisionWithoutThePayload() async throws {
+        let owner = host(try UserID("kyle"))
+        #expect("\(owner.snapshot())" == "idle, revision 0")
+        guard case .idle(let idle) = owner.snapshot() else { throw Failure.unexpected }
+        #expect(idle.description == "Idle, revision 0")
+        let closed = owner.close()
+        #expect(closed.description == "idle, revision 1, closed")
+        await owner.shutdown()
+    }
+
+    @Test func presentingAClosedOwnerIsNotObserving() async throws {
+        let owner = host(try UserID("kyle"))
+        let closed = owner.close()
+        let presentation = try StateMachinePresentation(owner)
+        #expect(!presentation.isObserving)
+        #expect(presentation.snapshot.isClosed && presentation.snapshot.revision == closed.revision)
+        if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            let model = try ObservableStateMachinePresentation(owner)
+            #expect(!model.isObserving)
+            #expect(model.snapshot.isClosed)
+        }
+        await owner.shutdown()
+    }
+
+    @Test func aSinkThatClosesDuringPublicationLeavesTheTerminalSnapshotVisible() async throws {
+        let user = try UserID("kyle")
+        let presentation = try StateMachinePresentation(host(user))
+        var published: [UInt64] = []
+        // `@Published` emits from `willSet`, so this closes while revision 1 is still being assigned.
+        let closing = presentation.$snapshot.dropFirst()
+            .sink {
+                published.append($0.revision)
+                if $0.revision == 1 { presentation.close() }
+            }
+        try presentation.send(.load(ProfileRequest(userID: user)))
+        #expect(presentation.snapshot.isClosed)
+        #expect(presentation.snapshot.revision == presentation.host.snapshot().revision)
+        #expect(published == [1, 2])
+        closing.cancel()
+        await presentation.host.shutdown()
+    }
+
+    @Test func aSinkThatAppliesANewerSnapshotDuringPublicationKeepsTheNewerOne() async throws {
+        let user = try UserID("kyle")
+        let owner = host(user)
+        let presentation = SnapshotPresentation(owner.snapshot())
+        let first = try owner.send(.load(ProfileRequest(userID: user)))
+        let second = owner.close()
+        let nested = presentation.$snapshot.dropFirst()
+            .sink {
+                if $0.revision == first.revision { presentation.apply(second.snapshot) }
+            }
+        #expect(presentation.apply(first.snapshot))
+        #expect(presentation.snapshot.isClosed && presentation.snapshot.revision == second.revision)
+        #expect(!presentation.apply(first.snapshot))
+        nested.cancel()
+        await owner.shutdown()
+    }
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct SequencePresentationTests {

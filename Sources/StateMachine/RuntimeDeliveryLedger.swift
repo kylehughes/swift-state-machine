@@ -120,10 +120,19 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
         entries.removeAll { !engine.isActive($0.ticket) }
     }
     /// Claims one pending envelope and captures a fresh root before domain evaluation.
-    public mutating func claim(_ id: RuntimePendingID, in engine: inout Engine) -> ClaimResult {
+    ///
+    /// A `scheduledRetry` claim belongs to a queued scheduler turn. It is granted only while the
+    /// envelope is still `retryScheduled`: an attempt that finished after the turn was queued made
+    /// a newer decision, and the queued turn reports `notPending` instead of overriding it.
+    public mutating func claim(
+        _ id: RuntimePendingID,
+        in engine: inout Engine,
+        scheduledRetry: Bool = false
+    ) -> ClaimResult {
         prune(in: engine)
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return .notPending }
         guard entries[index].claim == nil else { return .inProgress }
+        if scheduledRetry, entries[index].status != .retryScheduled { return .notPending }
         guard let claim = engine.claimDelivery(for: entries[index].ticket) else { return .notPending }
         entries[index].claim = claim
         entries[index].candidate = nil
@@ -207,6 +216,15 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
             results.append(admit(candidate, index: index, in: &engine))
         }
         return results
+    }
+    /// Admission-only retry of one retained candidate; no router or reducer is evaluated here.
+    ///
+    /// Reports the current status when the entry holds no prepared candidate.
+    public mutating func retryAdmission(_ id: RuntimePendingID, in engine: inout Engine) -> Finish {
+        prune(in: engine)
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return .notPending }
+        guard let candidate = entries[index].candidate else { return .pending(id, entries[index].status) }
+        return admit(candidate, index: index, in: &engine)
     }
     /// Explicit authority-only discard observes normal revision and queue checks.
     public mutating func discard(_ id: RuntimePendingID, in engine: inout Engine) -> Engine.Admission? {

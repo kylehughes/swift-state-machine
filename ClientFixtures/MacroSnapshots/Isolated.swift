@@ -17,6 +17,10 @@ nonisolated enum Note {
         typealias Output = Box
         typealias Failure = Never
     }
+    @Restoration
+    fileprivate static func restore(_ saved: Box) -> Restoration {
+        .draft(Draft(box: saved))
+    }
     @Transition(on: Input.save, starts: [Save.self])
     fileprivate static func save(_ source: Draft) -> Change<Saving, Effect.Save> {
         Change(Saving(box: source.box), effects: [.save(source.box)])

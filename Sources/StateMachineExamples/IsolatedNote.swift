@@ -197,9 +197,7 @@ nonisolated public enum IsolatedNote {
         }
         /// Transfers whole batches; the caller releases mutable access before executing their work.
         public mutating func drainCommands(limit: Int) -> [CommandBatch] {
-            let batches = engine.drain(limit: limit).map { project($0) }
-            _ = ledger.retryCapacity(in: &engine)
-            return batches
+            engine.drain(limit: limit).map { project($0) }
         }
         /// Retains the first terminal result and attempts its synchronous admission.
         public mutating func deliver(_ completion: Completion) -> DeliveryResult {
@@ -222,6 +220,10 @@ nonisolated public enum IsolatedNote {
                 return project(ledger.finish(attempt, preparation: preparation, in: &engine))
             }
         }
+        /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
+        public mutating func retryAdmission(id: RuntimePendingID) -> DeliveryResult {
+            project(ledger.retryAdmission(id, in: &engine))
+        }
         /// Historical first-outcome diagnostics.
         public borrowing func pendingCompletions() -> [Ledger.Pending] { ledger.pending }
         /// Settles retained delivery through an authority-only admission.
@@ -237,9 +239,7 @@ nonisolated public enum IsolatedNote {
             _ handle: ExecutionHandle,
             disposition: ExecutionDisposition
         ) -> AcknowledgmentResult {
-            let result = engine.acknowledge(handle.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
-            _ = ledger.retryCapacity(in: &engine)
-            return result
+            engine.acknowledge(handle.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
         }
         /// Closes authority while keeping historical model data readable.
         public mutating func close() -> Receipt {

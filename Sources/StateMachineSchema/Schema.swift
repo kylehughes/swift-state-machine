@@ -26,7 +26,8 @@ nonisolated public enum StateMachineAdmission: Sendable {
 /// `Input.load`, `Scope.load`, `Loading.self`.
 ///
 /// The expansion generates `Effect`, with one case per `@Operation` namespace, the owners the
-/// mode permits, and the typed work and completion values for each operation.
+/// mode permits, and the typed work and completion values for each operation. The `.shared` and
+/// `.isolated` modes also generate `Restoration`, the phases a `@Restoration` function may restore.
 ///
 /// Schema, case, operation and edge names use unescaped Swift identifiers.
 /// Generated facade names and required support-type spellings are reserved in the schema.
@@ -39,6 +40,17 @@ public macro StateMachine(mode: StateMachineMode) =
 /// Apply it to exactly one single-phase `case` declaration directly inside the schema.
 @attached(peer)
 public macro Initial() = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
+
+/// Marks the function that validates saved data into a phase in which fresh authority is restored.
+///
+/// Apply it to at most one static function directly inside a `.shared` or `.isolated` schema. The
+/// function takes the saved data as its one parameter and returns the generated `Restoration`, which
+/// has one case per phase in which no operation is active, so saved data can never resume work. It
+/// may use typed throws to reject the data. Each generated owner except `Owned` then gains an
+/// initializer labeled `restoring:` that calls it and creates fresh authority at revision zero in
+/// the returned phase.
+@attached(peer)
+public macro Restoration() = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
 /// Describes one synchronous authored transition taken when an input arrives.
 ///

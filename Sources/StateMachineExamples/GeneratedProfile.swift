@@ -54,6 +54,32 @@ nonisolated public enum GeneratedProfile: Sendable {
     }
     /// Typed request validation.
     public enum LoadRejection: Error { case wrongUser }
+    /// Saved profile data, without provenance or operation authority.
+    public enum Archive: Sendable {
+        /// A user whose profile was not loaded.
+        case idle(UserID)
+        /// A request that was in flight when the data was saved.
+        case loading(ProfileRequest)
+        /// A loaded profile.
+        case loaded(Profile)
+        /// A request and the reason it failed.
+        case failed(ProfileRequest, ProfileFailure)
+    }
+    /// Why saved data cannot be restored.
+    public enum RestoreRejection: Error, Sendable {
+        /// The saved request has no task to resume; restoring cannot fabricate one.
+        case interruptedLoading
+    }
+    /// Validates saved data into a resting phase, rejecting an interrupted load.
+    @Restoration
+    fileprivate static func restore(_ saved: Archive) throws(RestoreRejection) -> Restoration {
+        switch saved {
+        case .idle(let userID): return .idle(Idle(userID: userID))
+        case .loading: throw .interruptedLoading
+        case .loaded(let profile): return .loaded(Loaded(profile: profile))
+        case .failed(let request, let failure): return .failed(Failed(request: request, failure: failure))
+        }
+    }
     /// The profile fetch operation.
     @Operation(scope: Scope.load, requires: [Scope.authentication], activeIn: [Loading.self], admission: .latest)
     public enum Fetch {
@@ -80,7 +106,7 @@ nonisolated public enum GeneratedProfile: Sendable {
         public typealias Failure = ProfileFailure
     }
     /// Starts a fetch only for the initial user.
-    @Transition(on: Input.load, invalidates: [Scope.load], starts: [Fetch.self])
+    @Transition(on: Input.load, starts: [Fetch.self])
     fileprivate static func begin(
         _ source: Idle,
         _ request: ProfileRequest
@@ -88,8 +114,8 @@ nonisolated public enum GeneratedProfile: Sendable {
         guard source.userID == request.userID else { throw .wrongUser }
         return Change(Loading(request: request), effects: [.fetch(request)])
     }
-    /// Cancels the active load epoch.
-    @Transition(on: Input.cancel, invalidates: [Scope.load])
+    /// Cancels the load: leaving `Loading` revokes the work that was active there.
+    @Transition(on: Input.cancel)
     fileprivate static func cancel(_ source: Loading) -> Idle {
         Idle(userID: source.request.userID)
     }
@@ -109,7 +135,7 @@ nonisolated public enum GeneratedProfile: Sendable {
         source
     }
     /// Starts a refresh only for the loaded user.
-    @Transition(on: Input.refresh, invalidates: [Scope.load], starts: [Fetch.self])
+    @Transition(on: Input.refresh, starts: [Fetch.self])
     fileprivate static func refresh(
         _ source: Loaded,
         _ request: ProfileRequest
@@ -118,7 +144,7 @@ nonisolated public enum GeneratedProfile: Sendable {
         return Change(Loading(request: request), effects: [.fetch(request)])
     }
     /// Restarts the retained request.
-    @Transition(on: Input.retry, invalidates: [Scope.load], starts: [Fetch.self])
+    @Transition(on: Input.retry, starts: [Fetch.self])
     fileprivate static func retry(_ source: Failed) -> Change<Loading, Effect.Retry> {
         Change(Loading(request: source.request), effects: [.fetch(source.request)])
     }

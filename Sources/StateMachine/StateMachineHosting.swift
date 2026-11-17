@@ -28,11 +28,17 @@ nonisolated public protocol StateMachineReceipt {
     associatedtype Receipt: StateMachineReceipt where Receipt.Snapshot == Snapshot
     /// Why `send` did not admit an input.
     associatedtype SendRejection: Error
+    /// A sealed proposal produced by an edge method of an observed phase.
+    associatedtype Prepared: ~Copyable
+    /// Whether a proposal was admitted, and the current snapshot when it was not.
+    associatedtype CommitResult
 
     /// Captures a complete historical observation.
     func snapshot() -> Snapshot
     /// Routes, prepares, and admits one input in a single isolated turn.
     @discardableResult func send(_ input: Input) throws(SendRejection) -> Receipt
+    /// Consumes a proposal and admits it only if its observation is still current.
+    func commit(_ prepared: consuming Prepared) -> CommitResult
     /// Subscribes to initial, accepted, and terminal complete snapshots.
     func subscribe(
         _ receive: @escaping @MainActor (Snapshot) -> Void,

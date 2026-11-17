@@ -58,11 +58,11 @@ nonisolated public enum GeneratedNote {
     fileprivate static func edit(_ source: Draft, _ text: String) -> Draft {
         Draft(text: text)
     }
-    @Transition(on: Input.edit, invalidates: [Scope.save])
+    @Transition(on: Input.edit)
     fileprivate static func replace(_ source: Saving, _ text: String) -> Draft {
         Draft(text: text)
     }
-    @Transition(on: Input.cancel, invalidates: [Scope.save])
+    @Transition(on: Input.cancel)
     fileprivate static func cancel(_ source: Saving) -> Draft {
         Draft(text: source.text)
     }

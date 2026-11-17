@@ -16,7 +16,8 @@ struct MetadataMacro: PeerMacro {
     ) throws -> [DeclSyntax] {
         guard let owner = context.lexicalContext.first?.as(EnumDeclSyntax.self),
             owner.attributes.contains(where: {
-                $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "StateMachine"
+                ["StateMachine", "StateMachineSchema.StateMachine"]
+                    .contains($0.as(AttributeSyntax.self)?.attributeName.trimmedDescription)
             })
         else {
             throw MacroFailure("Place @\(node.attributeName.trimmedDescription) directly inside a @StateMachine enum.")

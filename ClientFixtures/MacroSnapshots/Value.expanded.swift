@@ -87,7 +87,7 @@ internal typealias PendingStatus = RuntimePendingStatus
 internal typealias CommitRejection = RuntimeState<Counter, Effect>.Rejection
 
 /// An immutable historical payload with sealed complete-root provenance.
-internal struct Observed<Phase: Sendable>: Sendable {
+internal struct Observed<Phase: Sendable>: Sendable, CustomStringConvertible {
     fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: RuntimeDeliveryClaim?
@@ -98,6 +98,10 @@ internal struct Observed<Phase: Sendable>: Sendable {
     /// The owner-lifetime accepted revision.
     internal var revision: UInt64 {
         record.revision
+    }
+    /// The phase, revision, and closure of this observation, without its payload.
+    internal var description: String {
+        "\(Phase.self), revision \(record.revision)\(record.isClosed ? ", closed" : "")"
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 internal func finish(_ input: Int) throws(PreparationFailure<Never>) -> Prepared where Phase == Idle {
@@ -116,7 +120,7 @@ internal func finish(_ input: Int) throws(PreparationFailure<Never>) -> Prepared
 }
 
 /// A complete historical root observation with sealed provenance.
-internal enum Snapshot: Sendable, StateMachineSnapshot {
+internal enum Snapshot: Sendable, StateMachineSnapshot, CustomStringConvertible {
     case idle(Observed<Idle>)
     case done(Observed<Done>)
     fileprivate var record: _StateMachineEngine.Snapshot {
@@ -138,6 +142,15 @@ internal enum Snapshot: Sendable, StateMachineSnapshot {
     /// Ordinary model data; constructing it confers no installation authority.
     internal var model: Counter {
         record.model
+    }
+    /// The phase, revision, and closure of this observation, without its payload.
+    internal var description: String {
+        switch self {
+        case .idle(let value):
+            return "idle, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        case .done(let value):
+            return "done, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        }
     }
 }
 
@@ -174,7 +187,7 @@ internal enum PreparationResult: ~Copyable, Sendable {
 }
 
 /// A historical receipt for an atomic acceptance.
-internal struct Receipt: Sendable, StateMachineReceipt {
+internal struct Receipt: Sendable, StateMachineReceipt, CustomStringConvertible {
     /// The accepted historical observation.
     internal let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
@@ -183,6 +196,10 @@ internal struct Receipt: Sendable, StateMachineReceipt {
     /// The owner-lifetime accepted revision.
     internal var revision: UInt64 {
         snapshot.revision
+    }
+    /// The accepted phase, revision, and closure, without the payload.
+    internal var description: String {
+        snapshot.description
     }
 }
 
@@ -321,13 +338,19 @@ internal static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparati
                 }
             }
         }
-    case (.finish, .done):
+    default:
         return .rejected(.invalidPhase)
     }
 }
 
 fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
 
+}
+
+/// A phase saved data can restore: one in which no operation is active, so no work resumes.
+internal enum Restoration: Sendable {
+    case idle(Idle)
+    case done(Done)
 }
 
 fileprivate typealias _StateMachineLedger = RuntimeDeliveryLedger<Counter, Effect, Completion, PreparationRejection>
@@ -337,6 +360,17 @@ internal typealias PendingCompletionID = RuntimePendingID
 
 /// Typed historical diagnostics for a retained completion.
 internal typealias PendingCompletion = RuntimeDeliveryLedger<Counter, Effect, Completion, PreparationRejection>.Pending
+
+/// The obligations a managed owner still tracked when its shutdown deadline expired.
+internal typealias ShutdownDiagnostics = RuntimeShutdownDiagnostics
+
+/// Whether shutdown joined every obligation or stopped waiting at its deadline.
+///
+/// A timeout leaves the owner closed and its outstanding work tracked.
+internal enum ShutdownResult: Sendable {
+    case quiescent
+    case timedOut(ShutdownDiagnostics)
+}
 
 /// A closed completion delivery decision.
 internal enum DeliveryResult: Sendable {
@@ -402,17 +436,13 @@ internal struct Local: ~Copyable {
     }
     /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
     internal mutating func drainCommands(limit: Int) -> [CommandBatch] {
-        let batches = engine.drain(limit: limit).map {
+        engine.drain(limit: limit).map {
             _stateMachineBatch($0)
         }
-        _ = ledger.retryCapacity(in: &engine)
-        return batches
     }
     /// Records actual termination independently of cancellation and completion delivery.
     internal mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
-        let result = engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
-        _ = ledger.retryCapacity(in: &engine)
-        switch result {
+        switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
         case .recorded:
             return .recorded
         case .duplicate:
@@ -437,6 +467,12 @@ internal struct Local: ~Copyable {
             let preparation = _stateMachineDeliveryPreparation(attempt)
             return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
         }
+    }
+    /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
+    ///
+    /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
+    internal mutating func retryAdmission(id: PendingCompletionID) -> DeliveryResult {
+        _stateMachineFinish(ledger.retryAdmission(id, in: &engine))
     }
     /// Queries immutable first-outcome records without claiming preparation.
     internal borrowing func pendingCompletions() -> [PendingCompletion] {
@@ -479,7 +515,7 @@ internal struct Local: ~Copyable {
     private typealias Host = RuntimeMainActorHost<Counter, Effect, Completion, PreparationRejection>
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
-    internal init(_ initial: Idle, drivers: MainActorDrivers, configuration: Configuration = .default,
+    internal init(_ initial: Idle, drivers: MainActorDrivers = .init(), configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
         }) {
@@ -577,9 +613,12 @@ internal struct Local: ~Copyable {
     internal func shutdown() async {
         await host.shutdown()
     }
-    /// Closes and waits for settlement through an optional deadline.
-    internal func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
-        await host.shutdownAndWait(deadline: deadline)
+    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
+    internal func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        if await host.shutdownAndWait(deadline: deadline) {
+            return .quiescent
+        }
+        return .timedOut(host.diagnostics())
     }
     /// Actual workers whose joined termination has not yet been processed.
     internal var runningCount: Int {
@@ -627,7 +666,7 @@ internal struct Drivers: Sendable {
 internal final class Shared: Sendable {
     private let host: RuntimeSharedHost<Counter, Effect, Completion, PreparationRejection>
     /// Creates fresh initial authority and retains the driver selection immutably.
-    internal init(_ initial: Idle, drivers: Drivers, configuration: Configuration = .default,
+    internal init(_ initial: Idle, drivers: Drivers = .init(), configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
@@ -710,6 +749,13 @@ internal final class Shared: Sendable {
     internal func shutdown() async {
         await host.shutdown()
     }
+    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked.
+    internal func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        if await host.shutdownAndWait(deadline: deadline) {
+            return .quiescent
+        }
+        return .timedOut(host.diagnostics())
+    }
     /// Whether closure and all managed obligations have settled.
     internal var isQuiescent: Bool {
         host.isQuiescent
@@ -741,7 +787,7 @@ internal final class ActorHost: Sendable {
     private typealias Host = RuntimeActorHost<Counter, Effect, Completion, PreparationRejection>
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
-    internal init(_ initial: Idle, drivers: Drivers, configuration: Configuration = .default,
+    internal init(_ initial: Idle, drivers: Drivers = .init(), configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
@@ -829,9 +875,12 @@ internal final class ActorHost: Sendable {
     internal func shutdown() async {
         await host.shutdown()
     }
-    /// Closes and waits for settlement through an optional deadline.
-    internal func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
-        await host.shutdownAndWait(deadline: deadline)
+    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
+    internal func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        if await host.shutdownAndWait(deadline: deadline) {
+            return .quiescent
+        }
+        return .timedOut(await host.diagnostics())
     }
     /// Actual workers whose joined termination has not yet been processed.
     internal var runningCount: Int {

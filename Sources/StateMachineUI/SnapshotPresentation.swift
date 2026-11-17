@@ -14,6 +14,8 @@ import StateMachine
     @Published public private(set) var isObserving = false
     private let revision: @MainActor (Snapshot) -> UInt64
     private var watermark: UInt64
+    private var publishing = false
+    private var deferred: Snapshot?
     private var subscription: RuntimeMainActorSubscription?
     private var observation: Task<Void, Never>?
 
@@ -29,8 +31,23 @@ import StateMachine
         let nextRevision = revision(next)
         guard nextRevision > watermark else { return false }
         watermark = nextRevision
-        snapshot = next
+        publish(next)
         return true
+    }
+    // Assigns in arrival order. An observer that applies a newer snapshot while one is being
+    // assigned defers it, so the outer assignment cannot overwrite the newer value.
+    private func publish(_ next: Snapshot) {
+        guard !publishing else {
+            deferred = next
+            return
+        }
+        publishing = true
+        snapshot = next
+        while let newer = deferred {
+            deferred = nil
+            snapshot = newer
+        }
+        publishing = false
     }
     /// Replaces observation ownership, receiving initial and terminal snapshots through the host.
     public func observe(
@@ -114,6 +131,8 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     public private(set) var isObserving = false
     @ObservationIgnored private let revision: @MainActor (Snapshot) -> UInt64
     @ObservationIgnored private var watermark: UInt64
+    @ObservationIgnored private var publishing = false
+    @ObservationIgnored private var deferred: Snapshot?
     @ObservationIgnored private var subscription: RuntimeMainActorSubscription?
     @ObservationIgnored private var observation: Task<Void, Never>?
 
@@ -129,8 +148,23 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         let nextRevision = revision(next)
         guard nextRevision > watermark else { return false }
         watermark = nextRevision
-        snapshot = next
+        publish(next)
         return true
+    }
+    // Assigns in arrival order. An observer that applies a newer snapshot while one is being
+    // assigned defers it, so the outer assignment cannot overwrite the newer value.
+    private func publish(_ next: Snapshot) {
+        guard !publishing else {
+            deferred = next
+            return
+        }
+        publishing = true
+        snapshot = next
+        while let newer = deferred {
+            deferred = nil
+            snapshot = newer
+        }
+        publishing = false
     }
     /// Replaces observation ownership, receiving initial and terminal snapshots through the host.
     public func observe(

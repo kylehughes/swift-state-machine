@@ -26,6 +26,11 @@ nonisolated public enum Flow: Sendable {
         public typealias Output = Int
         public typealias Failure = Never
     }
+    @Restoration
+    fileprivate static func restore(_ saved: Int) throws(Problem) -> Restoration {
+        guard saved >= 0 else { throw .negative }
+        return saved == 0 ? .idle(Idle(attempts: 0)) : .loaded(Loaded(value: String(saved)))
+    }
     @Transition(on: Input.load, invalidates: [Scope.load], starts: [Fetch.self])
     fileprivate static func begin(_ source: Idle, _ request: Int) throws(Problem) -> Change<Loading, Effect.Begin> {
         guard request >= 0 else { throw .negative }

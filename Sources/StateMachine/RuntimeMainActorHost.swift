@@ -55,6 +55,13 @@
             entry.worker.cancel()
             entry.watcher?.cancel()
         }
+        // An owner released without closing finishes its registrations without a closed snapshot.
+        let finishes = subscribers.map(\.finish)
+        if !finishes.isEmpty {
+            Task { @MainActor in
+                for finish in finishes { finish() }
+            }
+        }
     }
     /// Copies a complete historical observation.
     public func snapshot() -> Engine.Snapshot { engine.snapshot }
@@ -115,13 +122,18 @@
     public func pendingCompletions() -> [Ledger.Pending] { ledger.pending }
     /// Acquires one explicit reconciliation attempt against the current root.
     public func reconcile(id: RuntimePendingID) -> Delivery { reconcile(id: id, automatic: false) }
-    private func reconcile(id: RuntimePendingID, automatic: Bool) -> Delivery {
+    private func reconcile(id: RuntimePendingID, automatic: Bool, scheduledRetry: Bool = false) -> Delivery {
+        // Only the first claim of a queued turn depends on the decision that queued it.
+        var scheduledClaim = scheduledRetry
         let preparation = prepare
         let result = Ledger.reconcile(
             id,
             policy: policy,
             automatic: automatic,
-            claim: { self.ledger.claim(id, in: &self.engine) },
+            claim: {
+                defer { scheduledClaim = false }
+                return self.ledger.claim(id, in: &self.engine, scheduledRetry: scheduledClaim)
+            },
             prepare: preparation,
             finish: { attempt, candidate in
                 let finish = self.ledger.finish(attempt, preparation: candidate, in: &self.engine)
@@ -206,15 +218,17 @@
                     subscribers[index].revision = batch.snapshot.revision
                 }
             }
-            for observer in observers {
-                observer.receive(batch.snapshot)
-                if batch.terminal { observer.finish() }
-            }
+            // Launch decisions and flush accounting come first, so an observer that waits on
+            // this batch's work, or is merely slow, cannot hold either back.
             for command in batch.commands {
                 if case .start(let work) = command { start(work) }
             }
             processedRevision = batch.snapshot.revision
             changed()
+            for observer in observers {
+                observer.receive(batch.snapshot)
+                if batch.terminal { observer.finish() }
+            }
         }
         Task { @MainActor [weak self] in
             await Task.yield()
@@ -283,7 +297,7 @@
     private func retryTurn() {
         ready.prune(keeping: ledger.pending.map(\.id))
         let ids = ready.takeRound()
-        for id in ids { _ = reconcile(id: id, automatic: true) }
+        for id in ids { _ = reconcile(id: id, automatic: true, scheduledRetry: true) }
         if ready.finishRound() {
             Task { @MainActor [weak self] in
                 await Task.yield()
@@ -320,6 +334,15 @@
     public var subscriberCount: Int { subscribers.count }
     /// Whether closure, FIFO, executions, retained delivery, and claims have all settled.
     public var isQuiescent: Bool { engine.isQuiescent && entries.isEmpty && !draining && ready.isIdle }
+    /// Captures the obligations still tracked, without exposing a ticket or other authority.
+    public func diagnostics() -> RuntimeShutdownDiagnostics {
+        RuntimeShutdownDiagnostics(
+            engine: engine,
+            processedThrough: processedRevision,
+            isDraining: draining,
+            pendingCompletions: ledger.pending.map(\.id)
+        )
+    }
     /// Closes and waits for actual termination and settlement, optionally bounded by a deadline.
     public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
         let receipt = close()

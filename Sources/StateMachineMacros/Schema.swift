@@ -105,6 +105,15 @@ struct Schema {
         let choices: [String]
     }
 
+    /// The authored function that validates saved data into a resting phase.
+    struct Restoration {
+        let name: String
+        /// The saved data type, spelled so it resolves outside the schema.
+        let archiveType: String
+        /// The typed failure, spelled so it resolves outside the schema.
+        let failureType: String?
+    }
+
     let name: String
     let access: Access
     let mode: Mode
@@ -115,6 +124,12 @@ struct Schema {
     let operations: [Operation]
     let transitions: [Transition]
     let routes: [Route]
+    let restoration: Restoration?
+
+    /// The phases in which no operation is active, in declaration order; only these can be restored.
+    var restingPhases: [Phase] {
+        phases.filter { phase in !operations.contains { $0.activeIn.contains(phase.caseName) } }
+    }
 
     static func parse(
         _ declaration: EnumDeclSyntax,
@@ -123,6 +138,32 @@ struct Schema {
     ) throws -> Schema {
         let parser = SchemaParser()
         return try parser.parse(declaration, attribute: attribute)
+    }
+}
+
+/// Qualifies bare references to an enum's own nested types so they resolve outside the enum.
+private struct NestedTypeQualifier {
+    let owner: String
+    let names: Set<String>
+
+    func qualify(_ type: TypeSyntax) -> String {
+        guard !names.isEmpty else { return type.trimmedDescription }
+        var result = ""
+        var previous: TokenSyntax?
+        let tokens = Array(type.trimmed.tokens(viewMode: .sourceAccurate))
+        for (index, token) in tokens.enumerated() {
+            // A name after a period is already qualified, and a name before a colon is a tuple label.
+            let isLabel = index + 1 < tokens.count && tokens[index + 1].tokenKind == .colon
+            if case .identifier(let name) = token.tokenKind, names.contains(name), previous?.tokenKind != .period,
+                !isLabel
+            {
+                result += token.leadingTrivia.description + owner + "." + token.text + token.trailingTrivia.description
+            } else {
+                result += token.description
+            }
+            previous = token
+        }
+        return result
     }
 }
 
@@ -319,7 +360,8 @@ private struct SchemaParser {
     private func marker(_ attributes: AttributeListSyntax, named name: String) throws -> AttributeSyntax? {
         let matches = attributes.compactMap { $0.as(AttributeSyntax.self) }
             .filter {
-                $0.attributeName.trimmedDescription == name
+                // The module-qualified spelling names the same macro.
+                [name, "StateMachineSchema.\(name)"].contains($0.attributeName.trimmedDescription)
             }
         guard matches.count <= 1 else {
             try reject(attributes, "Apply @\(name) only once to a declaration.")
@@ -332,6 +374,20 @@ private struct SchemaParser {
             try reject(declaration, "Input and Scope must be nongeneric closed enums.")
         }
         var result: [Schema.Case] = []
+        // A payload may name a type declared inside the enum; generated code refers to it from outside.
+        let nested = Set(
+            declaration.memberBlock.members.compactMap { member -> String? in
+                if let alias = member.decl.as(TypeAliasDeclSyntax.self) { return alias.name.text }
+                if let type = member.decl.as(StructDeclSyntax.self) { return type.name.text }
+                if let type = member.decl.as(EnumDeclSyntax.self) { return type.name.text }
+                return nil
+            }
+        )
+        // Phase payloads are declared in the schema, where generated code already resolves them.
+        let qualifier = NestedTypeQualifier(
+            owner: declaration.name.text,
+            names: declaration.name.text == "Input" ? nested : []
+        )
         for member in declaration.memberBlock.members {
             guard let cases = member.decl.as(EnumCaseDeclSyntax.self) else { continue }
             for element in cases.elements {
@@ -356,7 +412,10 @@ private struct SchemaParser {
                     else { try reject(parameter, "Use an unlabeled payload without a default value.") }
                 }
                 result.append(
-                    Schema.Case(caseName: element.name.text, payloadType: parameters?.first?.type.trimmedDescription)
+                    Schema.Case(
+                        caseName: element.name.text,
+                        payloadType: parameters?.first.map { qualifier.qualify($0.type) }
+                    )
                 )
             }
         }
@@ -385,7 +444,8 @@ private struct SchemaParser {
         }
     }
 
-    private func validateFunction(_ function: FunctionDeclSyntax, route: Bool) throws {
+    /// Checks the shape shared by authored functions; `role` names them in the throws diagnostic.
+    private func validateFunction(_ function: FunctionDeclSyntax, role: String) throws {
         guard function.modifiers.contains(where: { $0.name.text == "static" }),
             function.genericParameterClause == nil, function.genericWhereClause == nil,
             function.signature.effectSpecifiers?.asyncSpecifier == nil,
@@ -402,7 +462,7 @@ private struct SchemaParser {
             guard throwsClause.type != nil, throwsClause.throwsSpecifier.text == "throws" else {
                 try reject(
                     function,
-                    "\(route ? "Routers" : "Transitions") must use typed throws(Failure), or omit throws."
+                    "\(role) must use typed throws(Failure), or omit throws."
                 )
             }
         }
@@ -424,7 +484,7 @@ private struct SchemaParser {
         var initialCases: [EnumCaseDeclSyntax] = []
         for member in members {
             guard let attributed = member.decl.asProtocol(WithAttributesSyntax.self) else { continue }
-            for name in ["Transition", "Route", "Operation", "Initial"] {
+            for name in ["Transition", "Route", "Operation", "Initial", "Restoration"] {
                 guard let attribute = try marker(attributed.attributes, named: name) else { continue }
                 switch name {
                 case "Operation":
@@ -584,7 +644,7 @@ private struct SchemaParser {
                     admission: policy,
                     inputType: types["Input"]!,
                     outputType: types["Output"]!,
-                    failureType: types["Failure"]!
+                    failureType: types["Failure"]! == "Swift.Never" ? "Never" : types["Failure"]!
                 )
             )
         }
@@ -608,6 +668,11 @@ private struct SchemaParser {
             guard transitionAttribute == nil || routeAttribute == nil else {
                 try reject(function, "A function cannot be both a transition and a router.")
             }
+            if try marker(function.attributes, named: "Restoration") != nil,
+                transitionAttribute != nil || routeAttribute != nil
+            {
+                try reject(function, "A @Restoration function cannot also be a transition or a router.")
+            }
             guard let attribute = transitionAttribute ?? routeAttribute else { continue }
             guard identifier(function.name.text) else {
                 try reject(function, "Use an unescaped Swift transition or router identifier.")
@@ -619,9 +684,10 @@ private struct SchemaParser {
                     "@Route requires hosted observations and is unavailable in .ownedOnly; select consuming edges in the caller."
                 )
             }
-            try validateFunction(function, route: isRoute)
+            try validateFunction(function, role: isRoute ? "Routers" : "Transitions")
             if !isRoute,
-                ["withValue", "phase", "payload", "record", "claim", "value", "revision"].contains(function.name.text)
+                ["withValue", "phase", "payload", "record", "claim", "value", "revision", "description"]
+                    .contains(function.name.text)
             {
                 try reject(
                     function,
@@ -866,6 +932,7 @@ private struct SchemaParser {
                 choices: choices
             )
         }
+        let restoration = try restoration(members, mode: mode, schema: declaration.name.text)
         var reserved: Set<String> = [
             "Owned", "Observed", "Snapshot", "Prepared", "PreparationResult", "PreparationRejection", "CommitResult",
             "CommitRejection", "Receipt", "Completion", "Drivers", "Local", "MainActor", "Shared", "Actor",
@@ -891,7 +958,8 @@ private struct SchemaParser {
             "MainActorSnapshots", "Change", "Advance",
             "PreparationFailure", "PlanRejection", "Effect", "Route", "SendRejection", "Subscription",
             "MainActorSubscription", "SubscriptionFailure", "CompletionPolicy", "PendingStatus", "StateMachineSnapshot",
-            "StateMachineReceipt", "MainActorStateMachineHost",
+            "StateMachineReceipt", "MainActorStateMachineHost", "Restoration", "_stateMachineRestored",
+            "ShutdownResult", "ShutdownDiagnostics", "RuntimeShutdownDiagnostics",
         ]
         for operation in operations {
             for suffix in ["Work", "Completion", "SuccessCompletion", "FailureCompletion"] {
@@ -905,7 +973,9 @@ private struct SchemaParser {
             )
         }
         if mode != .ownedOnly,
-            let phase = phases.first(where: { ["record", "model", "revision", "isClosed"].contains($0.caseName) })
+            let phase = phases.first(where: {
+                ["record", "model", "revision", "isClosed", "description"].contains($0.caseName)
+            })
         {
             try reject(
                 anchor(for: phase.caseName, in: declaration),
@@ -962,7 +1032,78 @@ private struct SchemaParser {
             inputs: inputs,
             operations: operations,
             transitions: transitions,
-            routes: routes
+            routes: routes,
+            restoration: restoration
         )
+    }
+
+    /// Reads the optional `@Restoration` validator: `static func <name>(_ saved: Archive) -> Restoration`.
+    private func restoration(
+        _ members: MemberBlockItemListSyntax,
+        mode: Schema.Mode,
+        schema: String
+    ) throws -> Schema.Restoration? {
+        let marked = try members.compactMap { member -> (function: FunctionDeclSyntax, attribute: AttributeSyntax)? in
+            guard let function = member.decl.as(FunctionDeclSyntax.self),
+                let attribute = try marker(function.attributes, named: "Restoration")
+            else { return nil }
+            return (function, attribute)
+        }
+        guard let first = marked.first else { return nil }
+        let function = first.function
+        let attribute = first.attribute
+        guard marked.count == 1 else {
+            try reject(marked[1].attribute, "Declare at most one @Restoration function in a schema.")
+        }
+        guard mode != .ownedOnly else {
+            try reject(attribute, "@Restoration is unavailable in .ownedOnly, which generates no owner to restore.")
+        }
+        guard attribute.arguments == nil else { try reject(attribute, "@Restoration takes no arguments.") }
+        guard identifier(function.name.text) else {
+            try reject(function.name, "Use an unescaped Swift restoration function identifier.")
+        }
+        guard
+            members.compactMap({ $0.decl.as(FunctionDeclSyntax.self) })
+                .filter({ $0.name.text == function.name.text }).count == 1
+        else { try reject(function.name, "A @Restoration function cannot be overloaded.") }
+        try validateFunction(function, role: "Restoration functions")
+        let parameters = function.signature.parameterClause.parameters
+        guard parameters.count == 1, let parameter = parameters.first else {
+            try reject(
+                function.signature.parameterClause,
+                "A @Restoration function takes exactly one unlabeled parameter: the saved data it validates."
+            )
+        }
+        if let attributed = parameter.type.as(AttributedTypeSyntax.self),
+            attributed.specifiers.contains(where: {
+                $0.as(SimpleTypeSpecifierSyntax.self)?.specifier.tokenKind == .keyword(.inout)
+            })
+        {
+            try reject(parameter, "Pass the saved data to a @Restoration function by value, not inout.")
+        }
+        guard let result = function.signature.returnClause?.type, payloadName(result, schema: schema) == "Restoration"
+        else {
+            try reject(
+                function.signature.returnClause.map(Syntax.init) ?? Syntax(function),
+                "A @Restoration function returns Restoration, the resting phase to restore."
+            )
+        }
+        return Schema.Restoration(
+            name: function.name.text,
+            archiveType: outsideSchema(parameter.type, schema: schema),
+            failureType: function.signature.effectSpecifiers?.throwsClause?.type
+                .map { outsideSchema($0, schema: schema) }
+        )
+    }
+
+    /// Spells a type written inside the schema so it means the same thing inside a generated owner.
+    private func outsideSchema(_ type: TypeSyntax, schema: String) -> String {
+        type.trimmed.tokens(viewMode: .sourceAccurate)
+            .map { token in
+                token.tokenKind == .keyword(.Self)
+                    ? token.leadingTrivia.description + schema + token.trailingTrivia.description
+                    : token.description
+            }
+            .joined()
     }
 }

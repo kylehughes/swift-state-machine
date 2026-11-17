@@ -166,6 +166,16 @@
     "scope": "distinct operation work boundary"
   },
   {
+    "id": "GCT-restoration",
+    "pattern": "no member 'loading'",
+    "scope": "generated restoration names only phases in which no operation is active"
+  },
+  {
+    "id": "GCT-restoration-undeclared",
+    "pattern": "incorrect argument label|extraneous argument label",
+    "scope": "a schema without a restoration function generates no restoring initializer"
+  },
+  {
     "id": "GMT-002",
     "pattern": "requires|declared|Destination",
     "scope": "actual external macro expansion lexical or compiler witness boundary"

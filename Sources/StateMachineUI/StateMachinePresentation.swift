@@ -16,6 +16,8 @@ import StateMachine
     /// The owner, for delivery, reconciliation, and shutdown that the presentation does not wrap.
     public let host: Host
     private var watermark: UInt64
+    private var publishing = false
+    private var deferred: Host.Snapshot?
     private var subscription: RuntimeMainActorSubscription?
 
     /// Observes an owner from its current snapshot; this starts no work.
@@ -24,11 +26,12 @@ import StateMachine
         let initial = host.snapshot()
         snapshot = initial
         watermark = initial.revision
+        // A closed owner finishes inside `subscribe`, and that finish must be the last word.
+        isObserving = true
         subscription = try host.subscribe(
             { [weak self] in self?.apply($0) },
             onFinish: { [weak self] in self?.isObserving = false }
         )
-        isObserving = true
     }
 
     /// Admits one input and publishes its accepted snapshot before returning.
@@ -36,6 +39,16 @@ import StateMachine
         let receipt = try host.send(input)
         apply(receipt.snapshot)
         return receipt
+    }
+
+    /// Admits a proposal from an edge of the snapshot a view rendered, exposing the result before returning.
+    ///
+    /// The proposal is checked against the owner's current revision, so an action offered from
+    /// a snapshot that has since been replaced is rejected instead of applied to newer state.
+    public func commit(_ prepared: consuming Host.Prepared) -> Host.CommitResult {
+        let result = host.commit(prepared)
+        apply(host.snapshot())
+        return result
     }
 
     /// Stops observing, closes the owner, and publishes its terminal snapshot before returning.
@@ -57,7 +70,19 @@ import StateMachine
     private func apply(_ next: Host.Snapshot) {
         guard next.revision > watermark else { return }
         watermark = next.revision
+        guard !publishing else {
+            deferred = next
+            return
+        }
+        publishing = true
         snapshot = next
+        // An observer that applied a newer snapshot during the assignment deferred it here,
+        // so the outer assignment cannot overwrite the newer value.
+        while let newer = deferred {
+            deferred = nil
+            snapshot = newer
+        }
+        publishing = false
     }
 }
 
@@ -75,6 +100,8 @@ import StateMachine
     /// The owner, for delivery, reconciliation, and shutdown that the model does not wrap.
     @ObservationIgnored public let host: Host
     @ObservationIgnored private var watermark: UInt64
+    @ObservationIgnored private var publishing = false
+    @ObservationIgnored private var deferred: Host.Snapshot?
     @ObservationIgnored private var subscription: RuntimeMainActorSubscription?
 
     /// Observes an owner from its current snapshot; this starts no work.
@@ -83,11 +110,12 @@ import StateMachine
         let initial = host.snapshot()
         snapshot = initial
         watermark = initial.revision
+        // A closed owner finishes inside `subscribe`, and that finish must be the last word.
+        isObserving = true
         subscription = try host.subscribe(
             { [weak self] in self?.apply($0) },
             onFinish: { [weak self] in self?.isObserving = false }
         )
-        isObserving = true
     }
 
     /// Admits one input and exposes its accepted snapshot before returning.
@@ -95,6 +123,16 @@ import StateMachine
         let receipt = try host.send(input)
         apply(receipt.snapshot)
         return receipt
+    }
+
+    /// Admits a proposal from an edge of the snapshot a view rendered, exposing the result before returning.
+    ///
+    /// The proposal is checked against the owner's current revision, so an action offered from
+    /// a snapshot that has since been replaced is rejected instead of applied to newer state.
+    public func commit(_ prepared: consuming Host.Prepared) -> Host.CommitResult {
+        let result = host.commit(prepared)
+        apply(host.snapshot())
+        return result
     }
 
     /// Stops observing, closes the owner, and exposes its terminal snapshot before returning.
@@ -116,6 +154,18 @@ import StateMachine
     private func apply(_ next: Host.Snapshot) {
         guard next.revision > watermark else { return }
         watermark = next.revision
+        guard !publishing else {
+            deferred = next
+            return
+        }
+        publishing = true
         snapshot = next
+        // An observer that applied a newer snapshot during the assignment deferred it here,
+        // so the outer assignment cannot overwrite the newer value.
+        while let newer = deferred {
+            deferred = nil
+            snapshot = newer
+        }
+        publishing = false
     }
 }

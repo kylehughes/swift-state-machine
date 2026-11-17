@@ -279,7 +279,9 @@ import Testing
         let closed = await owner.close()
         #expect(await owner.flush(through: closed))
         #expect(await owner.runningCount == 1)
-        #expect(!(await owner.shutdownAndWait(deadline: .now)))
+        if case .quiescent = await owner.shutdownAndWait(deadline: .now) {
+            Issue.record("Shutdown reported quiescence while a driver was still running")
+        }
         #expect(await network.complete(first.id, with: .success(Profile(userID: user, name: "Revoked"))))
         await owner.shutdown()
         let final = await owner.snapshot()

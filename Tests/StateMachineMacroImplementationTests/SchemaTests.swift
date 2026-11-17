@@ -450,6 +450,126 @@ struct SchemaTests {
         #expect(throws: DiagnosticsError.self) { try Self.parse(borrowed) }
     }
 
+    static let restorable = schema.replacingOccurrences(
+        of: "struct Idle {}",
+        with:
+            "struct Idle {}\n    @Restoration\n    static func restore(_ saved: Int) throws(MyError) -> Restoration { fatalError() }"
+    )
+
+    @Test func restorationCoversOnlyPhasesWithoutActiveOperations() throws {
+        let result = try Self.parse(Self.restorable)
+        #expect(result.restingPhases.map(\.caseName) == ["idle"])
+        #expect(result.restoration?.name == "restore")
+        #expect(result.restoration?.archiveType == "Int")
+        #expect(result.restoration?.failureType == "MyError")
+        let plain = try Self.parse(Self.schema)
+        #expect(plain.restoration == nil)
+        #expect(plain.restingPhases.map(\.caseName) == ["idle"])
+        let qualified = try Self.parse(
+            Self.restorable.replacingOccurrences(
+                of: "(_ saved: Int) throws(MyError) -> Restoration",
+                with: "(_ saved: Self.Archive) throws(Self.Problem) -> Self.Restoration"
+            )
+        )
+        #expect(qualified.restoration?.archiveType == "Flow.Archive")
+        #expect(qualified.restoration?.failureType == "Flow.Problem")
+        let infallible = try Self.parse(Self.restorable.replacingOccurrences(of: " throws(MyError) ->", with: " ->"))
+        #expect(infallible.restoration?.failureType == nil)
+    }
+
+    @Test func diagnosesMalformedRestoration() throws {
+        let validator = "static func restore(_ saved: Int) throws(MyError) -> Restoration"
+        let owned = #"""
+            @StateMachine(mode: .ownedOnly)
+            enum Resource {
+                struct Idle: ~Copyable {}
+                @Initial case idle(Idle)
+                enum Input {}
+                @Restoration
+                static func restore(_ saved: Int) -> Restoration { fatalError() }
+            }
+            """#
+        let failures: [(String, String)] = [
+            (
+                Self.restorable.replacingOccurrences(
+                    of: "struct Loading {}",
+                    with:
+                        "struct Loading {}\n    @Restoration\n    static func again(_ saved: Int) -> Restoration { fatalError() }"
+                ),
+                "Declare at most one @Restoration function in a schema."
+            ),
+            (owned, "@Restoration is unavailable in .ownedOnly, which generates no owner to restore."),
+            (
+                Self.restorable.replacingOccurrences(of: validator, with: "static func restore(_ saved: Int) -> Idle"),
+                "A @Restoration function returns Restoration, the resting phase to restore."
+            ),
+            (
+                Self.restorable.replacingOccurrences(
+                    of: validator,
+                    with: "static func restore(_ saved: Int, _ other: Int) -> Restoration"
+                ),
+                "A @Restoration function takes exactly one unlabeled parameter: the saved data it validates."
+            ),
+            (
+                Self.restorable.replacingOccurrences(of: validator, with: "static func restore() -> Restoration"),
+                "A @Restoration function takes exactly one unlabeled parameter: the saved data it validates."
+            ),
+            (
+                Self.restorable.replacingOccurrences(
+                    of: "throws(MyError) -> Restoration",
+                    with: "throws -> Restoration"
+                ),
+                "Restoration functions must use typed throws(Failure), or omit throws."
+            ),
+            (
+                Self.restorable.replacingOccurrences(of: validator, with: "func restore(_ saved: Int) -> Restoration"),
+                "Use a synchronous nongeneric static function with unlabeled, nonvariadic parameters and no defaults."
+            ),
+            (
+                Self.restorable.replacingOccurrences(of: "(_ saved: Int)", with: "(_ saved: inout Int)"),
+                "Pass the saved data to a @Restoration function by value, not inout."
+            ),
+            (
+                Self.restorable.replacingOccurrences(of: "@Restoration\n", with: "@Restoration(true)\n"),
+                "@Restoration takes no arguments."
+            ),
+            (
+                Self.restorable.replacingOccurrences(
+                    of: "@Restoration\n",
+                    with: "@Restoration @Transition(on: Input.cancel)\n"
+                ),
+                "A @Restoration function cannot also be a transition or a router."
+            ),
+            (
+                Self.schema.replacingOccurrences(of: "struct Loading {}", with: "@Restoration struct Loading {}"),
+                "@Restoration must mark a static function declared directly inside the schema."
+            ),
+            (
+                Self.schema.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\nenum Restoration {}"),
+                "'Restoration' is reserved for generated members; rename the authored declaration."
+            ),
+            (
+                Self.schema.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\nenum ShutdownResult {}"),
+                "'ShutdownResult' is reserved for generated members; rename the authored declaration."
+            ),
+            (
+                Self.schema.replacingOccurrences(
+                    of: "struct Idle {}",
+                    with: "struct Idle {}\nstruct ShutdownDiagnostics {}"
+                ),
+                "'ShutdownDiagnostics' is reserved for generated members; rename the authored declaration."
+            ),
+        ]
+        for (source, message) in failures {
+            do {
+                _ = try Self.parse(source)
+                Issue.record("Expected rejection: \(message)")
+            } catch let error as DiagnosticsError {
+                #expect(error.diagnostics.map(\.message) == [message])
+            }
+        }
+    }
+
     @Test func caseNamesFollowSwiftIdentifierGrammar() throws {
         let source = Self.schema.replacingOccurrences(of: "case idle(Idle)", with: "case начало(Idle)")
         #expect(try Self.parse(source).initial == "начало")

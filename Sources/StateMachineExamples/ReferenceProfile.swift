@@ -725,7 +725,7 @@ nonisolated public enum ReferenceProfile {
         /// Closes and waits for actual task termination and preparation claim exit, bounded by an optional deadline.
         public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
             if await host.shutdownAndWait(deadline: deadline) { return .quiescent }
-            let diagnostics = host.diagnostics()
+            let diagnostics = host.authorityDiagnostics()
             return .timedOut(
                 .init(
                     acceptedRevision: diagnostics.acceptedRevision,

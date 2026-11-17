@@ -320,7 +320,9 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     }
     /// Claims exactly one fresh preparation attempt for a retained first outcome.
     public func reconcile(id: RuntimePendingID) -> Delivery { reconcile(id: id, automatic: false) }
-    private func reconcile(id: RuntimePendingID, automatic: Bool) -> Delivery {
+    private func reconcile(id: RuntimePendingID, automatic: Bool, scheduledRetry: Bool = false) -> Delivery {
+        // Only the first claim of a queued turn depends on the decision that queued it.
+        var scheduledClaim = scheduledRetry
         let result = Ledger.reconcile(
             id,
             policy: policy,
@@ -329,10 +331,14 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                 while true {
                     let before = storage.load()
                     var after = before.value
-                    let result = after.ledger.claim(id, in: &after.engine)
+                    let result = after.ledger.claim(id, in: &after.engine, scheduledRetry: scheduledClaim)
                     if case .claimed = result {
-                        if storage.install(.init(after), replacing: before) { return result }
+                        if storage.install(.init(after), replacing: before) {
+                            scheduledClaim = false
+                            return result
+                        }
                     } else if storage.isCurrent(before) {
+                        scheduledClaim = false
                         return result
                     }
                 }
@@ -526,7 +532,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                 break
             }
         }
-        for id in ids { _ = reconcile(id: id, automatic: true) }
+        for id in ids { _ = reconcile(id: id, automatic: true, scheduledRetry: true) }
         while true {
             let before = storage.load()
             var after = before.value
@@ -559,23 +565,23 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         let state = storage.load().value
         return state.engine.isQuiescent && !state.drainerScheduled && state.ready.isIdle
     }
-    /// Outstanding raw obligations at a coherent historical observation.
-    public struct Diagnostics: Sendable {
+    /// Outstanding raw obligations at a coherent historical observation, with execution authority.
+    package struct Diagnostics: Sendable {
         /// The last accepted revision.
-        public let acceptedRevision: UInt64
+        package let acceptedRevision: UInt64
         /// The revision of the last fully processed FIFO batch.
-        public let processedThrough: UInt64
+        package let processedThrough: UInt64
         /// Whether FIFO batches await transfer.
-        public let hasQueuedBatches: Bool
+        package let hasQueuedBatches: Bool
         /// Whether a drainer still owns responsibility.
-        public let isDraining: Bool
+        package let isDraining: Bool
         /// First retained envelopes.
-        public let pending: [RuntimePendingID]
+        package let pending: [RuntimePendingID]
         /// Physical execution, delivery, and preparation obligations.
-        public let outstanding: [Engine.ReservationSnapshot]
+        package let outstanding: [Engine.ReservationSnapshot]
     }
-    /// Captures raw shutdown diagnostics without exposing a facade host.
-    public func diagnostics() -> Diagnostics {
+    /// Captures raw diagnostics that carry execution authority, for facades that project them.
+    package func authorityDiagnostics() -> Diagnostics {
         let state = storage.load().value
         return Diagnostics(
             acceptedRevision: state.engine.snapshot.revision,
@@ -584,6 +590,16 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             isDraining: state.drainerScheduled,
             pending: state.ledger.pending.map(\.id),
             outstanding: state.engine.executionReservations
+        )
+    }
+    /// Captures the obligations still tracked, without exposing a ticket or other authority.
+    public func diagnostics() -> RuntimeShutdownDiagnostics {
+        let state = storage.load().value
+        return RuntimeShutdownDiagnostics(
+            engine: state.engine,
+            processedThrough: state.processedRevision,
+            isDraining: state.drainerScheduled,
+            pendingCompletions: state.ledger.pending.map(\.id)
         )
     }
     /// Closes, then waits until all obligations settle or the supplied deadline expires.

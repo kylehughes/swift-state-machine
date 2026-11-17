@@ -155,7 +155,7 @@ extension OwnedResourceContract.Effect: Equatable {}
             result.next.withValue { $0 }
                 == OwnedValueContract.Finished(identifier: 17, history: ["before": [2, 5]], label: "published")
         )
-        #expect(result.effects == [.audit(17), .publish("published")])
+        #expect(result.effects.map(\.effect) == [.audit(17), .publish("published")])
         #expect(executions.withLock { $0 }.isEmpty)
         for effect in result.effects {
             switch effect {
@@ -183,7 +183,7 @@ extension OwnedResourceContract.Effect: Equatable {}
                             label: "recovered"
                         )
                 )
-                #expect(effects == [.audit(23), .publish("recovered")])
+                #expect(effects.map(\.effect) == [.audit(23), .publish("recovered")])
             case .rejected: Issue.record("Recovered predecessor rejected valid input")
             }
         }
@@ -211,7 +211,7 @@ extension OwnedResourceContract.Effect: Equatable {}
                 Advance<
                     OwnedResourceContract.Owned<OwnedResourceContract.Ready>,
                     OwnedResourceContract.Owned<OwnedResourceContract.Finished>,
-                    OwnedResourceContract.Effect, OwnedResourceContract.Rejection
+                    OwnedResourceContract.Effect.Finish, OwnedResourceContract.Rejection
                 >
             if rejectFirst {
                 switch owner.finish("") {
@@ -233,7 +233,7 @@ extension OwnedResourceContract.Effect: Equatable {}
                 #expect(next.withValue { $0.resource.identifier } == 41)
                 #expect(next.withValue { $0.history } == ["retained": [3, 7]])
                 #expect(next.withValue { $0.label } == "complete")
-                #expect(effects == [.audit(41), .publish("complete")])
+                #expect(effects.map(\.effect) == [.audit(41), .publish("complete")])
                 #expect(releases.withLock { $0 }.isEmpty)
                 #expect(executions.withLock { $0 }.isEmpty)
                 for effect in effects {

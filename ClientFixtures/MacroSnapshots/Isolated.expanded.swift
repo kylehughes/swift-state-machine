@@ -61,10 +61,9 @@ internal struct Owned<Phase: ~Copyable>: ~Copyable {
         body(phase)
     }
     /// Advances through the authored edge, preserving effect order.
-internal consuming func save() -> Change<Owned<Saving>, Effect> where Phase == Draft {
+internal consuming func save() -> Change<Owned<Saving>, Effect.Save> where Phase == Draft {
     let change = Note.save(phase)
-    let effects = change.effects.map(\.effect)
-    return Change(Owned<Saving>(change.next), effects: effects)
+    return Change(Owned<Saving>(change.next), effects: change.effects)
     }
     /// Advances through the authored edge, which starts no operation.
     internal consuming func edit(_ input: String) -> Owned<Draft> where Phase == Draft {
@@ -111,7 +110,7 @@ internal typealias PendingStatus = RuntimePendingStatus
 internal typealias CommitRejection = RuntimeState<Note, Effect>.Rejection
 
 /// An immutable historical payload with sealed complete-root provenance.
-internal struct Observed<Phase> {
+internal struct Observed<Phase>: CustomStringConvertible {
     fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: RuntimeDeliveryClaim?
@@ -122,6 +121,10 @@ internal struct Observed<Phase> {
     /// The owner-lifetime accepted revision.
     internal var revision: UInt64 {
         record.revision
+    }
+    /// The phase, revision, and closure of this observation, without its payload.
+    internal var description: String {
+        "\(Phase.self), revision \(record.revision)\(record.isClosed ? ", closed" : "")"
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 internal func save() throws(PreparationFailure<Never>) -> Prepared where Phase == Draft {
@@ -168,7 +171,7 @@ internal func save() throws(PreparationFailure<Never>) -> Prepared where Phase =
 }
 
 /// A complete historical root observation with sealed provenance.
-internal enum Snapshot: StateMachineSnapshot {
+internal enum Snapshot: StateMachineSnapshot, CustomStringConvertible {
     case draft(Observed<Draft>)
     case saving(Observed<Saving>)
     fileprivate var record: _StateMachineEngine.Snapshot {
@@ -190,6 +193,15 @@ internal enum Snapshot: StateMachineSnapshot {
     /// Ordinary model data; constructing it confers no installation authority.
     internal var model: Note {
         record.model
+    }
+    /// The phase, revision, and closure of this observation, without its payload.
+    internal var description: String {
+        switch self {
+        case .draft(let value):
+            return "draft, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        case .saving(let value):
+            return "saving, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        }
     }
 }
 
@@ -226,7 +238,7 @@ internal enum PreparationResult: ~Copyable {
 }
 
 /// A historical receipt for an atomic acceptance.
-internal struct Receipt: StateMachineReceipt {
+internal struct Receipt: StateMachineReceipt, CustomStringConvertible {
     /// The accepted historical observation.
     internal let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
@@ -235,6 +247,10 @@ internal struct Receipt: StateMachineReceipt {
     /// The owner-lifetime accepted revision.
     internal var revision: UInt64 {
         snapshot.revision
+    }
+    /// The accepted phase, revision, and closure, without the payload.
+    internal var description: String {
+        snapshot.description
     }
 }
 
@@ -446,19 +462,13 @@ internal static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparati
                 }
             }
         }
-    case (.save, .saving):
-        return .rejected(.invalidPhase)
-    case (.edit, .saving):
+    default:
         return .rejected(.invalidPhase)
     }
 }
 
 fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
     switch (completion, snapshot) {
-    case (.save(.success), .draft):
-        return .rejected(.invalidPhase)
-    case (.save(.failure), .draft):
-        return .rejected(.invalidPhase)
     case (.save(.success(let completion)), .saving(let source)):
         do {
             return .prepared(try source.saved(completion))
@@ -472,8 +482,20 @@ fileprivate static func _stateMachineCompletion(_ completion: Completion, on sna
                 }
             }
         }
-    case (.save(.failure), .saving):
+    default:
         return .rejected(.invalidPhase)
+    }
+}
+
+/// A phase saved data can restore: one in which no operation is active, so no work resumes.
+internal enum Restoration {
+    case draft(Draft)
+}
+
+fileprivate static func _stateMachineRestored(_ saved: Box) -> (model: Note, scopes: [RuntimeScopeID]) {
+    switch Note.restore(saved) {
+    case .draft(let payload):
+        return (.draft(payload), [])
     }
 }
 
@@ -484,6 +506,17 @@ internal typealias PendingCompletionID = RuntimePendingID
 
 /// Typed historical diagnostics for a retained completion.
 internal typealias PendingCompletion = RuntimeDeliveryLedger<Note, Effect, Completion, PreparationRejection>.Pending
+
+/// The obligations a managed owner still tracked when its shutdown deadline expired.
+internal typealias ShutdownDiagnostics = RuntimeShutdownDiagnostics
+
+/// Whether shutdown joined every obligation or stopped waiting at its deadline.
+///
+/// A timeout leaves the owner closed and its outstanding work tracked.
+internal enum ShutdownResult: Sendable {
+    case quiescent
+    case timedOut(ShutdownDiagnostics)
+}
 
 /// A closed completion delivery decision.
 internal enum DeliveryResult {
@@ -530,6 +563,11 @@ internal struct Local: ~Copyable {
     internal init(_ initial: Draft, configuration: LocalConfiguration = .default) {
         engine = _StateMachineEngine(.draft(initial), scopes: [], limits: configuration)
     }
+    /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
+    internal init(restoring saved: Box, configuration: LocalConfiguration = .default) {
+        let restored = _stateMachineRestored(saved)
+        engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration)
+    }
     /// Returns an immutable historical observation.
     internal borrowing func snapshot() -> Snapshot {
         _stateMachineSnapshot(engine.snapshot)
@@ -557,17 +595,13 @@ internal struct Local: ~Copyable {
     }
     /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
     internal mutating func drainCommands(limit: Int) -> [CommandBatch] {
-        let batches = engine.drain(limit: limit).map {
+        engine.drain(limit: limit).map {
             _stateMachineBatch($0)
         }
-        _ = ledger.retryCapacity(in: &engine)
-        return batches
     }
     /// Records actual termination independently of cancellation and completion delivery.
     internal mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
-        let result = engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
-        _ = ledger.retryCapacity(in: &engine)
-        switch result {
+        switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
         case .recorded:
             return .recorded
         case .duplicate:
@@ -609,6 +643,12 @@ internal mutating func deliver(_ completion: SaveCompletion) -> DeliveryResult {
             let preparation = _stateMachineDeliveryPreparation(attempt)
             return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
         }
+    }
+    /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
+    ///
+    /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
+    internal mutating func retryAdmission(id: PendingCompletionID) -> DeliveryResult {
+        _stateMachineFinish(ledger.retryAdmission(id, in: &engine))
     }
     /// Queries immutable first-outcome records without claiming preparation.
     internal borrowing func pendingCompletions() -> [PendingCompletion] {
@@ -658,6 +698,32 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
         onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
         }) {
         host = Host(.draft(initial), scopes: [], configuration: configuration,
+            policy: completionPolicy, driver: { raw in
+                switch raw.descriptor {
+                            case .save(let input):
+                                let work = SaveWork(input: input, authority: raw.ticket)
+                                switch await drivers.save(input) {
+                                case .success(let value):
+                    return .save(work.succeeded(value))
+                                case .failure(let value):
+                    switch value {
+                    }
+                                }
+                            }
+            }, ticket: { (outcome: Completion) -> RuntimeTicket in
+                return outcome.authority
+            },
+            prepare: {
+                _stateMachineDeliveryPreparation($0)
+            }, reconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
+    internal init(restoring saved: Box, drivers: MainActorDrivers, configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
+        }) {
+        let restored = _stateMachineRestored(saved)
+        host = Host(restored.model, scopes: restored.scopes, configuration: configuration,
             policy: completionPolicy, driver: { raw in
                 switch raw.descriptor {
                             case .save(let input):
@@ -765,9 +831,12 @@ internal func deliver(_ completion: SaveCompletion) -> DeliveryResult {
     internal func shutdown() async {
         await host.shutdown()
     }
-    /// Closes and waits for settlement through an optional deadline.
-    internal func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
-        await host.shutdownAndWait(deadline: deadline)
+    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
+    internal func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        if await host.shutdownAndWait(deadline: deadline) {
+            return .quiescent
+        }
+        return .timedOut(host.diagnostics())
     }
     /// Actual workers whose joined termination has not yet been processed.
     internal var runningCount: Int {

@@ -113,6 +113,84 @@ import Testing
         #expect(core.acknowledge(work.ticket) == .recorded)
     }
 
+    /// Leaves one envelope in the state a host reaches after its fourth automatic conflict.
+    private func scheduledAfterConflict(
+        ledger: inout Ledger,
+        core: inout Core
+    ) throws -> (id: RuntimePendingID, ticket: RuntimeTicket) {
+        let work = try #require(start(&core).first)
+        #expect(core.acknowledge(work.ticket) == .recorded)
+        let id = try retain(42, ticket: work.ticket, ledger: &ledger, core: &core)
+        let stale = try claim(id, ledger: &ledger, core: &core)
+        let candidate = try terminal(stale, ticket: work.ticket)
+        try accept(&core, model: 2)
+        _ = ledger.finish(stale, preparation: .success(candidate), in: &core)
+        ledger.scheduleRetry(id)
+        #expect(ledger.pending.first?.status == .retryScheduled)
+        return (id, work.ticket)
+    }
+
+    @Test func aQueuedRetryClaimsWhileItsSchedulingDecisionStands() throws {
+        var core = try engine()
+        var ledger = Ledger()
+        let scheduled = try scheduledAfterConflict(ledger: &ledger, core: &core)
+        guard case .claimed(let attempt) = ledger.claim(scheduled.id, in: &core, scheduledRetry: true) else {
+            Issue.record("The queued turn lost its own claim")
+            return
+        }
+        let corrected = try terminal(attempt, ticket: scheduled.ticket)
+        guard case .committed = ledger.finish(attempt, preparation: .success(corrected), in: &core) else {
+            Issue.record("The queued retry did not commit")
+            return
+        }
+    }
+
+    @Test func aQueuedRetryYieldsToANewerDomainRejection() throws {
+        var core = try engine()
+        var ledger = Ledger()
+        let scheduled = try scheduledAfterConflict(ledger: &ledger, core: &core)
+        // An explicit attempt finishes between the scheduling decision and the queued turn.
+        let explicit = try claim(scheduled.id, ledger: &ledger, core: &core)
+        _ = ledger.finish(explicit, preparation: .failure(.domain(.denied)), in: &core)
+        let attempts = ledger.pending.first?.attempts
+        guard case .notPending = ledger.claim(scheduled.id, in: &core, scheduledRetry: true) else {
+            Issue.record("The queued turn overrode a newer decision")
+            return
+        }
+        #expect(ledger.pending.first?.status == .reconciliationRequired)
+        #expect(ledger.pending.first?.lastRejection == .preparation(.domain(.denied)))
+        #expect(ledger.pending.first?.attempts == attempts)
+    }
+
+    @Test func aQueuedRetryKeepsANewerCandidateThatWaitsForCapacity() throws {
+        var core = try engine(commits: 1)
+        var ledger = Ledger()
+        let scheduled = try scheduledAfterConflict(ledger: &ledger, core: &core)
+        // The queue is full, so the explicit attempt's candidate is retained for an admission-only retry.
+        let explicit = try claim(scheduled.id, ledger: &ledger, core: &core)
+        let candidate = try terminal(explicit, ticket: scheduled.ticket)
+        guard
+            case .pending(_, .waitingForCapacity) = ledger.finish(
+                explicit,
+                preparation: .success(candidate),
+                in: &core
+            )
+        else {
+            Issue.record("The explicit attempt did not wait for capacity")
+            return
+        }
+        guard case .notPending = ledger.claim(scheduled.id, in: &core, scheduledRetry: true) else {
+            Issue.record("The queued turn discarded a retained candidate")
+            return
+        }
+        #expect(ledger.pending.first?.status == .waitingForCapacity)
+        _ = core.drain(limit: 1)
+        guard case .committed = ledger.retryAdmission(scheduled.id, in: &core) else {
+            Issue.record("The retained candidate was lost")
+            return
+        }
+    }
+
     @Test func rootConflictRetainsEnvelopeUntilFreshExplicitPreparationCommits() throws {
         var core = try engine()
         var ledger = Ledger()

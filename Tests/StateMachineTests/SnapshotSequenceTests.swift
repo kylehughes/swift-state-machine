@@ -122,6 +122,22 @@ private struct Signal: Sendable {
         await owner.shutdown()
     }
 
+    @Test func aConsumerCancelledBeforeItsFirstElementReceivesNothingAndFreesItsSlot() async throws {
+        let owner = try makeMainHost(subscribers: 1)
+        // The test keeps the sequence alive, so only the cancelled iterator can free the slot.
+        let snapshots = try owner.snapshots()
+        let consumer = Task {
+            var iterator = snapshots.makeAsyncIterator()
+            return await iterator.next()?.revision
+        }
+        // The task has not run yet: it starts on the main actor only after this function suspends.
+        consumer.cancel()
+        #expect(await consumer.value == nil)
+        _ = snapshots
+        #expect(owner.subscriberCount == 0)
+        await owner.shutdown()
+    }
+
     @Test func cancellingTheConsumerEndsTheSequenceAndFreesItsSlot() async throws {
         let owner = try makeMainHost(subscribers: 1)
         let snapshots = try owner.snapshots()
@@ -272,6 +288,25 @@ private func collect<Source: AsyncSequence & Sendable>(
             if snapshot.revision < 2 { try owner.advance() } else if !snapshot.isClosed { _ = owner.close() }
         }
         #expect(revisions == [0, 1, 2, 3])
+        await owner.shutdown()
+    }
+
+    @Test func aConsumerCancelledBeforeItsFirstElementReceivesNothingAndFreesItsSlot() async throws {
+        let owner = try makeMainHost(subscribers: 1)
+        // The test keeps the sequence alive, so only the cancelled iterator can free the slot.
+        let detached = Signal()
+        let snapshots = try owner.sendableSnapshots({ $0 }, onDetach: { detached.raise() })
+        let consumer = Task {
+            var iterator = snapshots.makeAsyncIterator()
+            return await iterator.next()?.revision
+        }
+        // The task has not run yet: it starts on the main actor only after this function suspends.
+        consumer.cancel()
+        #expect(await consumer.value == nil)
+        // Cleanup edge: the cancelled iterator removed the registration.
+        await detached.wait()
+        #expect(owner.subscriberCount == 0)
+        _ = snapshots
         await owner.shutdown()
     }
 

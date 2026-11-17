@@ -28,6 +28,10 @@ nonisolated struct RuntimeConfinedExecution: Sendable {
     private var cancelled = false
 
     package init(_ action: @escaping @MainActor @Sendable () -> Void) { self.action = action }
+    /// Creates a registration token for a host of your own, such as a test double.
+    ///
+    /// `onCancel` runs exactly once, on the main actor, when the token is cancelled or released.
+    public convenience init(onCancel: @escaping @MainActor @Sendable () -> Void) { self.init(onCancel) }
     /// Removes the registration synchronously; an already-claimed callback may finish.
     public func cancel() {
         guard !cancelled else { return }
@@ -35,6 +39,7 @@ nonisolated struct RuntimeConfinedExecution: Sendable {
         action()
     }
     deinit {
+        guard !cancelled else { return }
         let action = action
         Task { @MainActor in action() }
     }

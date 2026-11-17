@@ -93,11 +93,10 @@ public struct Owned<Phase: ~Copyable & Sendable>: ~Copyable, Sendable {
         body(phase)
     }
     /// Advances through the authored edge or returns the original predecessor.
-public consuming func begin(_ input: Int) -> Advance<Self, Owned<Loading>, Effect, Problem> where Phase == Idle {
+public consuming func begin(_ input: Int) -> Advance<Self, Owned<Loading>, Effect.Begin, Problem> where Phase == Idle {
     do {
         let change = try Flow.begin(phase, input)
-        let effects = change.effects.map(\.effect)
-        return .advanced(Owned<Loading>(change.next), effects: effects)
+        return .advanced(Owned<Loading>(change.next), effects: change.effects)
     } catch {
         return .rejected(error, self)
     }
@@ -111,10 +110,9 @@ public consuming func begin(_ input: Int) -> Advance<Self, Owned<Loading>, Effec
         Owned<Loading>(Flow.sessionChanged(phase))
     }
     /// Advances through the authored edge, preserving effect order.
-    public consuming func note(_ input: String) -> Change<Owned<Loading>, Effect> where Phase == Loading {
+    public consuming func note(_ input: String) -> Change<Owned<Loading>, Effect.Note> where Phase == Loading {
         let change = Flow.note(phase, input)
-        let effects = change.effects.map(\.effect)
-        return Change(Owned<Loading>(change.next), effects: effects)
+        return Change(Owned<Loading>(change.next), effects: change.effects)
     }
     /// Advances through the authored edge, which starts no operation.
     public consuming func received(_ input: Fetch.Output) -> Owned<Loaded> where Phase == Loading {
@@ -173,7 +171,7 @@ public typealias PendingStatus = RuntimePendingStatus
 public typealias CommitRejection = RuntimeState<Flow, Effect>.Rejection
 
 /// An immutable historical payload with sealed complete-root provenance.
-public struct Observed<Phase: Sendable>: Sendable {
+public struct Observed<Phase: Sendable>: Sendable, CustomStringConvertible {
     fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: RuntimeDeliveryClaim?
@@ -184,6 +182,10 @@ public struct Observed<Phase: Sendable>: Sendable {
     /// The owner-lifetime accepted revision.
     public var revision: UInt64 {
         record.revision
+    }
+    /// The phase, revision, and closure of this observation, without its payload.
+    public var description: String {
+        "\(Phase.self), revision \(record.revision)\(record.isClosed ? ", closed" : "")"
     }
     /// Prepares the declared edge with phase and operation authority preserved.
 public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared where Phase == Idle {
@@ -318,7 +320,7 @@ public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared 
 }
 
 /// A complete historical root observation with sealed provenance.
-public enum Snapshot: Sendable, StateMachineSnapshot {
+public enum Snapshot: Sendable, StateMachineSnapshot, CustomStringConvertible {
     case idle(Observed<Idle>)
     case loading(Observed<Loading>)
     case loaded(Observed<Loaded>)
@@ -346,6 +348,19 @@ public enum Snapshot: Sendable, StateMachineSnapshot {
     /// Ordinary model data; constructing it confers no installation authority.
     public var model: Flow {
         record.model
+    }
+    /// The phase, revision, and closure of this observation, without its payload.
+    public var description: String {
+        switch self {
+        case .idle(let value):
+            return "idle, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        case .loading(let value):
+            return "loading, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        case .loaded(let value):
+            return "loaded, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        case .failed(let value):
+            return "failed, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
+        }
     }
 }
 
@@ -395,7 +410,7 @@ public enum PreparationResult: ~Copyable, Sendable {
 }
 
 /// A historical receipt for an atomic acceptance.
-public struct Receipt: Sendable, StateMachineReceipt {
+public struct Receipt: Sendable, StateMachineReceipt, CustomStringConvertible {
     /// The accepted historical observation.
     public let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
@@ -404,6 +419,10 @@ public struct Receipt: Sendable, StateMachineReceipt {
     /// The owner-lifetime accepted revision.
     public var revision: UInt64 {
         snapshot.revision
+    }
+    /// The accepted phase, revision, and closure, without the payload.
+    public var description: String {
+        snapshot.description
     }
 }
 
@@ -663,16 +682,6 @@ public static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparation
                 return .rejected(.begin(error))
             }
         }
-    case (.cancel, .idle):
-        return .rejected(.invalidPhase)
-    case (.sessionChanged, .idle):
-        return .rejected(.invalidPhase)
-    case (.note, .idle):
-        return .rejected(.invalidPhase)
-    case (.tick, .idle):
-        return .rejected(.invalidPhase)
-    case (.load, .loading):
-        return .rejected(.invalidPhase)
     case (.cancel, .loading(let source)):
         do {
             return .prepared(try source.cancel())
@@ -712,16 +721,6 @@ public static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparation
                 }
             }
         }
-    case (.tick, .loading):
-        return .rejected(.invalidPhase)
-    case (.load, .loaded):
-        return .rejected(.invalidPhase)
-    case (.cancel, .loaded):
-        return .rejected(.invalidPhase)
-    case (.sessionChanged, .loaded):
-        return .rejected(.invalidPhase)
-    case (.note, .loaded):
-        return .rejected(.invalidPhase)
     case (.tick(let input), .loaded(let source)):
         let selection: Route.Choose
         do {
@@ -757,25 +756,13 @@ public static func prepare(_ input: Input, on snapshot: Snapshot) -> Preparation
                 }
             }
         }
-    case (.load, .failed):
-        return .rejected(.invalidPhase)
-    case (.cancel, .failed):
-        return .rejected(.invalidPhase)
-    case (.sessionChanged, .failed):
-        return .rejected(.invalidPhase)
-    case (.note, .failed):
-        return .rejected(.invalidPhase)
-    case (.tick, .failed):
+    default:
         return .rejected(.invalidPhase)
     }
 }
 
 fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
     switch (completion, snapshot) {
-    case (.fetch(.success), .idle):
-        return .rejected(.invalidPhase)
-    case (.fetch(.failure), .idle):
-        return .rejected(.invalidPhase)
     case (.fetch(.success(let completion)), .loading(let source)):
         do {
             return .prepared(try source.received(completion))
@@ -802,18 +789,6 @@ fileprivate static func _stateMachineCompletion(_ completion: Completion, on sna
                 }
             }
         }
-    case (.fetch(.success), .loaded):
-        return .rejected(.invalidPhase)
-    case (.fetch(.failure), .loaded):
-        return .rejected(.invalidPhase)
-    case (.fetch(.success), .failed):
-        return .rejected(.invalidPhase)
-    case (.fetch(.failure), .failed):
-        return .rejected(.invalidPhase)
-    case (.audit(.success), .idle):
-        return .rejected(.invalidPhase)
-    case (.audit(.failure), .idle):
-        return .rejected(.invalidPhase)
     case (.audit(.success(let completion)), .loading(let source)):
         do {
             return .prepared(try source.audited(completion))
@@ -827,16 +802,26 @@ fileprivate static func _stateMachineCompletion(_ completion: Completion, on sna
                 }
             }
         }
-    case (.audit(.failure), .loading):
+    default:
         return .rejected(.invalidPhase)
-    case (.audit(.success), .loaded):
-        return .rejected(.invalidPhase)
-    case (.audit(.failure), .loaded):
-        return .rejected(.invalidPhase)
-    case (.audit(.success), .failed):
-        return .rejected(.invalidPhase)
-    case (.audit(.failure), .failed):
-        return .rejected(.invalidPhase)
+    }
+}
+
+/// A phase saved data can restore: one in which no operation is active, so no work resumes.
+public enum Restoration: Sendable {
+    case idle(Idle)
+    case loaded(Loaded)
+    case failed(Failed)
+}
+
+fileprivate static func _stateMachineRestored(_ saved: Int) throws(Problem) -> (model: Flow, scopes: [RuntimeScopeID]) {
+    switch try Flow.restore(saved) {
+    case .idle(let payload):
+        return (.idle(payload), [RuntimeScopeID(kind: 1)])
+    case .loaded(let payload):
+        return (.loaded(payload), [RuntimeScopeID(kind: 1)])
+    case .failed(let payload):
+        return (.failed(payload), [RuntimeScopeID(kind: 1)])
     }
 }
 
@@ -847,6 +832,17 @@ public typealias PendingCompletionID = RuntimePendingID
 
 /// Typed historical diagnostics for a retained completion.
 public typealias PendingCompletion = RuntimeDeliveryLedger<Flow, Effect, Completion, PreparationRejection>.Pending
+
+/// The obligations a managed owner still tracked when its shutdown deadline expired.
+public typealias ShutdownDiagnostics = RuntimeShutdownDiagnostics
+
+/// Whether shutdown joined every obligation or stopped waiting at its deadline.
+///
+/// A timeout leaves the owner closed and its outstanding work tracked.
+public enum ShutdownResult: Sendable {
+    case quiescent
+    case timedOut(ShutdownDiagnostics)
+}
 
 /// A closed completion delivery decision.
 public enum DeliveryResult: Sendable {
@@ -893,6 +889,11 @@ public struct Local: ~Copyable {
     public init(_ initial: Idle, configuration: LocalConfiguration = .default) {
         engine = _StateMachineEngine(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration)
     }
+    /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
+    public init(restoring saved: Int, configuration: LocalConfiguration = .default) throws(Problem) {
+        let restored = try _stateMachineRestored(saved)
+        engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration)
+    }
     /// Returns an immutable historical observation.
     public borrowing func snapshot() -> Snapshot {
         _stateMachineSnapshot(engine.snapshot)
@@ -920,17 +921,13 @@ public struct Local: ~Copyable {
     }
     /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
     public mutating func drainCommands(limit: Int) -> [CommandBatch] {
-        let batches = engine.drain(limit: limit).map {
+        engine.drain(limit: limit).map {
             _stateMachineBatch($0)
         }
-        _ = ledger.retryCapacity(in: &engine)
-        return batches
     }
     /// Records actual termination independently of cancellation and completion delivery.
     public mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
-        let result = engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
-        _ = ledger.retryCapacity(in: &engine)
-        switch result {
+        switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
         case .recorded:
             return .recorded
         case .duplicate:
@@ -976,6 +973,12 @@ public mutating func deliver(_ completion: FetchCompletion) -> DeliveryResult {
             let preparation = _stateMachineDeliveryPreparation(attempt)
             return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
         }
+    }
+    /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
+    ///
+    /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
+    public mutating func retryAdmission(id: PendingCompletionID) -> DeliveryResult {
+        _stateMachineFinish(ledger.retryAdmission(id, in: &engine))
     }
     /// Queries immutable first-outcome records without claiming preparation.
     public borrowing func pendingCompletions() -> [PendingCompletion] {
@@ -1028,6 +1031,40 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
         onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
         }) {
         host = Host(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], configuration: configuration,
+            policy: completionPolicy, driver: { raw in
+                switch raw.descriptor {
+                            case .fetch(let input):
+                                let work = FetchWork(input: input, authority: raw.ticket)
+                                switch await drivers.fetch(input) {
+                                case .success(let value):
+                    return .fetch(work.succeeded(value))
+                                case .failure(let value):
+                    return .fetch(work.failed(value))
+                                }
+                            case .audit(let input):
+                                let work = AuditWork(input: input, authority: raw.ticket)
+                                switch await drivers.audit(input) {
+                                case .success(let value):
+                    return .audit(work.succeeded(value))
+                                case .failure(let value):
+                    switch value {
+                    }
+                                }
+                            }
+            }, ticket: { (outcome: Completion) -> RuntimeTicket in
+                return outcome.authority
+            },
+            prepare: {
+                _stateMachineDeliveryPreparation($0)
+            }, reconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
+    public init(restoring saved: Int, drivers: MainActorDrivers, configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
+        }) throws(Problem) {
+        let restored = try _stateMachineRestored(saved)
+        host = Host(restored.model, scopes: restored.scopes, configuration: configuration,
             policy: completionPolicy, driver: { raw in
                 switch raw.descriptor {
                             case .fetch(let input):
@@ -1147,9 +1184,12 @@ public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
     public func shutdown() async {
         await host.shutdown()
     }
-    /// Closes and waits for settlement through an optional deadline.
-    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
-        await host.shutdownAndWait(deadline: deadline)
+    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
+    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        if await host.shutdownAndWait(deadline: deadline) {
+            return .quiescent
+        }
+        return .timedOut(host.diagnostics())
     }
     /// Actual workers whose joined termination has not yet been processed.
     public var runningCount: Int {
@@ -1207,6 +1247,39 @@ public final class Shared: Sendable {
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
         host = RuntimeSharedHost(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
+            policy: completionPolicy, driver: { raw in
+                switch raw.descriptor {
+                            case .fetch(let input):
+                                let work = FetchWork(input: input, authority: raw.ticket)
+                                switch await drivers.fetch(input) {
+                                case .success(let value):
+                    return .fetch(work.succeeded(value))
+                                case .failure(let value):
+                    return .fetch(work.failed(value))
+                                }
+                            case .audit(let input):
+                                let work = AuditWork(input: input, authority: raw.ticket)
+                                switch await drivers.audit(input) {
+                                case .success(let value):
+                    return .audit(work.succeeded(value))
+                                case .failure(let value):
+                    switch value {
+                    }
+                                }
+                            }
+            }, ticket: { (outcome: Completion) -> RuntimeTicket in
+                return outcome.authority
+            }, prepare: {
+                _stateMachineDeliveryPreparation($0)
+            }, reconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
+    public init(restoring saved: Int, drivers: Drivers, configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
+        }) throws(Problem) {
+        let restored = try _stateMachineRestored(saved)
+        host = RuntimeSharedHost(restored.model, scopes: restored.scopes, limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
             policy: completionPolicy, driver: { raw in
                 switch raw.descriptor {
                             case .fetch(let input):
@@ -1311,6 +1384,13 @@ public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
     public func shutdown() async {
         await host.shutdown()
     }
+    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked.
+    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        if await host.shutdownAndWait(deadline: deadline) {
+            return .quiescent
+        }
+        return .timedOut(host.diagnostics())
+    }
     /// Whether closure and all managed obligations have settled.
     public var isQuiescent: Bool {
         host.isQuiescent
@@ -1347,6 +1427,40 @@ public final class ActorHost: Sendable {
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
         host = Host(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], configuration: configuration,
+            policy: completionPolicy, driver: { raw in
+                switch raw.descriptor {
+                            case .fetch(let input):
+                                let work = FetchWork(input: input, authority: raw.ticket)
+                                switch await drivers.fetch(input) {
+                                case .success(let value):
+                    return .fetch(work.succeeded(value))
+                                case .failure(let value):
+                    return .fetch(work.failed(value))
+                                }
+                            case .audit(let input):
+                                let work = AuditWork(input: input, authority: raw.ticket)
+                                switch await drivers.audit(input) {
+                                case .success(let value):
+                    return .audit(work.succeeded(value))
+                                case .failure(let value):
+                    switch value {
+                    }
+                                }
+                            }
+            }, ticket: { (outcome: Completion) -> RuntimeTicket in
+                return outcome.authority
+            },
+            prepare: {
+                _stateMachineDeliveryPreparation($0)
+            }, reconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
+    public init(restoring saved: Int, drivers: Drivers, configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
+        }) throws(Problem) {
+        let restored = try _stateMachineRestored(saved)
+        host = Host(restored.model, scopes: restored.scopes, configuration: configuration,
             policy: completionPolicy, driver: { raw in
                 switch raw.descriptor {
                             case .fetch(let input):
@@ -1456,9 +1570,12 @@ public func deliver(_ completion: FetchCompletion) async -> DeliveryResult {
     public func shutdown() async {
         await host.shutdown()
     }
-    /// Closes and waits for settlement through an optional deadline.
-    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
-        await host.shutdownAndWait(deadline: deadline)
+    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
+    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        if await host.shutdownAndWait(deadline: deadline) {
+            return .quiescent
+        }
+        return .timedOut(await host.diagnostics())
     }
     /// Actual workers whose joined termination has not yet been processed.
     public var runningCount: Int {

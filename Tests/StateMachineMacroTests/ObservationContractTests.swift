@@ -292,7 +292,7 @@ struct ObservationContractTests {
             #expect(delivered.map(\.model) == [0, 20])
             #expect(delivered.last?.isClosed == true)
             #expect(zip(delivered, delivered.dropFirst()).allSatisfy { $0.revision < $1.revision })
-            #expect(owner.diagnostics().outstanding.isEmpty)
+            #expect(owner.diagnostics().outstandingExecutions.isEmpty)
             #expect(owner.isQuiescent)
         } catch {
             _ = owner.close()

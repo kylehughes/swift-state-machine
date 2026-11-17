@@ -289,7 +289,8 @@ nonisolated public struct RuntimeMainActorSnapshots<Element> {
         // actor, so no snapshot crosses an isolation boundary.
         func next() async -> Element? {
             while true {
-                if signal.load().value.cancelled { return nil }
+                // A consumer cancelled before it waits has installed no handler, so the task is asked too.
+                if signal.load().value.cancelled || Task.isCancelled { return nil }
                 if let element = pending {
                     pending = nil
                     return element

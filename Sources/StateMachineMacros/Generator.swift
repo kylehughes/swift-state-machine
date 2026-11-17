@@ -18,7 +18,7 @@ struct Generator {
     func members() throws -> [DeclSyntax] {
         var result = [witnesses(), effects(), owned()]
         if schema.mode != .ownedOnly {
-            result += [values(), operations(), preparation(), local(), managed(mainActor: true)]
+            result += [values(), operations(), preparation(), restoration(), local(), managed(mainActor: true)]
             if schema.mode == .shared { result += [shared(), managed(mainActor: false)] }
         }
         return result.flatMap { source in
@@ -143,15 +143,15 @@ struct Generator {
                 let argument = edge.payloadType == nil ? "" : ", input"
                 let failure = edge.failureType ?? "Never"
                 let call = "\(name).\(edge.name)(phase\(argument))"
-                let starts = edge.effectNamespace != nil
-                let effect = starts ? "Effect" : "Never"
+                // The edge's own effect type, so a caller switches over only what this edge can start.
+                let effect = authoredEffect(edge)
                 switch edge.shape {
                 case .advance:
                     return """
                         /// Consumes the predecessor and preserves it on authored rejection.
                         \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, \(effect), \(failure)> where Phase == \(before) {
                             switch \(call) {
-                            case .advanced(let next, let effects): return .advanced(Owned<\(after)>(next), effects: \(starts ? "effects.map(\\.effect)" : "effects"))
+                            case .advanced(let next, let effects): return .advanced(Owned<\(after)>(next), effects: effects)
                             case .rejected(let failure, let original): return .rejected(failure, Owned<\(before)>(original))
                             }
                         }
@@ -159,21 +159,19 @@ struct Generator {
                 case .change where edge.failureType != nil:
                     return """
                         /// Advances through the authored edge or returns the original predecessor.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, Effect, \(failure)> where Phase == \(before) {
+                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, \(effect), \(failure)> where Phase == \(before) {
                             do {
                                 let change = try \(call)
-                                let effects = change.effects.map(\\.effect)
-                                return .advanced(Owned<\(after)>(change.next), effects: effects)
+                                return .advanced(Owned<\(after)>(change.next), effects: change.effects)
                             } catch { return .rejected(error, self) }
                         }
                         """
                 case .change:
                     return """
                         /// Advances through the authored edge, preserving effect order.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Change<Owned<\(after)>, Effect> where Phase == \(before) {
+                        \(access)consuming func \(edge.name)(\(payload)) -> Change<Owned<\(after)>, \(effect)> where Phase == \(before) {
                             let change = \(call)
-                            let effects = change.effects.map(\\.effect)
-                            return Change(Owned<\(after)>(change.next), effects: effects)
+                            return Change(Owned<\(after)>(change.next), effects: change.effects)
                         }
                         """
                 case .destination where edge.failureType != nil:
@@ -211,6 +209,11 @@ struct Generator {
         let bound = schema.mode == .shared ? ": Sendable" : ""
         let cases = schema.phases.map { "case \($0.caseName)(Observed<\($0.typeName)>)" }.joined(separator: "\n")
         let recordCases = schema.phases.map { "case .\($0.caseName)(let value): return value.record" }
+            .joined(separator: "\n")
+        let descriptionCases = schema.phases
+            .map {
+                "case .\($0.caseName)(let value): return \"\($0.caseName), revision \\(value.record.revision)\\(value.record.isClosed ? \", closed\" : \"\")\""
+            }
             .joined(separator: "\n")
         let observationCases = schema.phases
             .map {
@@ -255,7 +258,7 @@ struct Generator {
             /// Admission rejection reasons in exact evaluation precedence.
             \(access)typealias CommitRejection = \(engine).Rejection
             /// An immutable historical payload with sealed complete-root provenance.
-            \(access)struct Observed<Phase\(bound)>\(sendable) {
+            \(access)struct Observed<Phase\(bound)>: \(schema.mode == .shared ? "Sendable, " : "")CustomStringConvertible {
                 fileprivate let payload: Phase
                 fileprivate let record: _StateMachineEngine.Snapshot
                 fileprivate let claim: RuntimeDeliveryClaim?
@@ -263,10 +266,12 @@ struct Generator {
                 \(access)var value: Phase { payload }
                 /// The owner-lifetime accepted revision.
                 \(access)var revision: UInt64 { record.revision }
+                /// The phase, revision, and closure of this observation, without its payload.
+                \(access)var description: String { "\\(Phase.self), revision \\(record.revision)\\(record.isClosed ? ", closed" : "")" }
                 \(methods)
             }
             /// A complete historical root observation with sealed provenance.
-            \(access)enum Snapshot: \(schema.mode == .shared ? "Sendable, " : "")StateMachineSnapshot {
+            \(access)enum Snapshot: \(schema.mode == .shared ? "Sendable, " : "")StateMachineSnapshot, CustomStringConvertible {
                 \(cases)
                 fileprivate var record: _StateMachineEngine.Snapshot { switch self { \(recordCases) } }
                 /// The accepted revision of this observation.
@@ -275,6 +280,8 @@ struct Generator {
                 \(access)var isClosed: Bool { record.isClosed }
                 /// Ordinary model data; constructing it confers no installation authority.
                 \(access)var model: \(name) { record.model }
+                /// The phase, revision, and closure of this observation, without its payload.
+                \(access)var description: String { switch self { \(descriptionCases) } }
             }
             fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
                 switch record.model { \(observationCases) }
@@ -299,12 +306,14 @@ struct Generator {
                 case rejected(PreparationRejection)
             }
             /// A historical receipt for an atomic acceptance.
-            \(access)struct Receipt: \(schema.mode == .shared ? "Sendable, " : "")StateMachineReceipt {
+            \(access)struct Receipt: \(schema.mode == .shared ? "Sendable, " : "")StateMachineReceipt, CustomStringConvertible {
                 /// The accepted historical observation.
                 \(access)let snapshot: Snapshot
                 fileprivate init(_ record: _StateMachineEngine.Snapshot) { snapshot = _stateMachineSnapshot(record) }
                 /// The owner-lifetime accepted revision.
                 \(access)var revision: UInt64 { snapshot.revision }
+                /// The accepted phase, revision, and closure, without the payload.
+                \(access)var description: String { snapshot.description }
             }
             /// Why `send` did not admit an input.
             \(access)enum SendRejection: Error {
@@ -507,9 +516,12 @@ struct Generator {
                     """
             }
             .joined(separator: "\n")
-        let inputCases = schema.phases
+        // Only pairs that have an edge get a case. One default covers the rest, which keeps the
+        // switch small and its exhaustiveness check trivial for a graph with many inputs.
+        let missing = "default: return .rejected(.invalidPhase)"
+        var inputCases = schema.phases
             .flatMap { p in
-                schema.inputs.map { input -> String in
+                schema.inputs.compactMap { input -> String? in
                     let trigger = Schema.Trigger(kind: .input, name: input.caseName)
                     let dispatch =
                         dispatch(
@@ -518,32 +530,28 @@ struct Generator {
                             source: "source",
                             payload: input.payloadType == nil ? nil : "input"
                         )
-                    guard let dispatch else {
-                        return "case (.\(input.caseName), .\(p.caseName)): return .rejected(.invalidPhase)"
-                    }
+                    guard let dispatch else { return nil }
                     return
                         "case (.\(input.caseName)\(input.payloadType == nil ? "" : "(let input)"), .\(p.caseName)(let source)): \(dispatch)"
                 }
             }
-            .joined(separator: "\n")
-        let completionCases = schema.operations
+        if inputCases.count < schema.phases.count * schema.inputs.count { inputCases.append(missing) }
+        var completionCases = schema.operations
             .flatMap { op in
                 schema.phases.flatMap { phase in
                     let p = phase.caseName
                     return [Schema.Trigger.Kind.success, .failure]
-                        .map { outcome -> String in
+                        .compactMap { outcome -> String? in
                             let kind = outcome.rawValue
                             let trigger = Schema.Trigger(kind: outcome, name: op.effect)
                             let dispatch =
                                 dispatch(from: p, trigger: trigger, source: "source", payload: "completion")
-                            guard let dispatch else {
-                                return "case (.\(op.effect)(.\(kind)), .\(p)): return .rejected(.invalidPhase)"
-                            }
+                            guard let dispatch else { return nil }
                             return "case (.\(op.effect)(.\(kind)(let completion)), .\(p)(let source)): \(dispatch)"
                         }
                 }
             }
-            .joined(separator: "\n")
+        if completionCases.count < schema.operations.count * schema.phases.count * 2 { completionCases.append(missing) }
         return """
             fileprivate static var _stateMachineEligibility: [[Int]] { [\(eligibility)] }
             fileprivate static func _stateMachinePrepare(
@@ -566,10 +574,10 @@ struct Generator {
             }
             /// Routes an input against a historical snapshot, rejecting a missing phase edge explicitly.
             \(access)static func prepare(_ input: Input, on snapshot: Snapshot) -> PreparationResult {
-                \(schema.inputs.isEmpty ? "" : "switch (input, snapshot) { \(inputCases) }")
+                \(schema.inputs.isEmpty ? "" : "switch (input, snapshot) { \(inputCases.joined(separator: "\n")) }")
             }
             fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
-                \(schema.operations.isEmpty ? "" : "switch (completion, snapshot) { \(completionCases) }")
+                \(schema.operations.isEmpty ? "" : "switch (completion, snapshot) { \(completionCases.joined(separator: "\n")) }")
             }
             """
     }
@@ -609,6 +617,52 @@ struct Generator {
             """
     }
 
+    /// The resting phases saved data may restore, and the validated root for each owner's `restoring:` initializer.
+    func restoration() -> String {
+        let cases = schema.restingPhases.map { "case \($0.caseName)(\($0.typeName))" }.joined(separator: "\n")
+        let declaration = """
+            /// A phase saved data can restore: one in which no operation is active, so no work resumes.
+            \(access)enum Restoration\(sendable) {
+                \(cases)
+            }
+            """
+        guard let validator = schema.restoration else { return declaration }
+        let roots = schema.restingPhases
+            .map {
+                "case .\($0.caseName)(let payload): return (.\($0.caseName)(payload), [\(scopes(in: $0.caseName))])"
+            }
+            .joined(separator: "\n")
+        return """
+            \(declaration)
+            fileprivate static func _stateMachineRestored(_ saved: \(validator.archiveType))\(restorationThrows) -> (model: \(name), scopes: [RuntimeScopeID]) {
+                switch \(validator.failureType == nil ? "" : "try ")\(name).\(validator.name)(saved) { \(roots) }
+            }
+            """
+    }
+    /// The typed throws clause of every `restoring:` initializer.
+    private var restorationThrows: String { schema.restoration?.failureType.map { " throws(\($0))" } ?? "" }
+    /// Validates saved data before an owner creates any authority.
+    private var restoredRoot: String {
+        "let restored = \(schema.restoration?.failureType == nil ? "" : "try ")_stateMachineRestored(saved)"
+    }
+    /// The documentation of every `restoring:` initializer.
+    private var restoringDocumentation: String {
+        "/// Creates fresh authority at revision zero in the phase `\(schema.restoration?.name ?? "")` validates from saved data."
+    }
+
+    /// The `Local` initializer that restores saved data, preceded by a line break, when the schema declares one.
+    private var restoringLocal: String {
+        guard let validator = schema.restoration else { return "" }
+        return """
+
+            \(restoringDocumentation)
+            \(access)init(restoring saved: \(validator.archiveType), configuration: LocalConfiguration = .default)\(restorationThrows) {
+                \(restoredRoot)
+                engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration)
+            }
+            """
+    }
+
     var ledger: String { "RuntimeDeliveryLedger<\(name), Effect, Completion, PreparationRejection>" }
     func local() -> String {
         """
@@ -617,6 +671,15 @@ struct Generator {
         \(access)typealias PendingCompletionID = RuntimePendingID
         /// Typed historical diagnostics for a retained completion.
         \(access)typealias PendingCompletion = \(ledger).Pending
+        /// The obligations a managed owner still tracked when its shutdown deadline expired.
+        \(access)typealias ShutdownDiagnostics = RuntimeShutdownDiagnostics
+        /// Whether shutdown joined every obligation or stopped waiting at its deadline.
+        ///
+        /// A timeout leaves the owner closed and its outstanding work tracked.
+        \(access)enum ShutdownResult: Sendable {
+            case quiescent
+            case timedOut(ShutdownDiagnostics)
+        }
         /// A closed completion delivery decision.
         \(access)enum DeliveryResult\(sendable) {
             case committed(Receipt)
@@ -654,7 +717,7 @@ struct Generator {
             /// Creates fresh authority only in the declared initial phase.
             \(access)init(_ initial: \(initialType), configuration: LocalConfiguration = .default) {
                 engine = _StateMachineEngine(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration)
-            }
+            }\(restoringLocal)
             /// Returns an immutable historical observation.
             \(access)borrowing func snapshot() -> Snapshot { _stateMachineSnapshot(engine.snapshot) }
             /// Consumes and atomically accepts or rejects a complete candidate.
@@ -677,15 +740,11 @@ struct Generator {
             }
             /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
             \(access)mutating func drainCommands(limit: Int) -> [CommandBatch] {
-                let batches = engine.drain(limit: limit).map { _stateMachineBatch($0) }
-                _ = ledger.retryCapacity(in: &engine)
-                return batches
+                engine.drain(limit: limit).map { _stateMachineBatch($0) }
             }
             /// Records actual termination independently of cancellation and completion delivery.
             \(access)mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
-                let result = engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
-                _ = ledger.retryCapacity(in: &engine)
-                switch result {
+                switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
                 case .recorded: return .recorded
                 case .duplicate: return .duplicate
                 case .foreignOwner: return .foreignOwner
@@ -714,6 +773,12 @@ struct Generator {
                     let preparation = _stateMachineDeliveryPreparation(attempt)
                     return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
                 }
+            }
+            /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
+            ///
+            /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
+            \(access)mutating func retryAdmission(id: PendingCompletionID) -> DeliveryResult {
+                _stateMachineFinish(ledger.retryAdmission(id, in: &engine))
             }
             /// Queries immutable first-outcome records without claiming preparation.
             \(access)borrowing func pendingCompletions() -> [PendingCompletion] { ledger.pending }
@@ -781,6 +846,27 @@ struct Generator {
             ]
             .joined(separator: "\n")
             : ""
+        func construction(model: String, scopes: String) -> String {
+            """
+            host = Host(\(model), scopes: \(scopes), configuration: configuration,
+                        policy: completionPolicy, driver: { raw in
+                            switch raw.descriptor { \(managedExecutions) }
+                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") },
+                        prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
+            """
+        }
+        let restoring = schema.restoration.map { validator in
+            """
+
+                \(restoringDocumentation)
+                \(access)init(restoring saved: \(validator.archiveType), drivers: \(drivers)\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
+                    completionPolicy: CompletionPolicy = .manualOnConflict,
+                    onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in })\(restorationThrows) {
+                    \(restoredRoot)
+                    \(construction(model: "restored.model", scopes: "restored.scopes"))
+                }
+            """
+        }
         return """
             \(driverDeclaration)
             /// A sealed sole-writer \(mainActor ? "MainActor" : "native actor") owner with managed execution.
@@ -788,15 +874,11 @@ struct Generator {
                 private typealias Host = \(runtime)<\(name), Effect, Completion, PreparationRejection>
                 private let host: Host
                 /// Creates fresh authority and immutable execution selections.
-                \(access)init(_ initial: \(initialType), drivers: \(drivers), configuration: Configuration = .default,
+                \(access)init(_ initial: \(initialType), drivers: \(drivers)\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
                     completionPolicy: CompletionPolicy = .manualOnConflict,
                     onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in }) {
-                    host = Host(.\(schema.initial)(initial), scopes: [\(initialScopes)], configuration: configuration,
-                        policy: completionPolicy, driver: { raw in
-                            switch raw.descriptor { \(managedExecutions) }
-                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") },
-                        prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
-                }
+                    \(construction(model: ".\(schema.initial)(initial)", scopes: "[\(initialScopes)]"))
+                }\(restoring ?? "")
                 /// Captures a complete historical observation.
                 \(access)func snapshot()\(asynchronous) -> Snapshot { _stateMachineSnapshot(\(awaiting)host.snapshot()) }
                 /// Routes, prepares and admits one input in a single isolated turn without suspension.
@@ -846,8 +928,11 @@ struct Generator {
                 \(access)func flush(through receipt: Receipt) async -> Bool { await host.flush(through: receipt.snapshot.record) }
                 /// Closes and joins actual execution and retained delivery obligations.
                 \(access)func shutdown() async { await host.shutdown() }
-                /// Closes and waits for settlement through an optional deadline.
-                \(access)func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool { await host.shutdownAndWait(deadline: deadline) }
+                /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
+                \(access)func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+                    if await host.shutdownAndWait(deadline: deadline) { return .quiescent }
+                    return .timedOut(\(awaiting)host.diagnostics())
+                }
                 /// Actual workers whose joined termination has not yet been processed.
                 \(access)var runningCount: Int { \(mainActor ? "host.runningCount" : "get async { await host.runningCount }") }
                 /// Live observer registrations.
@@ -882,6 +967,26 @@ struct Generator {
             }
             .joined(separator: ", ")
         let assignments = schema.operations.map { "self.\($0.effect) = \($0.effect)" }.joined(separator: "\n")
+        func construction(model: String, scopes: String) -> String {
+            """
+            host = RuntimeSharedHost(\(model), scopes: \(scopes), limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
+                        policy: completionPolicy, driver: { raw in
+                            switch raw.descriptor { \(managedExecutions) }
+                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") }, prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
+            """
+        }
+        let restoring = schema.restoration.map { validator in
+            """
+
+                \(restoringDocumentation)
+                \(access)init(restoring saved: \(validator.archiveType), drivers: Drivers\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
+                    completionPolicy: CompletionPolicy = .manualOnConflict,
+                    onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in })\(restorationThrows) {
+                    \(restoredRoot)
+                    \(construction(model: "restored.model", scopes: "restored.scopes"))
+                }
+            """
+        }
         return """
             /// Immutable typed execution selection for one managed owner's lifetime.
             \(access)struct Drivers: Sendable {
@@ -893,14 +998,11 @@ struct Generator {
             \(access)final class Shared: Sendable {
                 private let host: RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>
                 /// Creates fresh initial authority and retains the driver selection immutably.
-                \(access)init(_ initial: \(initialType), drivers: Drivers, configuration: Configuration = .default,
+                \(access)init(_ initial: \(initialType), drivers: Drivers\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
                     completionPolicy: CompletionPolicy = .manualOnConflict,
                     onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in }) {
-                    host = RuntimeSharedHost(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
-                        policy: completionPolicy, driver: { raw in
-                            switch raw.descriptor { \(managedExecutions) }
-                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") }, prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
-                }
+                    \(construction(model: ".\(schema.initial)(initial)", scopes: "[\(initialScopes)]"))
+                }\(restoring ?? "")
                 /// Captures a coherent historical observation.
                 \(access)func snapshot() -> Snapshot { _stateMachineSnapshot(host.snapshot()) }
                 /// Registers a serial capacity-one latest-value observation callback.
@@ -946,6 +1048,11 @@ struct Generator {
                 \(access)func flush(through receipt: Receipt) async -> Bool { await host.flush(through: receipt.snapshot.record) }
                 /// Closes and waits for actual execution termination and retained obligation settlement.
                 \(access)func shutdown() async { await host.shutdown() }
+                /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked.
+                \(access)func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+                    if await host.shutdownAndWait(deadline: deadline) { return .quiescent }
+                    return .timedOut(host.diagnostics())
+                }
                 /// Whether closure and all managed obligations have settled.
                 \(access)var isQuiescent: Bool { host.isQuiescent }
                 private static func project(_ result: RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>.Delivery) -> DeliveryResult {
@@ -979,11 +1086,14 @@ struct Generator {
     }
 
     /// The initially active scope identifiers in declaration order.
-    private var initialScopes: String {
+    private var initialScopes: String { scopes(in: schema.initial) }
+
+    /// The scope identifiers a fresh owner activates in a phase, matching `_stateMachineEligibility`.
+    private func scopes(in phase: String) -> String {
         schema.scopes.enumerated()
             .compactMap { i, scope -> String? in
                 let operation = schema.operations.first { $0.scope == scope }
-                guard operation == nil || operation!.activeIn.contains(schema.initial) else { return nil }
+                guard operation == nil || operation!.activeIn.contains(phase) else { return nil }
                 return "RuntimeScopeID(kind: \(i))"
             }
             .joined(separator: ", ")
