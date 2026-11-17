@@ -12,7 +12,9 @@ can preserve an active fetch, while authentication invalidation revokes the
 fetch's dependency authority. A late result cannot regain that authority merely
 because the visible request looks the same.
 
-``GeneratedProfile`` declares that graph with the schema macro. ``ProfileEditor``
+``GeneratedProfile`` declares that graph with the schema macro, including a
+`@Restoration` function that validates a saved ``GeneratedProfile/Archive`` into a
+resting phase and rejects an interrupted load. ``ProfileEditor``
 wraps a `StateMachinePresentation` over its `MainActor` host for synchronous
 screen input and managed results. The presentation observes complete snapshots; disposal ends observation
 and the screen's work authority, while shutdown also waits for driver termination.
@@ -43,6 +45,8 @@ those values within their permitted actor while preserving historical data.
 ### Validated persistence
 
 - <doc:Persistence>
+- ``GeneratedProfile/Archive``
+- ``GeneratedProfile/RestoreRejection``
 - ``ReferenceProfile/Archive``
 - ``ReferenceProfile/RestoreRejection``
 

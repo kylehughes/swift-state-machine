@@ -23,7 +23,11 @@ domain types through this common host.
 delivery ledger directly on their actor. Their synchronous input handling can
 read, prepare, and admit in one isolated turn. They release stored-property
 access before invoking domain functions or observation callbacks, and recheck
-the captured revision if synchronous reentry changed it. The `MainActor` host
+the captured revision if synchronous reentry changed it. For each accepted
+batch they launch its work and settle `flush(through:)` before they run that
+batch's observer callbacks, so a slow observer cannot hold work back. Releasing
+a host without closing it finishes its retained registrations without a closed
+snapshot. The `MainActor` host
 can retain non-`Sendable` value data within that actor; the native actor host
 requires `Sendable` data at its crossing boundaries.
 

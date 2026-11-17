@@ -22,10 +22,101 @@ dependencies. The same generated workflow runs in services, actors, background
 work, command-line tools, and server code, or drives a screen through the
 optional `StateMachineUI` module.
 
+## Install
+
+Add the package with Swift Package Manager:
+
+```swift
+.package(url: "https://github.com/kylehughes/swift-state-machine.git", from: "1.0.0")
+```
+
+Add the core and schema products to a target that declares a graph:
+
+```swift
+.product(name: "StateMachine", package: "swift-state-machine"),
+.product(name: "StateMachineSchema", package: "swift-state-machine")
+```
+
+Add `StateMachineUI` for SwiftUI presentation and background snapshot ingress.
+Add `StateMachineExamples` to use the bundled profile editor, persistence, network,
+and resource workflows.
+
+Build with Swift 6.4 in Swift 6 language mode. The selected Apple toolchain is
+Xcode 27.1. The package declares these deployment targets:
+
+| Platform | Deployment target |
+| --- | --- |
+| iOS | 16.0 |
+| Mac Catalyst | 16.0 |
+| macOS | 13.0 |
+| tvOS | 16.0 |
+| watchOS | 9.0 |
+| visionOS | 1.0 |
+
+See the [API documentation](https://kylehughes.github.io/swift-state-machine/documentation/)
+for ownership, raw runtime construction, and the example domains.
+
 ## Quick start
 
-This example declares a search workflow with one operation and runs it in a
-generated actor host:
+A schema is a `nonisolated enum` that declares a graph of phases and the edges
+between them. This graph has one legal transition, from a draft to an approved
+value:
+
+```swift
+import StateMachine
+import StateMachineSchema
+
+@StateMachine(mode: .shared)
+nonisolated enum Approval: Sendable {
+    struct Draft: Sendable { let title: String }
+    struct Approved: Sendable { let title: String }
+
+    @Initial case draft(Draft)
+    case approved(Approved)
+
+    enum Input: Sendable { case approve }
+
+    @Transition(on: Input.approve)
+    fileprivate static func approve(_ source: Draft) -> Approved {
+        Approved(title: source.title)
+    }
+}
+
+func approveDraft() {
+    let approved = Approval.owned(.init(title: "Launch checklist")).approve()
+    print(approved.withValue { $0.title })
+}
+```
+
+`Approval.owned(_:)` creates an owner in the initial phase. `approve` takes a
+`Draft` and returns an `Approved`, so the macro derives an edge from the `draft`
+phase to the `approved` phase, with `Input.approve` as its trigger. The generated
+`Owned<Draft>` has `approve`, and `Owned<Approved>` does not, so calling the edge
+twice or in the wrong phase does not compile. Calling it consumes the draft
+owner. `Draft` and `Approved` are ordinary structs: constructing one gives no
+one authority to change an owner.
+
+To keep the state where other code can read and observe it, host the same graph.
+A graph with no operations needs no drivers:
+
+```swift
+@MainActor
+func approveInHost() throws {
+    let host = Approval.MainActorHost(.init(title: "Launch checklist"))
+    let receipt = try host.send(.approve)
+    print(receipt)
+}
+```
+
+`send` routes `Input.approve` to the edge, admits it, and returns a receipt.
+Printing a receipt shows the phase and revision, here `approved, revision 1`,
+and never the payload.
+
+## Add asynchronous work
+
+An operation is work that the host runs and whose result returns through a
+completion edge. This example declares a search workflow with one operation and
+runs it in a generated actor host:
 
 ```swift
 import StateMachine
@@ -51,12 +142,12 @@ nonisolated enum Lookup: Sendable {
         typealias Failure = Never
     }
 
-    @Transition(on: Input.search, invalidates: [Scope.search], starts: [Fetch.self])
+    @Transition(on: Input.search, starts: [Fetch.self])
     fileprivate static func begin(_ source: Idle, _ query: String) -> Change<Searching, Effect.Begin> {
         Change(Searching(query: query), effects: [.fetch(query)])
     }
 
-    @Transition(on: Input.cancel, invalidates: [Scope.search])
+    @Transition(on: Input.cancel)
     fileprivate static func cancel(_ source: Searching) -> Idle { Idle() }
 
     @Transition(onSuccess: Fetch.self)
@@ -96,7 +187,8 @@ enforces it:
   compile.
 - `Fetch` is active in `Searching`, so the macro requires a success edge from
   `Searching`. Omitting `received` is a compile error.
-- `cancel` invalidates `Scope.search`. If the driver returns after that, its
+- `cancel` leaves `Searching`, the only phase where `Fetch` is active, so the
+  running fetch loses its authority. If the driver returns after that, its
   completion is stale and cannot move the machine to `found`.
 - Sending `.cancel` while idle fails with `.preparation(.invalidPhase)`, and the
   snapshot stays unchanged.
@@ -106,7 +198,7 @@ enforces it:
 The [schema guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/declaringagraph)
 covers typed rejection, failure edges, routers, and the supported syntax.
 
-### Choose an owner
+## Choose an owner
 
 Each schema generates the owners its mode supports. `ActorHost`, `Shared`, and
 `MainActorHost` run operation drivers and manage completion delivery; `Local`
@@ -137,6 +229,50 @@ The `StateMachineExamples` module holds the examples this guide refers to. Its
 returns the original owner, and success returns the next owner and every effect
 value in order for the caller to handle. Dropping an owner is legal; ownership
 does not require completing the workflow.
+
+### Send an input or commit an edge
+
+`send` makes exactly one attempt. It routes the input against whatever the owner
+currently holds, prepares the change from the current snapshot, and commits it.
+Acceptance atomically installs the complete model, operation authority, and
+ordered command batch. `Shared` is the only owner where a competing write can
+make the attempt fail with `.commit(.conflict)`; the rejection leaves all three
+unchanged. Use `send` for an event that should act on the current state: a timer,
+a push notification, or a tap that means "cancel the current search".
+
+Each case of a snapshot holds an `Observed<Phase>`. Its methods are the edges
+whose source is that phase, and each returns a `Prepared` proposal. An owner's
+`commit(_:)` admits the proposal only if that observation is still the owner's
+current revision, and returns a `CommitResult`: `.committed(receipt)` or
+`.rejected(reason, current:)`. The result is not discardable. Use this path when
+the action belongs to the exact observation the user saw, and handle
+`.conflict`, which any revision that landed in between causes, even an unrelated
+one:
+
+```swift
+@MainActor
+func cancel(_ searching: Lookup.Observed<Lookup.Searching>, on host: Lookup.MainActorHost) {
+    do {
+        switch host.commit(try searching.cancel()) {
+        case .committed:
+            print("Cancelled")
+        case .rejected(.conflict, let current):
+            print("The search changed first: \(current)")
+        case .rejected(let reason, _):
+            print("Cancel was not accepted: \(reason)")
+        }
+    } catch {
+        print("Cancel could not be prepared: \(error)")
+    }
+}
+```
+
+The compiler checks the call. If an edge is removed or moves to another phase, a
+view that calls it stops compiling, whereas `send(.cancel)` routes at run time
+and fails with `.preparation(.invalidPhase)`. An edge prepared this way skips the
+schema's routers, so a rule that every caller must obey belongs in the edge or in
+a validated argument type. `commit(_:)` is `async` on `ActorHost`, `mutating` on
+`Local`, and also available on the presentations in `StateMachineUI`.
 
 ## Manage shared state and asynchronous work
 
@@ -203,14 +339,6 @@ iterator ends immediately. The sequence does not keep the owner alive. If the
 owner is released without closing, the sequence ends and no element has
 `isClosed == true`.
 
-`send` makes exactly one attempt. It prepares the change from the current
-snapshot and commits it, and acceptance atomically installs the complete model,
-operation authority, and ordered command batch. `Shared` is the only owner where
-a competing write can make the attempt fail with `.commit(.conflict)`; the
-rejection leaves all three unchanged. The explicit two-step path is also
-available: each case of a snapshot holds an `Observed<Phase>`, whose edge
-methods return a `Prepared` proposal, and `commit(_:)` returns a `CommitResult`.
-
 ### Handle conflicts and capacity explicitly
 
 Managed completion delivery defaults to `manualOnConflict`. A conflict can occur
@@ -239,14 +367,19 @@ a snapshot sequence ends the sequence and removes its registration; releasing th
 sequence does the same. An already claimed callback may finish. Call
 `machine.close()` to end admission and revoke work authority;
 cancellation remains cooperative. `shutdown()` also waits for actual task
-termination and delivery cleanup. On `MainActorHost` and `ActorHost`,
-`shutdownAndWait(deadline:)` stops waiting at its deadline and reports whether
-the owner settled; the closed owner keeps tracking outstanding work.
+termination and delivery cleanup. On `MainActorHost`, `ActorHost`, and `Shared`,
+`shutdownAndWait(deadline:)` returns `.quiescent` once the owner settled, or
+`.timedOut` with `ShutdownDiagnostics` when the deadline passes first; the closed
+owner keeps tracking the outstanding work the diagnostics describe. Releasing
+an owner without closing it finishes its retained registrations without a closed
+snapshot.
 
 `flush(through:)` waits for snapshot offers and effect launch or skip decisions
 through an accepted receipt. It does not wait for network completion or observer
-callbacks. Retained snapshots and receipts describe history, not reservations
-of the current state.
+callbacks. On `ActorHost` and `MainActorHost`, accepted work is launched and
+`flush(through:)` is satisfied before that batch's observer callbacks run, so a
+slow observer cannot hold work back. Retained snapshots and receipts describe
+history, not reservations of the current state.
 
 ## Run effects yourself with `Local` and `Owned`
 
@@ -259,9 +392,15 @@ records that the execution actually ended. `DeliveryResult` includes `.stale`
 and `.foreignOwner`; `AcknowledgmentResult` is `.recorded`, `.duplicate`, or
 `.foreignOwner`.
 
+Draining and acknowledging never change the model. A completion delivered while
+the queue is full is retained as `.pending(id, .waitingForCapacity)`; after
+draining frees capacity, `retryAdmission(id:)` admits the prepared candidate
+without preparing it again.
+
 `Owned<Phase>` carries no runtime at all. An edge that starts nothing returns
 the next `Owned` directly. An edge that starts operations returns a `Change`
-with the ordered, inert effects for the caller to run. The
+with that edge's own effect type and its ordered, inert effects for the caller
+to run; `.effect` on each value widens it to the schema-wide `Effect`. The
 [schema guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/declaringagraph)
 has an example of each.
 
@@ -270,8 +409,8 @@ has an example of each.
 The optional `StateMachineUI` module adapts owners for SwiftUI and UIKit.
 `ObservableStateMachinePresentation` wraps a generated `MainActorHost` as an
 `@Observable` model and exposes `snapshot`, `isObserving`, `send(_:)`,
-`close()`, `stopObserving()`, and `host`. It requires iOS 17, macOS 14,
-tvOS 17, watchOS 10, or visionOS 1.
+`commit(_:)`, `close()`, `stopObserving()`, and `host`. It requires iOS 17,
+macOS 14, tvOS 17, watchOS 10, or visionOS 1.
 
 This example presents the `Lookup` workflow from earlier in SwiftUI:
 
@@ -321,7 +460,8 @@ The `ProfileEditor` example wraps a `StateMachinePresentation` over a generated
 same profile graph as the other examples. Disposing the editor removes
 observation and closes its work authority. The
 [UI guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineui/presentingstate)
-shows a SwiftUI screen and explains the separate lifetime of a running driver.
+shows a SwiftUI screen, commits an edge of the snapshot that the view rendered,
+and explains the separate lifetime of a running driver.
 
 To show a shared or actor owner on `MainActor`, create an
 `ObservableSnapshotPresentation` from its current snapshot, as in
@@ -469,49 +609,71 @@ Shared payloads need semantic value behavior as well as `Sendable`. Actor
 confinement does not make a mutable reference into an independent historical
 value. Use immutable data, value storage, or detached projections.
 
+### Restore saved data
+
 Restoration accepts validated data and creates fresh authority; live tickets,
-tasks, and prepared transitions are not persistence formats. `ReferenceProfile`,
-the handwritten form of the profile graph, has a versioned `Archive` that
-validates decoded data, migrates its legacy format, and rejects interrupted
-loading. See
+tasks, and prepared transitions are not persistence formats. A `shared` or
+`isolated` schema declares the validation once, with a function marked
+`@Restoration`, and every owner except `Owned` gains an `init(restoring:)` that
+mirrors its ordinary initializer. `GeneratedProfile` restores a saved `Archive`
+and rejects a saved interrupted load:
+
+```swift
+let profile = Profile(userID: user, name: "Taylor")
+let restored = try GeneratedProfile.Local(restoring: .loaded(profile))
+print(restored.snapshot())
+
+do {
+    _ = try GeneratedProfile.Local(restoring: .loading(request))
+} catch {
+    print("Not restored: \(error)")
+}
+```
+
+The restored owner starts at revision zero with fresh authority. `Restoration`
+has one case for each phase in which no operation is active, so a validator
+cannot return a phase with running work, and naming one does not compile. The
+validator either rejects that saved shape, as `GeneratedProfile` does for
+`.loading`, or maps it to a resting phase, and the caller sends an input
+afterward to start fresh work. Forking is restoring a saved copy of
+`snapshot.model`. The
+[schema guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/declaringagraph)
+declares a validator and forks an owner.
+
+`ReferenceProfile`, the handwritten form of the profile graph, is the fuller
+example. Its versioned `Archive` validates decoded data, migrates its legacy
+format, and rejects interrupted loading. See
 [Save and restore profile data](https://kylehughes.github.io/swift-state-machine/documentation/statemachineexamples/persistence)
-for the format and the distinct restore, reset, and fork lifetimes.
+for both forms and the distinct restore, reset, and fork lifetimes.
 
-## Install and build
+## Test a graph
 
-Add the package with Swift Package Manager:
-
-```swift
-.package(url: "https://github.com/kylehughes/swift-state-machine.git", from: "1.0.0")
-```
-
-Add the core and schema products to a target that declares a graph:
+Test an edge as a function, a rule through `Local`, and hosted behavior through
+stub drivers. `Owned` runs an edge with no runtime, so its tests are plain
+assertions:
 
 ```swift
-.product(name: "StateMachine", package: "swift-state-machine"),
-.product(name: "StateMachineSchema", package: "swift-state-machine")
+import Testing
+
+@testable import Approvals
+
+@Test func approvingADraftReachesApproved() {
+    let approved = Approval.owned(.init(title: "Launch checklist")).approve()
+
+    #expect(approved.withValue { $0.title } == "Launch checklist")
+}
 ```
 
-Add `StateMachineUI` for SwiftUI presentation and background snapshot ingress.
-Add `StateMachineExamples` to use the bundled profile editor, persistence, network,
-and resource workflows.
+`Local` runs routing, completion delivery, and cancellation synchronously, so a
+test drains the commands, delivers a result, and asserts that a late result is
+stale without waiting for a task. A hosted test holds each stub driver at a gate
+and asserts on receipts or on the snapshot sequence. The
+[testing guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/testingagraph)
+shows each of these, how to compare models and effects, how to test a
+presentation against a test double, and why a call into the wrong phase never
+reaches a test.
 
-Build with Swift 6.4 in Swift 6 language mode. The selected Apple toolchain is
-Xcode 27.1. The package declares these deployment targets:
-
-| Platform | Deployment target |
-| --- | --- |
-| iOS | 16.0 |
-| Mac Catalyst | 16.0 |
-| macOS | 13.0 |
-| tvOS | 16.0 |
-| watchOS | 9.0 |
-| visionOS | 1.0 |
-
-See the [API documentation](https://kylehughes.github.io/swift-state-machine/documentation/)
-for ownership, raw runtime construction, and the example domains.
-
-### Maintain the package
+## Maintain the package
 
 Run the test suites, external compiler fixtures, and formatter:
 

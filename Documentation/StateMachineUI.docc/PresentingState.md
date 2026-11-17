@@ -6,7 +6,8 @@ Keep one complete snapshot observable and give its owner an explicit lifetime.
 `@Observable` model. It requires iOS 17, macOS 14, tvOS 17, watchOS 10, or
 visionOS 1. Pass the host to its initializer, read
 ``ObservableStateMachinePresentation/snapshot`` from a view, and call
-``ObservableStateMachinePresentation/send(_:)`` from actions:
+``ObservableStateMachinePresentation/send(_:)`` from actions that act on the
+current state:
 
 ```swift
 import StateMachine
@@ -98,6 +99,66 @@ the account can revoke operation authority and make a late response stale.
 no edge from the current phase or the edge declined it. The `.commit` case means
 the owner refused the prepared change, for example because it is closed.
 
+## Act on the snapshot a view rendered
+
+`send(_:)` routes an input against whatever the host currently holds. Use it for an
+event that should act on the current state: a push notification, a timer, or a
+tap that means "cancel the current load".
+
+Each case of the snapshot holds an `Observed<Phase>`, whose edge methods exist
+only for edges whose source is that phase. Calling one prepares a proposal.
+`commit(_:)` on the presentation admits the proposal only if that observation is
+still the owner's current revision, shows the resulting snapshot before it
+returns, as `send(_:)` does, and returns a `CommitResult`: `.committed(receipt)`
+or `.rejected(reason, current:)`. The result is not discardable.
+
+Use `commit` when the action belongs to the exact observation the user saw, and
+handle `.conflict`, which an unrelated intervening revision causes. The call is
+compile-checked: if an edge is removed or moved to another phase, the view that
+calls it stops compiling, whereas `send(.input)` routes at run time and fails
+with `.preparation(.invalidPhase)`.
+
+```swift
+@MainActor
+struct ProfileActions: View {
+    let presentation: ObservableStateMachinePresentation<GeneratedProfile.MainActorHost>
+    @State private var notice: String?
+
+    var body: some View {
+        VStack {
+            switch presentation.snapshot {
+            case .loading(let loading):
+                Button("Cancel", role: .cancel) { commit { try loading.cancel() } }
+            case .failed(let failed):
+                Button("Retry") { commit { try failed.retry() } }
+            case .idle, .loaded:
+                EmptyView()
+            }
+            if let notice { Text(notice) }
+        }
+    }
+
+    private func commit(_ prepare: () throws -> GeneratedProfile.Prepared) {
+        do {
+            switch presentation.commit(try prepare()) {
+            case .committed:
+                notice = nil
+            case .rejected(.conflict, _):
+                notice = "The profile changed. Try again."
+            case .rejected(let reason, _):
+                notice = "The change was not accepted: \(reason)"
+            }
+        } catch {
+            notice = "The change is not available: \(error)"
+        }
+    }
+}
+```
+
+Each button prepares its edge from the observation it was rendered from. If
+another revision lands before a tap is handled, the commit is rejected with
+`.conflict`, and the view shows the notice instead of acting on newer state.
+
 Observe the complete `snapshot` rather than maintaining independently published
 phase fields. The presentation applies only strictly increasing revisions, so it
 can show an immediate receipt before asynchronous observation reaches the same
@@ -120,6 +181,10 @@ host's `shutdown()` through ``StateMachinePresentation/host`` when the
 surrounding task needs that termination and delivery cleanup to finish. A driver
 that never returns can prevent the wait from finishing; `close()` itself is
 synchronous.
+
+Releasing an owner without closing it publishes no closed snapshot. It finishes
+the registrations the owner retained, so no snapshot has `isClosed == true`;
+closing is the only path that publishes one.
 
 ## Drive a UIKit view
 

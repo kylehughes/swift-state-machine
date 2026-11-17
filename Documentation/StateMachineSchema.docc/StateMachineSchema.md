@@ -8,7 +8,8 @@ observations, proposals, and work values. Authored transition functions remain o
 functions, so the compiler checks their payload types, ownership, errors, and
 isolation.
 
-Start with <doc:DeclaringAGraph>. Import `StateMachine` for `Change`, `Advance`,
+Start with <doc:DeclaringAGraph>, and read <doc:TestingAGraph> to test a graph
+once it is declared. Import `StateMachine` for `Change`, `Advance`,
 and the generated owners' runtime types, and `StateMachineSchema` for the
 declaration macros. Domain code decides whether
 a transition is valid and which inert effects it describes. The runtime decides
@@ -21,6 +22,7 @@ whether a hosted proposal still has authority to commit.
 - <doc:DeclaringAGraph>
 - ``StateMachine(mode:)``
 - ``Initial()``
+- ``Restoration()``
 - ``StateMachineMode``
 
 ### Describe edges and operations
@@ -33,3 +35,7 @@ whether a hosted proposal still has authority to commit.
 - ``Route(onSuccess:)``
 - ``Route(onFailure:)``
 - ``StateMachineAdmission``
+
+### Test a graph
+
+- <doc:TestingAGraph>

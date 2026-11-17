@@ -25,6 +25,12 @@ host, storage, and provenance private.
 while confining the engine and ledger to one actor. The `MainActor` host also
 supports non-`Sendable` copyable value data within that actor.
 
+A host of your own, such as a test double, conforms to
+``MainActorStateMachineHost``. It returns each observer registration as a
+``RuntimeMainActorSubscription`` that it creates with
+``RuntimeMainActorSubscription/init(onCancel:)``. The action runs exactly once,
+whether the registration is cancelled or released.
+
 ## Topics
 
 ### Ownership and preparation
@@ -71,3 +77,4 @@ supports non-`Sendable` copyable value data within that actor.
 - ``RuntimePendingID``
 - ``RuntimePendingStatus``
 - ``RuntimeSubscription``
+- ``RuntimeMainActorSubscription``

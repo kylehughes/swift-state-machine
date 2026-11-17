@@ -56,13 +56,21 @@ The plain `Draft` and `Approved` values remain ordinary data. Constructing an
 | An edge that starts nothing | `@Transition(on: Input.approve)` on a function returning the destination payload |
 | An edge that starts operations | `@Transition(on: Input.begin, starts: [Fetch.self])` on a function returning `Change<Destination, Effect.Begin>` |
 | A scope | A case of the nested `enum Scope`, referenced as `Scope.search` |
-| Authority an edge revokes | `invalidates: [Scope.search]` |
+| Authority an edge revokes without leaving the active phases | `invalidates: [Scope.search]` |
 | An operation | `@Operation(scope:requires:activeIn:admission:)` on an enum with `Input`, `Output`, and `Failure` aliases |
 | A completion edge | `@Transition(onSuccess: Fetch.self)` or `@Transition(onFailure: Fetch.self)` |
 | Several edges for one source and trigger | `@Route(on:)`, `@Route(onSuccess:)`, or `@Route(onFailure:)` on a selector function |
+| Validation of saved data | `@Restoration` on one function returning `Restoration` |
 
-Write each reference exactly as shown. The macro reads the spelling, so it
-rejects qualified and computed forms.
+Write each reference in an attribute exactly as shown: `Input.approve`,
+`Scope.search`, `Fetch.self`, and `.shared`. The macro reads the spelling, so it
+rejects qualified forms such as `Lookup.Input.approve`, implicit members such as
+`.approve`, and computed expressions. Three spellings outside the attribute
+arguments are equivalent to the short forms. An attribute name may carry its
+module, as in `@StateMachineSchema.Transition`. A payload or result type in an
+edge signature may be written `Self.Draft` or `Approval.Draft`. An `Input`
+payload may name a type declared inside `Input`, and an operation's `Failure`
+may be written `Swift.Never`, which counts as infallible.
 
 ## Start an operation
 
@@ -90,12 +98,12 @@ nonisolated enum Lookup: Sendable {
         typealias Failure = Never
     }
 
-    @Transition(on: Input.search, invalidates: [Scope.search], starts: [Fetch.self])
+    @Transition(on: Input.search, starts: [Fetch.self])
     fileprivate static func begin(_ source: Idle, _ query: String) -> Change<Searching, Effect.Begin> {
         Change(Searching(query: query), effects: [.fetch(query)])
     }
 
-    @Transition(on: Input.cancel, invalidates: [Scope.search])
+    @Transition(on: Input.cancel)
     fileprivate static func cancel(_ source: Searching) -> Idle { Idle() }
 
     @Transition(onSuccess: Fetch.self)
@@ -109,9 +117,11 @@ The operation namespace declares exactly three aliases: `Input` (what the work
 receives), `Output`, and `Failure`. Its `scope` is the authority it holds,
 `requires` lists dependency scopes, `activeIn` lists the phases where it may
 run, and `admission` is `.latest`, `.rejectWhenActive`, or `.parallel(limit:)`.
-Work receives the post-commit activation of every scope it holds. Invalidating
-any of them revokes the work, even if the visible phase stays the same. Here,
-`cancel` invalidates `Scope.search`, so a result that returns afterward is stale.
+Work receives the post-commit activation of every scope it holds. An edge that
+leaves the operation's `activeIn` phases revokes the work: here, `cancel` returns
+to `Idle`, so a result that arrives afterward is stale. To revoke work while
+staying in an active phase, list its scope in `invalidates:`, as in
+`@Transition(on: Input.accountChanged, invalidates: [Scope.account])`.
 
 The macro generates the `Effect` type. It has one case per operation, named by
 lower-casing the leading capital run of the namespace name, so `Fetch` becomes
@@ -169,13 +179,14 @@ nonisolated enum Note {
 
 @MainActor
 func saveNote() throws {
-    let host = Note.MainActorHost(.init(text: "Outline"), drivers: .init())
+    let host = Note.MainActorHost(.init(text: "Outline"))
     try host.send(.save)
 }
 ```
 
-A managed owner takes a driver for each operation when it is created. A driver
-returns `Result<Output, Failure>`:
+A managed owner takes a driver for each operation when it is created. A graph
+with no operations takes no `drivers:` argument, as `Note.MainActorHost` shows
+above. A driver returns `Result<Output, Failure>`:
 
 ```swift
 @MainActor
@@ -202,11 +213,10 @@ attempt and is the only owner where `.commit(.conflict)` can occur. The
 
 The receipt carries the accepted `revision` and the complete `Snapshot`. A
 snapshot has one case per phase, holding an `Observed<Phase>` whose `value` is
-the payload. `Observed<Phase>` also has the edge methods, returning a `Prepared`
-proposal that `commit(_:)` consumes and checks against the owner and its current
-revision. Use that explicit path when a caller needs to separate preparation
-from admission. A rejected commit changes neither model data nor operation
-authority.
+the payload. A `Snapshot` and a `Receipt` print the phase, the revision, and
+`closed` when they record closure, as in `searching, revision 1`. An `Observed`
+prints its payload type in place of the phase, as in `Searching, revision 1`.
+None of them prints payload contents.
 
 `MainActorHost`, `ActorHost`, and `Shared` also offer `snapshots()`, which
 registers an observer and returns a single-pass asynchronous sequence of
@@ -236,6 +246,50 @@ Actor isolation does not prevent two snapshots from sharing a mutable reference.
 Use value storage, immutable objects, or detached projections when a graph
 promises historical observations. The macro cannot establish business validity,
 deep value semantics, or the purity of arbitrary function bodies.
+
+## Act on the observation a caller saw
+
+`send(_:)` acts on whatever the owner currently holds. Use it for an event that
+should apply to the current state: a tap that means "cancel the current
+search", a push notification, or a timer.
+
+`Observed<Phase>` also has one method for each edge whose source is that phase.
+Each returns a `Prepared` proposal, which an owner's `commit(_:)` consumes and
+admits only if that observation is still the owner's current revision. `commit`
+returns a `CommitResult`, either `.committed(receipt)` or
+`.rejected(reason, current:)`, and the result is not discardable. A rejected
+commit changes neither model data nor operation authority. Every owner except
+`Owned`, and both `StateMachinePresentation` and
+`ObservableStateMachinePresentation` in `StateMachineUI`, have `commit(_:)`.
+`ActorHost.commit(_:)` is `async`, and `Local.commit(_:)` is `mutating`. A
+presentation shows the result in the same turn.
+
+Use this path when the action belongs to the exact observation the user saw,
+and handle `.conflict`, which any revision that landed in between causes, even
+an unrelated one:
+
+```swift
+@MainActor
+func cancel(_ searching: Lookup.Observed<Lookup.Searching>, on host: Lookup.MainActorHost) {
+    do {
+        switch host.commit(try searching.cancel()) {
+        case .committed:
+            print("Cancelled")
+        case .rejected(.conflict, let current):
+            print("The search changed first: \(current)")
+        case .rejected(let reason, _):
+            print("Cancel was not accepted: \(reason)")
+        }
+    } catch {
+        print("Cancel could not be prepared: \(error)")
+    }
+}
+```
+
+The compiler checks the call. If `cancel` is removed from the schema or moves to
+another phase, this function stops compiling, whereas `send(.cancel)` routes at
+run time and fails with `.preparation(.invalidPhase)`. Preparing an edge from an
+observation does not run a router, as the next section explains.
 
 ## Choose among edges with a router
 
@@ -277,6 +331,20 @@ edge returns `Never` and must throw. A completion router, declared with
 that same operation. Terminal phases and unused edges are legal. Restoration can
 enter a phase that is not reachable from the initial factory.
 
+A router runs only when an input is routed. `send(.refresh(true))` goes through
+`choose`, which selects `end`. An edge method on an observation, or on an `Owned`
+value, prepares that edge directly, so the router never sees the call:
+
+```swift
+func keepActive(_ active: Session.Observed<Session.Active>) throws -> Session.Prepared {
+    try active.keep(true)
+}
+```
+
+A rule that every caller must obey therefore belongs in the edge, as typed
+`throws`, or in a validated argument type. A rule that lives only in a router
+binds `send(_:)` and nothing else.
+
 ## Handle fallible edges
 
 An edge may use typed `throws(Failure)`. The generated `Owned` edge returns an
@@ -306,7 +374,7 @@ nonisolated enum Rename: Sendable {
 
 @MainActor
 func renameDraft() {
-    let host = Rename.MainActorHost(.init(title: "Notes"), drivers: .init())
+    let host = Rename.MainActorHost(.init(title: "Notes"))
     do {
         try host.send(.rename(""))
     } catch .preparation(.rename(.empty)) {
@@ -365,9 +433,15 @@ declarations, async edges, untyped throws, `inout` sources, and generic edge
 functions are unsupported. Keep declarations inside the schema; the macro does
 not discover extensions or scan other files.
 
+The package compiles three stress graphs of 128 phases on every change: one
+with 512 edges over four inputs, one where each of 512 edges has its own input,
+and one with 32 operations. Larger graphs are not measured.
+
 Generated member names and the support types used by expansion are reserved.
 For example, a value graph cannot name a phase case `model`, `record`,
-`revision`, or `isClosed`, because its snapshot already uses those members.
+`revision`, `isClosed`, or `description`, because its snapshot already uses those
+members, and `Restoration`, `ShutdownResult`, and `ShutdownDiagnostics` are
+reserved type names.
 Diagnostics identify the conflicting declaration and ask for a distinct name.
 
 ## Run effects with `Local` and `Owned`
@@ -448,17 +522,22 @@ owner issued the completion. `AcknowledgmentResult` is `.recorded`, `.duplicate`
 or `.foreignOwner`. An asynchronous runner must retain its execution handles
 until the tasks terminate, and a cancellation request alone does not acknowledge
 termination. A retained delivery may still need admission or explicit
-reconciliation after execution has ended.
+reconciliation after execution has ended. Draining and acknowledging never
+admit a retained completion. One that reports `.waitingForCapacity` is admitted
+by `retryAdmission(id:)` once draining has freed capacity.
 
 `Owned` runs nothing. An edge that starts nothing returns the next `Owned`
-directly. An edge that starts operations returns a `Change` carrying the
-schema-wide `Effect` values in authored order, and the caller decides when to
-run them:
+directly. An edge that starts operations returns a
+`Change<Owned<Next>, Effect.<Edge>>` carrying that edge's own effect values in
+authored order, and the caller decides when to run them. A fallible edge returns
+`Advance<Owned<Source>, Owned<Next>, Effect.<Edge>, Failure>`, where the effect
+argument is `Never` for an edge that starts nothing. The `effect` property on
+each value widens it to the schema-wide `Effect`:
 
 ```swift
 func ownedSearch() {
     let change = Lookup.owned(.init()).begin("swift")
-    print(change.effects.count)
+    print(change.effects.map(\.effect))
 
     let idle = change.next.cancel()
     idle.withValue { _ in }
@@ -466,5 +545,115 @@ func ownedSearch() {
 ```
 
 `Owned<Searching>` offers `cancel()` and `received(_:)`, and `Owned<Idle>`
-offers only `begin(_:)`. To compare effects in a test, declare
-`extension Lookup.Effect: Equatable {}`.
+offers only `begin(_:)`.
+
+To compare effects in a test, declare `extension Lookup.Effect: Equatable {}` in
+the file that declares the schema. The compiler synthesizes `==` only in the
+file that declares the type, so the extension fails to compile anywhere else.
+Then compare `change.effects.map(\.effect)` with an array of `Lookup.Effect`
+values. The [testing guide](<doc:TestingAGraph>) shows this in a test.
+
+## Restore saved data
+
+A `shared` or `isolated` schema generates `Restoration`, an enum with one case
+for each phase in which no operation is active. A schema may declare one
+function marked `@Restoration` that validates saved data into one of those
+cases:
+
+```swift
+@StateMachine(mode: .shared)
+nonisolated enum Download: Sendable {
+    struct Idle: Sendable { let name: String }
+    struct Running: Sendable { let name: String }
+    struct Finished: Sendable {
+        let name: String
+        let bytes: Int
+    }
+
+    @Initial case idle(Idle)
+    case running(Running)
+    case finished(Finished)
+
+    enum Scope { case transfer }
+    enum Input: Sendable { case start, cancel }
+
+    @Operation(scope: Scope.transfer, activeIn: [Running.self], admission: .latest)
+    enum Transfer {
+        typealias Input = String
+        typealias Output = Int
+        typealias Failure = Never
+    }
+
+    enum RestoreRejection: Error, Sendable { case emptyName }
+
+    @Restoration
+    fileprivate static func restore(_ saved: Self) throws(RestoreRejection) -> Restoration {
+        switch saved {
+        case .idle(let idle):
+            guard !idle.name.isEmpty else { throw .emptyName }
+            return .idle(idle)
+        case .running(let running):
+            // Saved work has no task to resume, so start over from the resting phase.
+            return .idle(Idle(name: running.name))
+        case .finished(let finished):
+            return .finished(finished)
+        }
+    }
+
+    @Transition(on: Input.start, starts: [Transfer.self])
+    fileprivate static func start(_ source: Idle) -> Change<Running, Effect.Start> {
+        Change(Running(name: source.name), effects: [.transfer(source.name)])
+    }
+
+    @Transition(on: Input.cancel)
+    fileprivate static func cancel(_ source: Running) -> Idle { Idle(name: source.name) }
+
+    @Transition(onSuccess: Transfer.self)
+    fileprivate static func received(_ source: Running, _ bytes: Transfer.Output) -> Finished {
+        Finished(name: source.name, bytes: bytes)
+    }
+}
+
+@MainActor
+func resume(_ saved: Download) async throws {
+    let host = try Download.MainActorHost(
+        restoring: saved,
+        drivers: .init(transfer: { name in .success(name.count) })
+    )
+    print(host.snapshot().revision)
+
+    try host.send(.start)
+    await host.shutdown()
+}
+```
+
+The function takes the saved data as its one parameter, which can be any type
+that the application defines, and returns `Restoration`. It may use typed
+`throws`. Declaring it gives every owner except `Owned` an `init(restoring:)`
+that mirrors the ordinary initializer, takes the saved data in place of the
+initial payload, and throws exactly when the function does. A restored owner
+starts at revision zero with fresh authority. It adopts no ticket, task, or
+pending completion from any other owner.
+
+A phase in which an operation is active has no `Restoration` case, so saved data
+cannot resume running work. Returning `.running(...)` from
+`restore` does not compile: the compiler reports that `Download.Restoration` has
+no member `running`. The author either rejects that saved shape or maps it to a
+resting phase, as `restore` does for `.running`, and then sends an input to start
+fresh work. A schema with no operations has a case for every phase.
+
+Forking is restoring a saved copy of `snapshot.model`. Because `restore` takes
+the schema itself, a fork of a running owner is one initializer call:
+
+```swift
+func fork(_ original: Download.Shared) throws -> Download.Shared {
+    try Download.Shared(
+        restoring: original.snapshot().model,
+        drivers: .init(transfer: { name in .success(name.count) })
+    )
+}
+```
+
+The `StateMachineExamples` module shows the other common shape. `GeneratedProfile`
+declares its own `Archive` enum and a validator that rejects an interrupted load,
+and the persistence guide uses it.
