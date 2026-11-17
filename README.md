@@ -10,23 +10,26 @@ API for it. The compiler only offers the edges that leave the current phase, and
 the runtime only accepts a change from an owner that still has authority to make
 it.
 
-Two bugs motivate the design. An asynchronous result can arrive after the user
-cancelled or the account changed, and overwrite newer state with stale data. A
-value that a transition already consumed can be used a second time. State
+Two bugs motivate the design. An asynchronous result can arrive after a request
+was cancelled or the account changed, and overwrite newer state with stale data.
+A value that a transition already consumed can be used a second time. State
 Machine closes both: a late result is rejected because the operation that
 produced it has lost its authority, and a consumed predecessor cannot be named
 again.
 
+The core `StateMachine` and `StateMachineSchema` modules have no UI
+dependencies. The same generated workflow runs in services, actors, background
+work, command-line tools, and server code, or drives a screen through the
+optional `StateMachineUI` module.
+
 ## Quick start
 
-This example declares a search with one operation, hosts it on `MainActor` with
-a driver, and presents it in SwiftUI:
+This example declares a search workflow with one operation and runs it in a
+generated actor host:
 
 ```swift
 import StateMachine
 import StateMachineSchema
-import StateMachineUI
-import SwiftUI
 
 @StateMachine(mode: .shared)
 nonisolated enum Lookup: Sendable {
@@ -62,35 +65,28 @@ nonisolated enum Lookup: Sendable {
     }
 }
 
-@MainActor
-func makeLookup() throws -> StateMachinePresentation<Lookup.MainActorHost> {
-    try StateMachinePresentation(
-        Lookup.MainActorHost(.init(), drivers: .init(fetch: { query in .success("Results for \(query)") }))
+func runLookup() async throws {
+    let lookup = Lookup.ActorHost(
+        .init(),
+        drivers: .init(fetch: { query in .success("Results for \(query)") })
     )
-}
+    let snapshots = try await lookup.snapshots()
+    _ = try await lookup.send(.search("swift"))
 
-@MainActor
-struct LookupView: View {
-    @ObservedObject var lookup: StateMachinePresentation<Lookup.MainActorHost>
-
-    var body: some View {
-        switch lookup.snapshot {
-        case .idle:
-            Button("Search") { _ = try? lookup.send(.search("swift")) }
-        case .searching:
-            Button("Cancel") { _ = try? lookup.send(.cancel) }
-        case .found(let found):
-            Text(found.value.answer)
+    for await snapshot in snapshots {
+        if case .found(let found) = snapshot {
+            print(found.value.answer)
+            break
         }
     }
+    await lookup.shutdown()
 }
 ```
 
-Create the presentation once, for example in a `@StateObject` or in the object
-that owns the feature, and pass it to `LookupView`. Creating it starts no work.
-Sending `.search` publishes the `searching` snapshot before `send` returns, then
-runs the driver. The driver's result arrives through the host's subscription
-and moves the view to `found`.
+Creating the host starts no work. Sending `.search` admits the `searching`
+phase, then runs the `fetch` driver. When the driver returns, the host checks
+that `Fetch` still has authority, applies `received`, and delivers the `found`
+snapshot to observers.
 
 The schema is the only place the graph is written down, and the compiler
 enforces it:
@@ -107,22 +103,20 @@ enforces it:
 - `Idle`, `Searching`, and `Found` are ordinary structs. Constructing one does
   not give anyone authority to change an owner.
 
-`ObservableStateMachinePresentation` is the `@Observable` counterpart for apps
-that target iOS 17, macOS 14, or later. It has the same initializer and members.
 The [schema guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/declaringagraph)
 covers typed rejection, failure edges, routers, and the supported syntax.
 
 ### Choose an owner
 
-Each schema generates the owners its mode supports. Most apps use
-`MainActorHost`. `Local` and `Owned` are manual owners for callers that run
-effects themselves.
+Each schema generates the owners its mode supports. `ActorHost`, `Shared`, and
+`MainActorHost` run operation drivers and manage completion delivery; `Local`
+and `Owned` are manual owners for callers that run effects themselves.
 
 | Owner | Use it when | Schema modes |
 | --- | --- | --- |
-| `MainActorHost` | UI input and admission belong to one MainActor owner, with managed work. | `shared`, `isolated` |
-| `ActorHost` | One native actor owns mutation and managed work. | `shared` |
+| `ActorHost` | One native actor owns mutation and managed work in a service or background coordinator. | `shared` |
 | `Shared` | Independent tasks need synchronous access to one shared owner. | `shared` |
+| `MainActorHost` | Input and admission belong to one `MainActor` owner, such as a screen's model, with managed work. | `shared`, `isolated` |
 | `Local` | The caller owns a noncopyable value, drains commands, and acknowledges work explicitly. | `shared`, `isolated` |
 | `Owned<Phase>` | The caller transfers exclusive ownership through consuming edges and handles effects. | `shared`, `isolated`, `ownedOnly` |
 
@@ -143,109 +137,6 @@ The `StateMachineExamples` module holds the examples this guide refers to. Its
 returns the original owner, and success returns the next owner and every effect
 value in order for the caller to handle. Dropping an owner is legal; ownership
 does not require completing the workflow.
-
-### Present state on MainActor
-
-`StateMachinePresentation` is an `ObservableObject` that works at the iOS 16
-baseline. It wraps a generated `MainActorHost` and exposes `snapshot`,
-`isObserving`, `send(_:)`, `close()`, `stopObserving()`, and `host`. A snapshot
-accepted by `send` is visible in the same turn as the button's input, and a
-delayed observation cannot replace it with an older revision.
-
-The `ProfileEditor` example wraps a `StateMachinePresentation` over a generated
-`MainActorHost`. Its load, retry, cancel, and account-change actions use the
-same profile graph as the other examples. Disposing the editor removes
-observation and closes its work authority. The [UI guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineui/presentingstate)
-shows a SwiftUI screen and explains the separate lifetime of a running driver.
-
-#### Observe from UIKit
-
-A UIKit screen can iterate the host's snapshot sequence in a task. The task
-inherits `MainActor` from the method that creates it, and cancelling it ends the
-sequence and removes the registration. Creating the sequence throws, so the task
-catches:
-
-```swift
-@MainActor
-final class ProfileViewController: UIViewController {
-    private let host: GeneratedProfile.MainActorHost
-    private var observation: Task<Void, Never>?
-    private let nameLabel = UILabel()
-    private let spinner = UIActivityIndicatorView(style: .medium)
-    private let retryButton = UIButton(type: .system)
-
-    // init(host:) and view layout omitted
-
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        observation = Task {
-            do {
-                for await snapshot in try self.host.snapshots() {
-                    self.render(snapshot)
-                }
-            } catch {
-                // Subscriber capacity is exhausted.
-            }
-        }
-    }
-
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        observation?.cancel()
-        observation = nil
-    }
-
-    private func render(_ snapshot: GeneratedProfile.Snapshot) {
-        switch snapshot {
-        case .idle:
-            nameLabel.text = nil
-            spinner.stopAnimating()
-            retryButton.isHidden = true
-        case .loading:
-            spinner.startAnimating()
-            retryButton.isHidden = true
-        case .loaded(let loaded):
-            nameLabel.text = loaded.value.profile.name
-            spinner.stopAnimating()
-            retryButton.isHidden = true
-        case .failed:
-            nameLabel.text = nil
-            spinner.stopAnimating()
-            retryButton.isHidden = false
-        }
-    }
-}
-```
-
-A loop sees an accepted input on a later turn. Code that needs the result in the
-same turn uses the receipt from `send`, or a presentation.
-
-For Combine, `$snapshot` on `StateMachinePresentation` is the publisher:
-
-```swift
-let cancellable = presentation.$snapshot.sink { render($0) }
-```
-
-`$snapshot` does not complete. `$isObserving` becoming `false` signals the end.
-
-In a `shared` schema every owner returns the same `Snapshots` type. It works
-with `map`, `prefix`, and generic `AsyncSequence` code on every supported OS, and
-a `for await` loop over it runs on the caller's actor:
-
-```swift
-for await revision in try host.snapshots().map(\.revision) { /* ... */ }
-```
-
-In an `isolated` schema, `MainActorHost.snapshots()` returns a
-`MainActorSnapshots`, which is iterated on the main actor and carries snapshots
-that are not `Sendable`. `for await` works on every supported OS. Operators on
-it need a deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or
-visionOS 2. For an earlier target, project each snapshot to a `Sendable` value;
-the result is an ordinary sequence:
-
-```swift
-for await revision in try host.snapshots({ $0.revision }).prefix(3) { /* ... */ }
-```
 
 ## Manage shared state and asynchronous work
 
@@ -312,24 +203,6 @@ iterator ends immediately. The sequence does not keep the owner alive. If the
 owner is released without closing, the sequence ends and no element has
 `isClosed == true`.
 
-To show a shared or actor owner on `MainActor`, create a `SnapshotPresentation`
-from its current snapshot and observe the sequence:
-
-```swift
-@MainActor
-func present(_ machine: GeneratedProfile.Shared) throws -> SnapshotPresentation<GeneratedProfile.Snapshot> {
-    let presentation = SnapshotPresentation(machine.snapshot())
-    presentation.observe(try machine.snapshots())
-    return presentation
-}
-```
-
-The presentation applies each snapshot on `MainActor`, sets `isObserving` to
-`false` when the sequence ends, and publishes through `$snapshot`.
-`stopObserving()` ends the observation. `MainActorSnapshotIngress` is the
-lower-level piece for owners that deliver `Sendable` snapshots through a
-callback.
-
 `send` makes exactly one attempt. It prepares the change from the current
 snapshot and commits it, and acceptance atomically installs the complete model,
 operation authority, and ordered command batch. `Shared` is the only owner where
@@ -391,6 +264,180 @@ the next `Owned` directly. An edge that starts operations returns a `Change`
 with the ordered, inert effects for the caller to run. The
 [schema guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/declaringagraph)
 has an example of each.
+
+## Present state on MainActor
+
+The optional `StateMachineUI` module adapts owners for SwiftUI and UIKit.
+`ObservableStateMachinePresentation` wraps a generated `MainActorHost` as an
+`@Observable` model and exposes `snapshot`, `isObserving`, `send(_:)`,
+`close()`, `stopObserving()`, and `host`. It requires iOS 17, macOS 14,
+tvOS 17, watchOS 10, or visionOS 1.
+
+This example presents the `Lookup` workflow from earlier in SwiftUI:
+
+```swift
+import StateMachine
+import StateMachineUI
+import SwiftUI
+
+@MainActor
+func makeLookup() throws -> ObservableStateMachinePresentation<Lookup.MainActorHost> {
+    try ObservableStateMachinePresentation(
+        Lookup.MainActorHost(.init(), drivers: .init(fetch: { query in .success("Results for \(query)") }))
+    )
+}
+
+@MainActor
+struct LookupView: View {
+    let lookup: ObservableStateMachinePresentation<Lookup.MainActorHost>
+
+    var body: some View {
+        switch lookup.snapshot {
+        case .idle:
+            Button("Search") { _ = try? lookup.send(.search("swift")) }
+        case .searching(let searching):
+            ProgressView("Searching for \(searching.value.query)")
+            Button("Cancel", role: .cancel) { _ = try? lookup.send(.cancel) }
+        case .found(let found):
+            Text(found.value.answer)
+        }
+    }
+}
+```
+
+Create the presentation once, for example in `@State` or in the model that owns
+the feature, and pass it to `LookupView`. Creating it starts no work. Sending
+`.search` publishes the `searching` snapshot in the same turn before `send`
+returns, then runs the driver. The driver's result arrives through the host's
+subscription and moves the view to `found`, and a delayed observation cannot
+replace a newer revision.
+
+`StateMachinePresentation` is the `ObservableObject` counterpart that works at
+the iOS 16 and macOS 13 baseline with `@StateObject` and `@ObservedObject`. It
+has the same initializer and members.
+
+The `ProfileEditor` example wraps a `StateMachinePresentation` over a generated
+`MainActorHost`. Its load, retry, cancel, and account-change actions use the
+same profile graph as the other examples. Disposing the editor removes
+observation and closes its work authority. The
+[UI guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineui/presentingstate)
+shows a SwiftUI screen and explains the separate lifetime of a running driver.
+
+To show a shared or actor owner on `MainActor`, create a `SnapshotPresentation`
+from its current snapshot and observe the sequence:
+
+```swift
+@MainActor
+func present(_ machine: GeneratedProfile.Shared) throws -> SnapshotPresentation<GeneratedProfile.Snapshot> {
+    let presentation = SnapshotPresentation(machine.snapshot())
+    presentation.observe(try machine.snapshots())
+    return presentation
+}
+```
+
+The presentation applies each snapshot on `MainActor`, sets `isObserving` to
+`false` when the sequence ends, and publishes through `$snapshot`.
+`stopObserving()` ends the observation. `MainActorSnapshotIngress` is the
+lower-level piece for owners that deliver `Sendable` snapshots through a
+callback.
+
+### Observe from UIKit
+
+A UIKit screen can iterate the host's snapshot sequence in a task. The task
+inherits `MainActor` from the method that creates it, and cancelling it ends the
+sequence and removes the registration. Creating the sequence throws, so the task
+catches. `UIContentUnavailableConfiguration` requires iOS 17, tvOS 17, Mac
+Catalyst 17, or visionOS 1:
+
+```swift
+import StateMachine
+import StateMachineExamples
+import UIKit
+
+@MainActor
+final class ProfileViewController: UIViewController {
+    private let host: GeneratedProfile.MainActorHost
+    private var observation: Task<Void, Never>?
+    private let nameLabel = UILabel()
+
+    // init(host:) and view layout omitted
+
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        observation?.cancel()
+        observation = Task {
+            do {
+                for await snapshot in try self.host.snapshots() {
+                    self.render(snapshot)
+                }
+            } catch {
+                // Subscriber capacity is exhausted.
+            }
+        }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        observation?.cancel()
+        observation = nil
+    }
+
+    private func render(_ snapshot: GeneratedProfile.Snapshot) {
+        switch snapshot {
+        case .idle:
+            nameLabel.text = nil
+            contentUnavailableConfiguration = nil
+        case .loading:
+            nameLabel.text = nil
+            contentUnavailableConfiguration = UIContentUnavailableConfiguration.loading()
+        case .loaded(let loaded):
+            nameLabel.text = loaded.value.profile.name
+            contentUnavailableConfiguration = nil
+        case .failed(let failed):
+            nameLabel.text = nil
+            var unavailable = UIContentUnavailableConfiguration.empty()
+            unavailable.text = "Profile Unavailable"
+            unavailable.secondaryText = failed.value.failure.rawValue
+            unavailable.button = .plain()
+            unavailable.buttonProperties.primaryAction = UIAction(title: "Retry") { [weak self] _ in
+                _ = try? self?.host.send(.retry)
+            }
+            contentUnavailableConfiguration = unavailable
+        }
+    }
+}
+```
+
+A loop sees an accepted input on a later turn. Code that needs the result in the
+same turn uses the receipt from `send`, or a presentation.
+
+For Combine, `$snapshot` on `StateMachinePresentation` or `SnapshotPresentation`
+is the publisher:
+
+```swift
+let cancellable = presentation.$snapshot.sink { render($0) }
+```
+
+`$snapshot` does not complete. `$isObserving` becoming `false` signals the end.
+
+In a `shared` schema every owner returns the same `Snapshots` type. It works
+with `map`, `prefix`, and generic `AsyncSequence` code on every supported OS, and
+a `for await` loop over it runs on the caller's actor:
+
+```swift
+for await revision in try host.snapshots().map(\.revision) { /* ... */ }
+```
+
+In an `isolated` schema, `MainActorHost.snapshots()` returns a
+`MainActorSnapshots`, which is iterated on the main actor and carries snapshots
+that are not `Sendable`. `for await` works on every supported OS. Operators on
+it need a deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or
+visionOS 2. For an earlier target, project each snapshot to a `Sendable` value;
+the result is an ordinary sequence:
+
+```swift
+for await revision in try host.snapshots({ $0.revision }).prefix(3) { /* ... */ }
+```
 
 ## Keep data separate from authority
 
