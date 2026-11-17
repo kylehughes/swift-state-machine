@@ -173,4 +173,79 @@ import os
         #expect(presentation.snapshot.revision == closed.revision)
         history.cancel()
     }
+
+    @Test func followReturnsAfterTheClosedSnapshot() async throws {
+        let owner = try host()
+        let presentation = SnapshotPresentation(owner.snapshot(), revision: \.revision)
+        try advance(owner)
+        let closed = owner.close()
+        await presentation.follow(try owner.snapshots())
+        #expect(presentation.snapshot.isClosed && presentation.snapshot.revision == closed.revision)
+        #expect(!presentation.isObserving)
+    }
+
+    @Test func cancellingTheFollowingTaskStopsObservingAndFreesItsSlot() async throws {
+        let owner = try host()
+        let presentation = SnapshotPresentation(owner.snapshot(), revision: \.revision)
+        let started = Signal()
+        let observing = presentation.$isObserving.dropFirst().sink { if $0 { started.raise() } }
+        let detached = Signal()
+        let snapshots = try owner.snapshots({ $0 }, onDetach: { detached.raise() })
+        let following = Task { await presentation.follow(snapshots) }
+        // Attachment edge: `follow` has taken ownership of the observation.
+        await started.wait()
+        following.cancel()
+        await following.value
+        #expect(!presentation.isObserving)
+        // Cleanup edge: the cancelled consumer has removed its registration.
+        await detached.wait()
+        observing.cancel()
+    }
+
+    @Test func stoppingEndsAFollowingTask() async throws {
+        let owner = try host()
+        let presentation = SnapshotPresentation(owner.snapshot(), revision: \.revision)
+        let started = Signal()
+        let observing = presentation.$isObserving.dropFirst().sink { if $0 { started.raise() } }
+        let snapshots = try owner.snapshots()
+        let following = Task { await presentation.follow(snapshots) }
+        await started.wait()
+        presentation.stopObserving()
+        await following.value
+        try advance(owner)
+        #expect(presentation.snapshot.revision == 0 && !presentation.isObserving)
+        observing.cancel()
+    }
+
+    @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
+    @Test func observableModelFollowsASharedOwnerUntilItCloses() async throws {
+        let owner = try host()
+        let model = ObservableSnapshotPresentation(owner.snapshot(), revision: \.revision)
+        let changed = OSAllocatedUnfairLock(initialState: false)
+        withObservationTracking {
+            _ = model.snapshot
+        } onChange: {
+            changed.withLock { $0 = true }
+        }
+        try advance(owner)
+        let closed = owner.close()
+        await model.follow(try owner.snapshots())
+        #expect(changed.withLock { $0 })
+        #expect(model.snapshot.isClosed && model.snapshot.revision == closed.revision)
+        #expect(!model.isObserving)
+    }
+
+    @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
+    @Test func observableModelStopsApplyingAfterItStopsObserving() async throws {
+        let owner = try host()
+        let model = ObservableSnapshotPresentation(owner.snapshot(), revision: \.revision)
+        let detached = Signal()
+        model.observe(try owner.snapshots({ $0 }, onDetach: { detached.raise() }))
+        #expect(model.isObserving)
+        try advance(owner)
+        model.stopObserving()
+        // Cleanup edge: the stopped consumer has removed its registration.
+        await detached.wait()
+        #expect(model.snapshot.revision == 0 && !model.isObserving)
+    }
 }

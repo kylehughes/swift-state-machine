@@ -1,4 +1,5 @@
 import Combine
+import Observation
 import StateMachine
 
 /// An `ObservableObject` projection of one complete `MainActor` snapshot across Apple platforms.
@@ -67,6 +68,21 @@ import StateMachine
             if !Task.isCancelled { self?.isObserving = false }
         }
     }
+    /// Observes a sequence for as long as the calling task runs.
+    ///
+    /// Returns when the sequence ends, when the calling task is cancelled, or when
+    /// ``stopObserving()`` or another observation replaces this one. This suits SwiftUI's
+    /// `task` modifier, which cancels the task when the view disappears.
+    public func follow(_ snapshots: RuntimeSnapshots<Snapshot>) async where Snapshot: Sendable {
+        observe(snapshots)
+        guard let task = observation else { return }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if Task.isCancelled, observation == task { stopObserving() }
+    }
     /// Removes this presentation's registration synchronously.
     public func stopObserving() {
         subscription?.cancel()
@@ -78,6 +94,105 @@ import StateMachine
 }
 
 extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
+    /// Creates a historical projection of a generated snapshot without subscribing or starting work.
+    public convenience init(_ initial: Snapshot) { self.init(initial, revision: { $0.revision }) }
+}
+
+/// An `@Observable` projection of one complete `MainActor` snapshot.
+///
+/// The Observation counterpart of ``SnapshotPresentation``, for apps whose deployment target
+/// permits it. Only ``snapshot`` and ``isObserving`` are tracked.
+/// This object owns observation only. The enclosing screen or service owns the live
+/// machine and decides when navigating away closes its work scope.
+@available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, macCatalyst 17.0, *)
+@MainActor @Observable public final class ObservableSnapshotPresentation<Snapshot> {
+    /// The latest complete snapshot; independently observed phase fields cannot diverge.
+    public private(set) var snapshot: Snapshot
+    /// Whether this model currently owns a live registration.
+    public private(set) var isObserving = false
+    @ObservationIgnored private let revision: @MainActor (Snapshot) -> UInt64
+    @ObservationIgnored private var watermark: UInt64
+    @ObservationIgnored private var subscription: RuntimeMainActorSubscription?
+    @ObservationIgnored private var observation: Task<Void, Never>?
+
+    /// Creates a historical projection without subscribing or starting work.
+    public init(_ initial: Snapshot, revision: @escaping @MainActor (Snapshot) -> UInt64) {
+        snapshot = initial
+        watermark = revision(initial)
+        self.revision = revision
+    }
+    deinit { observation?.cancel() }
+    /// Applies a newer complete snapshot synchronously; delayed delivery cannot regress the model.
+    @discardableResult public func apply(_ next: Snapshot) -> Bool {
+        let nextRevision = revision(next)
+        guard nextRevision > watermark else { return false }
+        watermark = nextRevision
+        snapshot = next
+        return true
+    }
+    /// Replaces observation ownership, receiving initial and terminal snapshots through the host.
+    public func observe(
+        _ register: (
+            @escaping @MainActor (Snapshot) -> Void,
+            @escaping @MainActor () -> Void
+        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription
+    ) throws(RuntimeHostSubscriptionFailure) {
+        stopObserving()
+        isObserving = true
+        do {
+            subscription = try register(
+                { [weak self] in self?.apply($0) },
+                { [weak self] in self?.isObserving = false }
+            )
+        } catch {
+            isObserving = false
+            throw error
+        }
+    }
+    /// Replaces observation ownership with a sequence from a shared or actor owner.
+    ///
+    /// Each snapshot is applied on the main actor through the revision check. `isObserving`
+    /// becomes `false` when the sequence ends; `snapshot` keeps the last value applied.
+    public func observe(_ snapshots: RuntimeSnapshots<Snapshot>) where Snapshot: Sendable {
+        stopObserving()
+        isObserving = true
+        observation = Task { [weak self] in
+            for await next in snapshots {
+                // `stopObserving` cancels on the main actor, so a value that was already
+                // in flight is discarded here and never applied after the stop.
+                guard !Task.isCancelled, let self else { return }
+                self.apply(next)
+            }
+            if !Task.isCancelled { self?.isObserving = false }
+        }
+    }
+    /// Observes a sequence for as long as the calling task runs.
+    ///
+    /// Returns when the sequence ends, when the calling task is cancelled, or when
+    /// ``stopObserving()`` or another observation replaces this one. This suits SwiftUI's
+    /// `task` modifier, which cancels the task when the view disappears.
+    public func follow(_ snapshots: RuntimeSnapshots<Snapshot>) async where Snapshot: Sendable {
+        observe(snapshots)
+        guard let task = observation else { return }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if Task.isCancelled, observation == task { stopObserving() }
+    }
+    /// Removes this model's registration synchronously.
+    public func stopObserving() {
+        subscription?.cancel()
+        subscription = nil
+        observation?.cancel()
+        observation = nil
+        isObserving = false
+    }
+}
+
+@available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, macCatalyst 17.0, *)
+extension ObservableSnapshotPresentation where Snapshot: StateMachineSnapshot {
     /// Creates a historical projection of a generated snapshot without subscribing or starting work.
     public convenience init(_ initial: Snapshot) { self.init(initial, revision: { $0.revision }) }
 }

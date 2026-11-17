@@ -98,6 +98,11 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
         last += snapshot.revision
         if !snapshot.isClosed { _ = shared.close() }
     }
+    await presentation.follow(try shared.snapshots())
+    if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+        let model = ObservableSnapshotPresentation(shared.snapshot())
+        await model.follow(try shared.snapshots())
+    }
     presentation.stopObserving()
     let actor = GeneratedProfile.ActorHost(
         .init(userID: user),
