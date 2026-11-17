@@ -170,8 +170,11 @@ catches:
 final class ProfileViewController: UIViewController {
     private let host: GeneratedProfile.MainActorHost
     private var observation: Task<Void, Never>?
+    private let nameLabel = UILabel()
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let retryButton = UIButton(type: .system)
 
-    // init(host:) omitted
+    // init(host:) and view layout omitted
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
@@ -192,7 +195,25 @@ final class ProfileViewController: UIViewController {
         observation = nil
     }
 
-    private func render(_ snapshot: GeneratedProfile.Snapshot) { /* update views */ }
+    private func render(_ snapshot: GeneratedProfile.Snapshot) {
+        switch snapshot {
+        case .idle:
+            nameLabel.text = nil
+            spinner.stopAnimating()
+            retryButton.isHidden = true
+        case .loading:
+            spinner.startAnimating()
+            retryButton.isHidden = true
+        case .loaded(let loaded):
+            nameLabel.text = loaded.value.profile.name
+            spinner.stopAnimating()
+            retryButton.isHidden = true
+        case .failed:
+            nameLabel.text = nil
+            spinner.stopAnimating()
+            retryButton.isHidden = false
+        }
+    }
 }
 ```
 
