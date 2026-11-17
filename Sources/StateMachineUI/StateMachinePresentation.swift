@@ -13,7 +13,7 @@ import StateMachine
     @Published public private(set) var snapshot: Host.Snapshot
     /// Whether this presentation still holds a live registration with its owner.
     @Published public private(set) var isObserving = false
-    /// The owner, for delivery, reconciliation and shutdown that the presentation does not wrap.
+    /// The owner, for delivery, reconciliation, and shutdown that the presentation does not wrap.
     public let host: Host
     private var watermark: UInt64
     private var subscription: RuntimeMainActorSubscription?
@@ -72,7 +72,7 @@ import StateMachine
     public private(set) var snapshot: Host.Snapshot
     /// Whether this model still holds a live registration with its owner.
     public private(set) var isObserving = false
-    /// The owner, for delivery, reconciliation and shutdown that the model does not wrap.
+    /// The owner, for delivery, reconciliation, and shutdown that the model does not wrap.
     @ObservationIgnored public let host: Host
     @ObservationIgnored private var watermark: UInt64
     @ObservationIgnored private var subscription: RuntimeMainActorSubscription?

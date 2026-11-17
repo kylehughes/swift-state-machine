@@ -23,7 +23,7 @@ nonisolated public final class AtomicRecordStorage<Value: Sendable>: Sendable {
     /// Retains the current version without exposing protected mutable storage.
     public func load() -> Version { storage.withLock { $0 } }
 
-    /// Validates a captured immutable record without replacing an unchanged value.
+    /// Reports whether a captured record is still the current one.
     public func isCurrent(_ expected: Version) -> Bool {
         let result = storage.withLock { $0 === expected }
         return withExtendedLifetime(expected) { result }

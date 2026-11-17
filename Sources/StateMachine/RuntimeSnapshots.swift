@@ -232,8 +232,8 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
 /// The conformance to `AsyncSequence` is isolated to the main actor. Iterating with `for await`
 /// is available on every supported OS version. Sequence operators such as `map` and generic
 /// `AsyncSequence` algorithms require a deployment target of iOS 18, macOS 15, tvOS 18,
-/// watchOS 11 or visionOS 2. A `Sendable` element has no such requirement when it is observed
-/// through ``RuntimeMainActorHost/sendableSnapshots()`` or a `Sendable` projection.
+/// watchOS 11, or visionOS 2. A `Sendable` element has no such requirement when it is observed
+/// through ``RuntimeMainActorHost/sendableSnapshots()`` or ``RuntimeMainActorHost/sendableSnapshots(_:)``.
 nonisolated public struct RuntimeMainActorSnapshots<Element> {
     // Confined to the main actor, except for the waiter slot that a task cancellation
     // handler reaches from any thread.

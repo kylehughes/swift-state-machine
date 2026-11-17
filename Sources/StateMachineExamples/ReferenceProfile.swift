@@ -638,7 +638,7 @@ nonisolated public enum ReferenceProfile {
             case .foreignOwner: return .foreignOwner
             }
         }
-        /// Whether closure, FIFO transfer and actual execution and delivery obligations have settled.
+        /// Whether closure, FIFO transfer, and actual execution and delivery obligations have settled.
         public var isQuiescent: Bool { host.isQuiescent }
         private static func batch(_ raw: Engine.Batch, configuration: Configuration) -> CommandBatch {
             CommandBatch(

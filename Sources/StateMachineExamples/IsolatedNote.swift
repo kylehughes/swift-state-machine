@@ -247,7 +247,7 @@ nonisolated public enum IsolatedNote {
             ledger.prune(in: engine)
             return Receipt(snapshot: project(snapshot))
         }
-        /// Whether closure, transferred commands, execution and delivery have settled.
+        /// Whether closure, transferred commands, execution, and delivery have settled.
         public var isQuiescent: Bool { engine.isQuiescent }
     }
     /// A sole MainActor writer; its private raw host directly owns the value engine and ledger.
@@ -281,7 +281,7 @@ nonisolated public enum IsolatedNote {
         }
         /// Consumes a historical proposal and rechecks its provenance.
         public func commit(_ prepared: consuming Prepared) -> CommitResult { project(host.commit(prepared.candidate)) }
-        /// Registers complete initial, accepted and terminal observations.
+        /// Registers an observer of complete initial, accepted, and terminal observations.
         public func subscribe(
             _ receive: @escaping @MainActor (Snapshot) -> Void,
             onFinish: @escaping @MainActor () -> Void = {}

@@ -252,7 +252,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     }
     /// Captures a coherent historical root.
     public func snapshot() -> Engine.Snapshot { storage.load().value.engine.snapshot }
-    /// Consumes an immutable candidate into one atomic root, authority and FIFO publication.
+    /// Consumes an immutable candidate into one atomic root, authority, and FIFO publication.
     public func commit(_ candidate: Engine.Candidate) -> Engine.Admission {
         while true {
             let before = storage.load()
@@ -404,7 +404,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             }
         }
     }
-    /// Records actual execution termination in a manually driven raw host.
+    /// Records actual execution termination, or a skip before the execution started.
     public func acknowledge(_ ticket: RuntimeTicket, skipped: Bool) -> Engine.Acknowledgment {
         while true {
             let before = storage.load()
@@ -563,7 +563,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     public struct Diagnostics: Sendable {
         /// The last accepted revision.
         public let acceptedRevision: UInt64
-        /// The last fully processed FIFO receipt.
+        /// The revision of the last fully processed FIFO batch.
         public let processedThrough: UInt64
         /// Whether FIFO batches await transfer.
         public let hasQueuedBatches: Bool
@@ -586,7 +586,9 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             outstanding: state.engine.executionReservations
         )
     }
-    /// Closes and waits until all obligations settle or the supplied deadline expires.
+    /// Closes, then waits until all obligations settle or the supplied deadline expires.
+    ///
+    /// A manually driven host does not wait: it closes and reports whether it is already quiescent.
     public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
         let receipt = close()
         guard processor != nil else { return isQuiescent }

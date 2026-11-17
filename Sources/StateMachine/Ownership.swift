@@ -23,9 +23,9 @@ extension Change: Sendable where Next: Sendable, Effect: Sendable {}
     case rejected(Failure, Before)
 }
 
-/// A state-independent defect in an inert effect plan.
+/// A defect in an inert effect plan, found while preparing it.
 nonisolated public enum PlanRejection: Error, Equatable, Sendable {
-    /// The plan violates the declared operation metadata.
+    /// The plan is malformed, or starts an operation whose scope or dependency it leaves inactive.
     case invalidPlan
     /// The plan alone exceeds a configured maximum.
     case planTooLarge

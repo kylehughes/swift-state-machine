@@ -21,7 +21,7 @@ nonisolated public enum RuntimePendingStatus: Equatable, Sendable {
     case retryScheduled
 }
 
-/// Reusable retained-envelope algorithm for value, isolated and shared hosts.
+/// Reusable retained-envelope algorithm for value, isolated, and shared hosts.
 ///
 /// Hosts install this value and the associated runtime together. Ledger mutations do not explicitly invoke
 /// domain closures; payload destruction and claimed preparation occur outside installation locks.

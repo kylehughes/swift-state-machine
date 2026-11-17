@@ -78,7 +78,7 @@
         changed()
         return result
     }
-    /// Registers initial and subsequent complete snapshots; callbacks run outside mutable accesses.
+    /// Registers an observer of the initial and subsequent complete snapshots; callbacks run outside mutable accesses.
     public func subscribe(
         _ receive: @escaping @MainActor (Engine.Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void = {}
@@ -318,7 +318,7 @@
     public var runningCount: Int { entries.count }
     /// The number of live observer registrations.
     public var subscriberCount: Int { subscribers.count }
-    /// Whether closure, FIFO, executions, retained delivery and claims have all settled.
+    /// Whether closure, FIFO, executions, retained delivery, and claims have all settled.
     public var isQuiescent: Bool { engine.isQuiescent && entries.isEmpty && !draining && ready.isIdle }
     /// Closes and waits for actual termination and settlement, optionally bounded by a deadline.
     public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {

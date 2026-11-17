@@ -98,7 +98,7 @@ nonisolated public struct RuntimeTicket: Equatable, Sendable {
     fileprivate let operation: RuntimeIdentity
     fileprivate let kind: UInt32
     fileprivate let bindings: [Binding]
-    /// Compares only retained owner, incarnation and operation identity.
+    /// Compares only retained owner, incarnation, and operation identity.
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.owner === rhs.owner && lhs.incarnation === rhs.incarnation && lhs.operation === rhs.operation
     }
@@ -279,7 +279,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         case closed
         /// Reset replaced the candidate's incarnation.
         case obsoleteIncarnation
-        /// A required ticket has been retired or invalidated.
+        /// A required ticket or a finishing delivery claim is no longer active.
         case inactiveAuthority
         /// The whole-root revision changed.
         case conflict
@@ -306,7 +306,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
     /// Historical acceptance or a rejection with coherent current observation.
     @frozen public enum Admission {
-        /// All model, authority, reservation and batch changes installed together.
+        /// All model, authority, reservation, and batch changes installed together.
         case committed(Snapshot)
         /// No proposed change was installed.
         case rejected(Rejection, current: Snapshot)
@@ -415,7 +415,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     public func owns(_ snapshot: Snapshot) -> Bool { snapshot.owner === owner }
     /// Whether ordinary or terminal FIFO output remains queued.
     public var hasQueuedBatches: Bool { !queue.isEmpty || terminal != nil }
-    /// Whether closure, FIFO transfer and all execution/delivery obligations have settled.
+    /// Whether closure, FIFO transfer, and all execution/delivery obligations have settled.
     public var isQuiescent: Bool { closed && !hasQueuedBatches && reservations.isEmpty }
 
     /// Validates a complete plan outside any shared installation lock.

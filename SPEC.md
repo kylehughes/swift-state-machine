@@ -351,7 +351,7 @@ A root-composition test adds unrelated presentation state and an authentication 
 
 The required hosted API uses a domain-specific noncopyable `Prepared` type. Legal source/destination relationships are enforced at its private construction sites and through methods on typed observations. Extra public generic source/destination parameters are optional and must justify their usability and compile-time cost.
 
-This is a deliberate implementation refinement: a closed prepared type lets a router return different legal branches without existential erasure, unsafe casts, or a universal constructor. The exclusively owned API still carries the phase in its type.
+A closed prepared type lets one dispatch path return different legal branches without existential erasure, unsafe casts, or a universal constructor. The exclusively owned API still carries the phase in its type.
 
 `PREPARED-001`: No public construction path may accept an arbitrary root and valid provenance to make a domain Prepared value. A helper intended for a macro is not protected merely by an underscore or an SPI label.
 
@@ -523,7 +523,7 @@ Generic schema parameters and constraints MAY be preserved if the compiler spike
 
 Schema metadata names declarations by reference. The accepted spellings are `Input.<case>` for an input trigger, `Scope.<case>` for a scope, and `<Type>.self` for a phase payload or an operation namespace. The compiler resolves each reference, so an undeclared name is a type-checking error at the attribute. Expansion reads the same spelling lexically, rejects a reference of the wrong kind, and lowers it to generated primitive tags. An edge's endpoints are not metadata: its source phase is the payload type of its source parameter (a router names it the same way), and its destination phase is its result when that is a phase payload, or the payload type named by its `Change` or `Advance` result. These signature types MAY be qualified with `Self.` or the schema name. A trigger is exactly one of `on: Input.<case>`, `onSuccess: <Operation>.self`, or `onFailure: <Operation>.self`. String literals, implicit-member, qualified or computed references, arbitrary attribute expressions, and overloaded edge names are unsupported.
 
-The following example shows the required shape. Omitted bodies and payload fields are intentional specification placeholders.
+The following excerpt shows the required shape for a subset of the reference domain plus an authentication invalidation edge. Omitted bodies and payload fields are intentional specification placeholders.
 
 ```swift
 @StateMachine(mode: .shared)
@@ -672,11 +672,11 @@ Owned values MAY expose a nonescaping borrowed `withValue` accessor. They MUST N
 
 ### 4. Construction authority and the runtime bridge
 
-`API-106`: Macro expansion occurs in the consuming module. Raw runtime types and constructors MAY therefore be public for generated code to call. The generated façade MUST privately own its raw kernel and MUST NOT expose that kernel, its admission stamp, mutable storage, or a public raw-candidate factory through its supported statically typed APIs.
+`API-106`: Macro expansion occurs in the consuming module. Raw runtime types and constructors MAY therefore be public for generated code to call. The generated facade MUST privately own its raw kernel and MUST NOT expose that kernel, its admission stamp, mutable storage, or a public raw-candidate factory through its supported statically typed APIs.
 
 `API-107`: Authority-bearing initializers and backing properties MUST be `private` or `fileprivate`. Using `fileprivate` consistently is permitted for generated sibling declarations. The domain definition file is trusted implementation code. Neither a naming convention nor public SPI is an access-control boundary. Guarantees exclude reflective extraction of hidden implementation storage, unsafe casts, debugger manipulation, and memory corruption; this is not a security sandbox. Custom diagnostic mirrors exposing only public projections MAY improve encapsulation but are not the baseline proof.
 
-An ordinary client may instantiate a separate raw kernel. That kernel cannot produce authority accepted by an existing sealed façade: the existing façade's kernel/provenance is inaccessible, and admission checks owner identity. Public raw kernels MUST be documented as a separate, lower-guarantee surface.
+An ordinary client may instantiate a separate raw kernel. That kernel cannot produce authority accepted by an existing sealed facade: the existing facade's kernel/provenance is inaccessible, and admission checks owner identity. Public raw kernels MUST be documented as a separate, lower-guarantee surface.
 
 `API-108`: A consumed Prepared MUST be unpacked into a concrete immutable, copyable commit payload before entering the shared kernel's safe `OSAllocatedUnfairLock` closure. This does not make Prepared copyable or expose an external candidate factory. The checked lock storage uses Copyable and Sendable values; no public client is required to add `@unchecked Sendable`.
 
@@ -741,7 +741,7 @@ The parallel limit bounds logical active authority, not physical concurrent task
 
 Invalidating any bound dependency revokes the operation and records cancellation even if its primary scope remains active. The example therefore supports authentication invalidation while Loading: Fetch requires authentication, and the authenticationChanged self-edge invalidates that scope. The old fetch cannot commit; subsequent work binds the new epoch. Validate all dependency names and reject duplicate/redundant dependencies or inconsistent primary-scope eligibility.
 
-`API-112`: Generate a typed shared-mode Drivers value, with one field per operation: Drivers return `Result` rather than using typed throws: in the pinned toolchain a closure passed to a `throws(Failure)` parameter is inferred as throwing `any Error` unless it is explicitly annotated, which would require an annotation on every throwing driver closure.
+`API-112`: Generate a typed shared-mode Drivers value, with one field per operation. Drivers return `Result` rather than using typed throws: in the pinned toolchain a closure passed to a `throws(Failure)` parameter is inferred as throwing `any Error` unless it is explicitly annotated, which would require an annotation on every throwing driver closure.
 
 ```swift
 public struct Drivers: Sendable {
@@ -823,7 +823,7 @@ public mutating func acknowledgeExecution(
 public var isQuiescent: Bool { get }
 ```
 
-The limit counts whole FIFO batches, each containing its receipt, closed typed start/cancel commands, and terminal flag; a nonpositive limit drains nothing. Draining transfers batches and frees queue capacity. Execute commands only after mutating access ends; never capture Local or its inout access in an escaping task/closure. Reenter synchronously with typed completion and a separate idempotent acknowledgment: `.terminated` or `.skippedBeforeStart`. The sealed ExecutionHandle comes from issued Work/commands. Acknowledgment distinguishes recorded, duplicate, and foreign-owner outcomes. A ticket of this owner with no outstanding obligation is reported as duplicate, because distinguishing an execution that was never issued from one already released would require the tombstone history that `DIAG-003` prohibits; it records actual termination/definite nonstart, not a cancellation request. Caller lifecycle correctness is explicit; completion alone cannot free a still-running reservation.
+The limit counts whole FIFO batches, each containing its receipt, closed typed start/cancel commands, and terminal flag; a nonpositive limit drains nothing. Draining transfers batches and frees queue capacity. Execute commands only after mutating access ends; never capture Local or its inout access in an escaping task/closure. Reenter synchronously with typed completion and a separate idempotent acknowledgment: `.terminated` or `.skippedBeforeStart`. The sealed ExecutionHandle comes from issued Work/commands. Acknowledgment distinguishes recorded, duplicate, and foreign-owner outcomes. A ticket of this owner with no outstanding obligation is reported as duplicate, because distinguishing an execution that was never issued from one already released would require the tombstone history that `DIAG-003` prohibits. An acknowledgment records actual termination/definite nonstart, not a cancellation request. Caller lifecycle correctness is explicit; completion alone cannot free a still-running reservation.
 
 LocalConfiguration exposes capacities with a fixed manual completion policy. Local has no coordinator, async runner, automatic subscription delivery, retryPure scheduler, or async shutdown. Reads and drained receipt batches supply observations; managed observation, flush, and shutdown facilities apply to managed hosts. Its caller drains, reconciles, and acknowledges execution until closed, the terminal batch is drained, and all reservations/pending obligations are settled; only then isQuiescent is true. Use MainActor/actor/Shared for managed callbacks. These rules also apply when Local contains non-Sendable isolated-mode data.
 
@@ -846,7 +846,7 @@ public enum Advance<Before: ~Copyable, After: ~Copyable, Intent, Failure: Error>
 
 For value graphs, the generated owned method borrows its payload while invoking the authored preparation function. On success it consumes/replaces the predecessor and returns the successor plus inert intents. On typed validation failure it returns the original Owned predecessor. An infallible edge uses a compiler-verified Never-failure specialization or equivalent success-only envelope.
 
-For owned-only graphs, the authored function itself consumes the payload. An infallible edge returns the destination payload, or `Change<Destination, Effect.<Edge>>` when it starts operations; a fallible edge returns `Advance<Source, Destination, Effect, Failure>`, whose effect argument is `Never` or `Effect.<Edge>`. The generated wrapper lifts the two payload alternatives into Owned wrappers. A throwing consuming function that loses the predecessor is not an acceptable substitute. Owned paths do not run hosted admission-plan validation after losing Source. Their inert-intent validation is an explicit caller/trusted-domain responsibility; no newly added wrapper failure may discard the recoverable predecessor.
+For owned-only graphs, the authored function itself consumes the payload. An infallible edge returns the destination payload, or `Change<Destination, Effect.<Edge>>` when it starts operations; a fallible edge returns `Advance<Source, Destination, Intent, Failure>`, whose intent argument is `Never` or `Effect.<Edge>`. The generated wrapper lifts the two payload alternatives into Owned wrappers. A throwing consuming function that loses the predecessor is not an acceptable substitute. Owned paths do not run hosted admission-plan validation after losing Source. Their inert-intent validation is an explicit caller/trusted-domain responsibility; no newly added wrapper failure may discard the recoverable predecessor.
 
 Owned completion-shaped edges MAY take ordinary output values: the caller owns that workflow. They do not claim the hosted operation-provenance guarantee. Owned effects remain inert descriptions for explicit caller execution; they do not mint hosted Work authority. Ownership is affine: dropping a value is permitted and does not prove an external operation ran.
 
@@ -858,7 +858,7 @@ Owned completion-shaped edges MAY take ordinary output values: the caller owns t
 
 `MACRO-108`: Terminal phases and unused edges are legal. Unreachable-from-initial phases receive at most an opt-in warning because restoration may enter them. Malformed references and type violations remain errors. Publish a measured supported graph-size range; include a representative 128-phase/512-edge expansion/compiler stress fixture. Do not invent a compiler limit or an unsupported build-time performance target.
 
-`API-116`: Separate-module positive/negative fixtures MUST cover constructor sealing, wrong-phase edges, completion-without-ticket attempts, noncopyable reuse, cross-owner rejection, duplicate completion, unsupported isolation crossings, dynamic effect-policy rejection, and owned failure recovery. Include a hand-written façade exercising the same runtime contract. The factory MUST record actual compiler and minimum-OS results; generated source or plausible examples alone do not satisfy acceptance.
+`API-116`: Separate-module positive/negative fixtures MUST cover constructor sealing, wrong-phase edges, completion-without-ticket attempts, noncopyable reuse, cross-owner rejection, duplicate completion, unsupported isolation crossings, dynamic effect-policy rejection, and owned failure recovery. Include a hand-written facade exercising the same runtime contract. The factory MUST record actual compiler and minimum-OS results; generated source or plausible examples alone do not satisfy acceptance.
 
 
 ---
@@ -890,7 +890,7 @@ Maintain three distinct stores:
 | Store | Owner | Meaning and lifetime |
 | --- | --- | --- |
 | Authority ledger | Core critical section | Which scope activations and operations can presently authorize a commit |
-| Execution reservations | Core critical section | Capacity occupied by accepted starts, running work, canceled work, or retained terminal outcomes |
+| Execution reservations | Core critical section | Capacity occupied by accepted starts, running work, cancelled work, or retained terminal outcomes |
 | Task registry | One coordinator actor | Actual task handles, cancellation requests, and observed termination |
 
 The pending-result ledger lives in core-protected immutable envelope boxes with primitive delivery status and attempt claims. This supports synchronous pendingCompletions() and reconcile(id:) on the shared facade. The coordinator schedules managed attempts; it does not need exclusive ownership of those boxes.
@@ -943,7 +943,7 @@ Operation policy is schema-declared and applies to a group identified by the sco
 | rejectWhenActive | Reject the entire proposed transition if the group already has an active member |
 | parallel(limit) | Admit only if the resulting active count is at most the positive configured limit |
 
-**AUTH-007 — Atomic policy application.** A failed replacement MUST leave the previous operation active. No old operation is canceled merely because a latest proposal was prepared. Count parallel membership by active authority, and separately enforce the global execution-reservation limit. A canceled task can cease to count toward parallel membership while still occupying an execution reservation.
+**AUTH-007 — Atomic policy application.** A failed replacement MUST leave the previous operation active. No old operation is cancelled merely because a latest proposal was prepared. Count parallel membership by active authority, and separately enforce the global execution-reservation limit. A cancelled task can cease to count toward parallel membership while still occupying an execution reservation.
 
 Calculate admission against the prospective ledger after declared invalidations and terminal retirement, then add the new invocations. Publish none of those changes until all checks pass.
 
@@ -992,7 +992,7 @@ These changes are indivisible to readers. The implementation documents one point
 
 **COMMIT-007 — Whole-root freshness.** A candidate containing the complete root MUST compare the complete root revision. A valid operation ticket does not authorize installing an old root over unrelated newer edits. No field-level merge is implied by this API.
 
-**COMMIT-008 — Scheduling responsibility.** Scheduling the wake is an internal part of completing the synchronous submission call. It MUST NOT depend on the caller remembering to process a returned instruction or on the caller task remaining uncanceled. Accepted in-memory records are not a durable guarantee against process termination.
+**COMMIT-008 — Scheduling responsibility.** Scheduling the wake is an internal part of completing the synchronous submission call. It MUST NOT depend on the caller remembering to process a returned instruction or on the caller task remaining uncancelled. Accepted in-memory records are not a durable guarantee against process termination.
 
 ### 5. Capacity and reservation accounting
 
@@ -1002,7 +1002,7 @@ These changes are indivisible to readers. The implementation documents one point
 | --- | ---: | --- |
 | Pending ordinary commit batches | 256 | One slot per accepted commit not yet popped |
 | Effect descriptors in one plan | 64 | Starts and explicit control descriptors |
-| Outstanding execution reservations | 256 | Queued, running, canceled-but-running, or pending-result operations |
+| Outstanding execution reservations | 256 | Queued, running, cancelled-but-running, or pending-result operations |
 | Registered subscribers | 128 | One slot per live subscription |
 | Pending UI snapshots per subscriber | 1 | Latest-value coalescing |
 | Terminal lifecycle record | 1 reserved | Unavailable to ordinary commits |
@@ -1013,7 +1013,7 @@ A popped batch may be in flight in addition to the FIFO limit. Scope/group inval
 
 The admitting attempt may acknowledge its own claim inside its successful commit because its client preparation has returned. A different still-executing claim cannot be credited prospectively. The delivery disposition must become settled, rather than merely having no pending box.
 
-Parallel policy counts active authority in its group; it is not a physical task-concurrency limit. The separate reservation bound covers canceled tasks and completed but unresolved outcomes.
+Parallel policy counts active authority in its group; it is not a physical task-concurrency limit. The separate reservation bound covers cancelled tasks and completed but unresolved outcomes.
 
 **CAP-003 — Permanent versus transient.** A plan intrinsically larger than a configured maximum fails preparation as planTooLarge. An otherwise admissible plan finding occupied queue/reservation capacity returns capacityExceeded. Waiting can resolve the latter, but cannot fix the former. Subscriber-capacity failure rejects only the subscription request and does not alter model history.
 
@@ -1021,7 +1021,7 @@ Parallel policy counts active authority in its group; it is not a physical task-
 
 Managed delivery may retain the private immutable candidate inside its pending record after transient capacity rejection. Retrying admission of that same candidate does not rerun domain code. Its entire freshness and authority set must nevertheless be checked again.
 
-**CAP-005 — Bounds are counts.** These limits bound engine backlog and reservation counts, not arbitrary payload bytes or caller-retained snapshots. The engine MUST NOT claim a universal memory bound or that canceling an uncooperative task immediately releases its resources.
+**CAP-005 — Bounds are counts.** These limits bound engine backlog and reservation counts, not arbitrary payload bytes or caller-retained snapshots. The engine MUST NOT claim a universal memory bound or that cancelling an uncooperative task immediately releases its resources.
 
 **CAP-006 — Capacity wakeups.** Popping a batch and releasing a reservation notify the managed retry scheduler outside the lock. Maintain bounded ready-state metadata rather than creating an unlimited number of retry tasks. Waiting-for-capacity entries are eligible only for admission retry; a stale candidate follows its configured conflict policy.
 
@@ -1112,7 +1112,7 @@ Only pending snapshots coalesce. Effect records, task lifecycle acknowledgments,
 
 **OBS-005 — Unsubscribe.** Subscription cancellation removes its live registration and marks its mailbox closed. Already executing observer code may finish; no new observer invocation begins after the delivery loop has observed that closed generation. It is not synchronous interruption of user code. Release observer closures and captured values outside the core lock. The asynchronous-sequence form is single-pass: the first iterator is the consumer and a later iterator ends immediately. Cancelling its consuming task ends the sequence and removes the registration on the consumer's task.
 
-**OBS-006 — Terminal observation.** Closing offers the final snapshot and then terminates the subscription. The final snapshot may replace an older pending value, but it cannot be silently removed by termination. Use a terminal envelope containing that snapshot, or a stream implementation that drains its final buffered element before ending. A sequence whose owner is released without closing ends with no closed element, so consumers distinguish that end from closure by the last element's `isClosed`.
+**OBS-006 — Terminal observation.** Closing offers the final snapshot and then terminates the subscription. The final snapshot may replace an older pending value, but it cannot be silently removed by termination. Use a terminal envelope containing that snapshot, or a stream implementation that drains its final buffered element before ending. Each generated `Snapshot` reports through `isClosed` whether it records closure. A sequence whose owner is released without closing ends with no closed element, so consumers distinguish that end from closure by the last element's `isClosed`.
 
 Expose lifecycle alongside model data. A closed snapshot can retain the last loading payload; that is historical data and does not assert that work remains authorized. The iOS 16 UI adapter performs consumption and publication on MainActor and uses this same monotonic contract.
 
@@ -1131,7 +1131,7 @@ Close has guaranteed queue and revision capacity because those resources are res
 
 After its linearization point, new ordinary commits return closed and no fresh operation authority is issued. Reads return final data. Queued starts are skipped when the runner observes revocation. Work that crossed a prelaunch race remains registered and receives cancellation.
 
-**LIFE-002 — Terminal drain.** Process the terminal record after all earlier accepted batches have received their launch/publication decisions. Cancel all still-running owned work, discard remaining pending delivery state, and finish subscriptions with their final snapshot. The runner MUST remain alive to reap canceled tasks; processing the terminal record alone is not complete shutdown. An owner released without closing finishes its subscriptions without a closed snapshot.
+**LIFE-002 — Terminal drain.** Process the terminal record after all earlier accepted batches have received their launch/publication decisions. Cancel all still-running owned work, discard remaining pending delivery state, and finish subscriptions with their final snapshot. The runner MUST remain alive to reap cancelled tasks; processing the terminal record alone is not complete shutdown. An owner released without closing finishes its subscriptions without a closed snapshot.
 
 **LIFE-003 — Flush.** flush(through:) accepts a receipt from this owner and waits until processedThrough reaches its ordinal. It covers snapshot offering and effect launch/skip decisions, not execution completion or completion of user observer callbacks. A long-lived effect must not make ordinary flush impossible. Reject a foreign receipt; resolve waiters outside the core lock.
 
@@ -1150,7 +1150,7 @@ Explicit close establishes lifecycle semantics. Finalization may request best-ef
 
 **LIFE-005 — Reset and restore.** Validate replacement model data outside the critical section. Submit an explicitly named replacement transaction against an expected current revision. On acceptance, preserve owner identity, create a new incarnation and required scope activations, revoke old operation authority, dispose obsolete pending results, advance the owner-lifetime ordinal, and publish one ordinary batch.
 
-Reset uses normal queue/capacity/revision admission and can be rejected without changing anything. Old canceled tasks and interrupted preparation claims retain reservations until termination/exit. Restart only operations explicitly included in the replacement plan. Replacing with equal visible data still invalidates all prior-incarnation proofs.
+Reset uses normal queue/capacity/revision admission and can be rejected without changing anything. Old cancelled tasks and interrupted preparation claims retain reservations until termination/exit. Restart only operations explicitly included in the replacement plan. Replacing with equal visible data still invalidates all prior-incarnation proofs.
 
 **LIFE-006 — Fork.** Fork copies selected validated model data into a new owner with a fresh incarnation, ordinal sequence, authority ledger, queues, and runner. It adopts no tickets, tasks, pending outcomes, subscribers, or live scope activations from the source. Shared immutable value storage is permitted; live authority sharing is not.
 
@@ -1183,14 +1183,14 @@ The acceptance suite MUST include these histories with deterministic gates, not 
 | Atomicity | Two candidates from one root; one winner and a mutation-free loser |
 | Authority | Revocation between preliminary completion check and final admission |
 | ABA | Exit/reentry and dynamic remove/reinsert with equal visible identifiers |
-| Rebase | Valid old operation plus unrelated root edit; newer field survives delivery |
+| Unrelated root edit | Valid old operation completes after an unrelated root edit; preparing against the newer snapshot, or reconciling after a concurrent edit, preserves the newer field |
 | Capacity | Full ordinary queue still admits close; impossible plan never retries |
 | Delivery | manualOnConflict remains visible; retryPure stops each turn after four preparations |
 | Claim ownership | Concurrent reconcile calls produce one preparation and an inProgress outcome |
 | Capacity retry | Draining admits a retained candidate without invoking its reducer again |
 | Destruction | Payload/closure deinitializers reenter during every retirement path, only after unlock |
 | Registration | Work returns immediately; registry insertion still precedes finish cleanup |
-| Cancellation | Nonterminating canceled work keeps its handle/reservation and makes join time out |
+| Cancellation | Nonterminating cancelled work keeps its handle/reservation and makes join time out |
 | Observation | Subscription initial value races queued older and newer batches without regression |
 | Wakeup | Append races the atomic empty-check/scheduled-flag clear without stranding a batch |
 | Overflow | Last ordinary revision rejects further commits while reserved close still succeeds |

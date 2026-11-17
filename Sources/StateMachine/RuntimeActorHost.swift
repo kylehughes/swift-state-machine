@@ -1,4 +1,4 @@
-/// A raw native actor owning the sole value engine, ledger and physical execution registry.
+/// A raw native actor owning the sole value engine, ledger, and physical execution registry.
 ///
 /// This lower-guarantee runtime constructs its own authority. A sealed domain facade keeps
 /// this instance private and performs synchronous preparation and admission in one turn.
@@ -78,7 +78,7 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
         changed()
         return result
     }
-    /// Registers initial and subsequent complete snapshots; callbacks run outside mutable accesses.
+    /// Registers an observer of the initial and subsequent complete snapshots; callbacks run outside mutable accesses.
     public func subscribe(
         _ receive: @escaping @Sendable (Engine.Snapshot) -> Void,
         onFinish: @escaping @Sendable () -> Void = {}
@@ -200,7 +200,7 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
                 }
             }
             // Initial observation may already include batches awaiting FIFO processing.
-            // Advance each registration before callbacks so synchronous reentry cannot regress it.
+            // Advance each registration before its callback runs so its revision never regresses.
             let observers = subscribers.filter { batch.snapshot.revision > $0.revision }
             if batch.terminal {
                 subscribers = []
@@ -321,7 +321,7 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
     public var runningCount: Int { entries.count }
     /// The number of live observer registrations.
     public var subscriberCount: Int { subscribers.count }
-    /// Whether closure, FIFO, executions, retained delivery and claims have all settled.
+    /// Whether closure, FIFO, executions, retained delivery, and claims have all settled.
     public var isQuiescent: Bool { engine.isQuiescent && entries.isEmpty && !draining && ready.isIdle }
     /// Closes and waits for actual termination and settlement, optionally bounded by a deadline.
     public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {

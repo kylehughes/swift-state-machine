@@ -84,9 +84,9 @@ public actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
         }
     }
 
-    /// Waits for all currently registered workers to terminate and run their callbacks.
+    /// Waits until no registered worker remains, including workers registered during the wait.
     ///
-    /// Cancellation of the waiting task does not acknowledge driver termination.
+    /// Cancelling the waiting task neither ends the wait early nor acknowledges driver termination.
     public func join() async {
         guard !entries.isEmpty else { return }
         await withCheckedContinuation { waiters.append($0) }

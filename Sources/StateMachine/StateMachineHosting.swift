@@ -31,9 +31,9 @@ nonisolated public protocol StateMachineReceipt {
 
     /// Captures a complete historical observation.
     func snapshot() -> Snapshot
-    /// Routes, prepares and admits one input in a single isolated turn.
+    /// Routes, prepares, and admits one input in a single isolated turn.
     @discardableResult func send(_ input: Input) throws(SendRejection) -> Receipt
-    /// Subscribes to initial, accepted and terminal complete snapshots.
+    /// Subscribes to initial, accepted, and terminal complete snapshots.
     func subscribe(
         _ receive: @escaping @MainActor (Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void
