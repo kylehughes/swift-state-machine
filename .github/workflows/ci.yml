@@ -57,7 +57,8 @@ jobs:
       run: python3 Scripts/check-platforms.py --interfaces
       timeout-minutes: 65
     - name: Compiler fixtures
-      run: python3 Scripts/check-compiler-fixtures.py
+      # The Build and Release tests steps have already built the macro plugin in both configurations.
+      run: python3 Scripts/check-compiler-fixtures.py --reuse-macro-plugin
       timeout-minutes: 20
     - name: Debug macro expansions and graph
       run: |
@@ -72,7 +73,9 @@ jobs:
     - name: Strict format
       run: swift format lint --strict --recursive Package.swift Sources Tests
       timeout-minutes: 15
+    # The Documentation workflow builds the site for every push to main.
     - name: Static DocC
+      if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       run: python3 Scripts/docs.py --output .build/site
       timeout-minutes: 45
   gate:
@@ -80,7 +83,7 @@ jobs:
     if: ${{ always() }}
     needs:
     - checks
-    runs-on: xcode-27
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
     - name: Validate
