@@ -22,7 +22,6 @@ def generate_source(phases, edges, name):
     """Create unique (source, trigger) pairs, reusing one input per phase-sized group."""
     lines = [
         "import StateMachine",
-        "import StateMachineSchema",
         "",
         "@StateMachine(mode: .shared)",
         f"nonisolated enum {name}: Sendable {{",
@@ -53,7 +52,6 @@ def generate_sparse_source(phases, edges, name):
     """Create edges that each use their own input case, so most (input, phase) pairs have no edge."""
     lines = [
         "import StateMachine",
-        "import StateMachineSchema",
         "",
         "@StateMachine(mode: .shared)",
         f"nonisolated enum {name}: Sendable {{",
@@ -84,7 +82,6 @@ def generate_operation_source(phases, operations, span, name):
     stride = max(1, phases // operations)
     lines = [
         "import StateMachine",
-        "import StateMachineSchema",
         "",
         "@StateMachine(mode: .shared)",
         f"nonisolated enum {name}: Sendable {{",
@@ -177,10 +174,10 @@ def main():
     ]))
     modules = build_root / "Modules"
     plugin = build_root / "StateMachineMacros-tool"
-    required = [modules / "StateMachine.swiftmodule", modules / "StateMachineSchema.swiftmodule", plugin]
+    required = [modules / "StateMachine.swiftmodule", plugin]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
-        parser.error("Build StateMachineSchema with the native backend first; missing: " + ", ".join(missing))
+        parser.error("Build StateMachine with the native backend first; missing: " + ", ".join(missing))
     swiftc = captured(["xcrun", "--find", "swiftc"])
     sdk = captured(["xcrun", "--sdk", "macosx", "--show-sdk-path"])
     version = subprocess.check_output([swiftc, "--version"], cwd=ROOT, text=True, stderr=subprocess.STDOUT, timeout=120).strip()

@@ -88,11 +88,14 @@ separate from instrumented builds and concurrent compilation.
 
 For platform or distribution changes, run `Scripts/check-platforms.py` and its
 `--interfaces` and `--device` modes. Build evidence does not establish execution
-on an OS version. `Scripts/check-ios.py` runs a public-import app on its own
-Simulator, iOS 17.5 by default; `--runtime` and `--device-type` select another
-installed runtime, and the app must report that runtime's version. Its expected
-check list must match every reported app check. Execution on the iOS 16 floor
-is unestablished until a run on an iOS 16 runtime is retained.
+on an OS version. `Scripts/check-ios.py` runs an app that imports the public
+products and the example graphs on its own Simulator, iOS 17.5 by default;
+`--runtime` and `--device-type` select another installed runtime, and the app
+must report that runtime's version. Its expected check list must match every
+reported app check. Execution on the iOS 16 floor is unestablished until a run
+on an iOS 16 runtime is retained. `StateMachineExamples` is a target, not a
+product: the tests, compiler fixtures, and iOS app use it, and the platform
+probe declares its own graphs.
 For documentation changes, use `python3 Scripts/docs.py --output PATH` with a
 fresh output path and check the generated navigation and links.
 

@@ -85,13 +85,14 @@ for mode in ['debug', 'release']:
         run(f'{mode}-macro-plugin-build', ['swift', 'build', '--build-system', 'native', '--configuration', mode, '--product', 'StateMachineMacros'])
     build = flags + (['-O'] if mode == 'release' else ['-Onone']) + ['-load-plugin-executable', str(bin_path / 'StateMachineMacros-tool') + '#StateMachineMacros']
     modules_ready = True
-    for module in ['StateMachine', 'StateMachineSchema', 'StateMachineUI', 'StateMachineExamples']:
+    # The examples are not a product; fixtures import them as the package's own clients do.
+    for module in ['StateMachine', 'StateMachineUI', 'StateMachineExamples']:
         sources = sorted((ROOT / 'Sources' / module).glob('*.swift'))
         command = build + ['-package-name', 'StateMachine', '-enable-library-evolution', '-emit-library', '-emit-module', '-module-name', module, '-I', directory, '-L', directory, '-o', directory / f'lib{module}.dylib', '-emit-module-path', directory / f'{module}.swiftmodule', '-emit-module-interface-path', directory / f'{module}.swiftinterface']
         if module != 'StateMachine':
             command += ['-lStateMachine']
         if module == 'StateMachineExamples':
-            command += ['-lStateMachineSchema', '-lStateMachineUI']
+            command += ['-lStateMachineUI']
         modules_ready = run(f'{mode}-{module}', command + sources) and modules_ready
     if not modules_ready:
         continue
@@ -113,7 +114,7 @@ for mode in ['debug', 'release']:
     # Interface-only import is distinct from the normal binary-module lane.
     interfaces = directory / 'interfaces'
     interfaces.mkdir(exist_ok=True)
-    for module in ['StateMachine', 'StateMachineSchema', 'StateMachineUI', 'StateMachineExamples']:
+    for module in ['StateMachine', 'StateMachineUI', 'StateMachineExamples']:
         (interfaces / f'{module}.swiftinterface').write_bytes((directory / f'{module}.swiftinterface').read_bytes())
         (interfaces / f'{module}.private.swiftinterface').write_bytes((directory / f'{module}.private.swiftinterface').read_bytes())
     positive = ROOT / 'ClientFixtures/CT-019/positive.swift'

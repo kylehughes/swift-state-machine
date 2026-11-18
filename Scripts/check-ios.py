@@ -129,8 +129,11 @@ def main():
             raise ValueError("The iOS deployment floor must remain 16.0")
         public = {target for product in manifest["products"] if "library" in product["type"]
                   for target in product["targets"]}
-        targets = runtime_targets(manifest, public)
+        # The app also exercises the example graphs, which the package builds but no product publishes.
+        examples = {"StateMachineExamples"}
+        targets = runtime_targets(manifest, public | examples)
         report["public_modules"] = sorted(public)
+        report["example_modules"] = sorted(examples)
         report["shipping_targets"] = sorted(targets)
         scratch = args.scratch_path.resolve() if args.scratch_path else evidence / "build"
         arguments = platform_arguments("ios", floors[0], scratch)

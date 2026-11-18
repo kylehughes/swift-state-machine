@@ -58,8 +58,8 @@ def main():
     source_template = Path("Probes/PlatformCheck/Consumer.swift")
     source_text = source_template.read_text()
     imported = set(re.findall(r"^import (\w+)$", source_text, re.MULTILINE))
-    if not {"StateMachine", "StateMachineExamples"} <= public:
-        raise ValueError("The public-call consumer requires the StateMachine and StateMachineExamples products")
+    if not {"StateMachine", "StateMachineUI"} <= public:
+        raise ValueError("The public-call consumer requires the StateMachine and StateMachineUI products")
     for module in public:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", module):
             raise ValueError("Unsupported Swift module identifier: " + module)

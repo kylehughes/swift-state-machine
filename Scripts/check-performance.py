@@ -29,7 +29,7 @@ def digest(path):
 
 def identities():
     paths = [ROOT / 'Package.swift', ROOT / 'Package.resolved', ROOT / 'SPEC.md', Path(__file__), ROOT / 'Scripts/check-macro-fixtures.py', ROOT / 'Scripts/platform_build.py']
-    paths += [path for name in ['StateMachine', 'StateMachineSchema', 'StateMachineMacros'] for path in sorted((ROOT / 'Sources' / name).rglob('*.swift'))]
+    paths += [path for name in ['StateMachine', 'StateMachineMacros'] for path in sorted((ROOT / 'Sources' / name).rglob('*.swift'))]
     paths += sorted(FIXTURES.rglob('*'))
     return {str(p.relative_to(ROOT)): digest(p) for p in paths if p.is_file() and '__pycache__' not in str(p)}
 
@@ -108,7 +108,7 @@ def aggregate(samples):
 
 
 def select_plan(build_root, manifest):
-    allowed = runtime_targets(manifest, {'StateMachineSchema'})
+    allowed = runtime_targets(manifest, {'StateMachine'})
     description = json.loads((build_root / 'description.json').read_text())
     commands = {}
     for command in description.get('swiftCommands', {}).values():
@@ -175,7 +175,6 @@ def instrument(evidence, commands, sdk, shipping_modules, shipping_objects, plug
     sources = (copy_resources if resource else copy_instrumented)(commands['StateMachine'], output)
     modules = output / 'Modules'
     modules.mkdir()
-    shutil.copy2(shipping_modules / 'StateMachineSchema.swiftmodule', modules / 'StateMachineSchema.swiftmodule')
     core = output / 'StateMachine.o'
     # Preserve native semantic, target, SDK, warning, package and optimization options;
     # redirect outputs/caches and emit one WMO object instead of per-file parallel output.
@@ -194,7 +193,7 @@ def instrument(evidence, commands, sdk, shipping_modules, shipping_objects, plug
     executable = output / 'Performance'
     compile_consumer(evidence, label + '/build-consumer', executable, modules, plugin, objects, sdk,
                      extra=['-D', 'PERFORMANCE_RESOURCE_INSTRUMENTED' if resource else 'PERFORMANCE_LOCK_INSTRUMENTED', '-Xlinker', '-export_dynamic'])
-    artifacts = [core, modules / 'StateMachine.swiftmodule', modules / 'StateMachineSchema.swiftmodule', executable]
+    artifacts = [core, modules / 'StateMachine.swiftmodule', executable]
     if not resource: artifacts.append(recorder)
     (output / 'build-outputs.json').write_text(json.dumps([{'path': str(p), 'sha256': digest(p), 'bytes': p.stat().st_size} for p in artifacts], indent=2) + '\n')
     return executable
@@ -276,7 +275,7 @@ def main():
             scratch = args.scratch_path.resolve() if args.scratch_path else (args.build_root.resolve().parent.parent if args.build_root else output / 'swiftpm')
             status['nativeBuildScratch'] = {'path': str(scratch), 'existedBeforeBuild': scratch.exists()}
             evidence.run('build/native-release', ['swift', 'build', '--build-system', 'native', '--configuration', 'release',
-                                                '--scratch-path', scratch, '--target', 'StateMachineSchema'])
+                                                '--scratch-path', scratch, '--target', 'StateMachine'])
             build_root = args.build_root.resolve() if args.build_root else scratch / (platform.machine() + '-apple-macosx') / 'release'
         commands = select_plan(build_root, manifest)
         (output / 'selected-plan.json').write_text(json.dumps(commands, indent=2) + '\n')
