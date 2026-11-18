@@ -85,7 +85,10 @@ nonisolated private struct ResultFile: Encodable {
         let request = try ProfileRequest(userID: user)
         let network = ControlledProfileNetwork()
         let drivers = network.drivers
-        let editor = try ProfileEditor(request: request, drivers: .init(fetch: drivers.fetch, audit: drivers.audit))
+        let editor = try ProfileEditor(
+            request: request,
+            drivers: GeneratedProfile.MainActorDrivers(fetch: drivers.fetch, audit: drivers.audit)
+        )
         let trace = Trace<GeneratedProfile.Snapshot>()
         let observation = editor.presentation.$snapshot.sink { [label] snapshot in
             trace.record(snapshot)
@@ -120,7 +123,7 @@ nonisolated private struct ResultFile: Encodable {
             "NETWORK-FAILURE-RETRY",
             ["failedRevision": String(failure.revision), "retryRevision": String(editor.presentation.snapshot.revision)]
         )
-        let accepted = await network.complete(retry.id, with: .success(.init(userID: user, name: "Runtime success")))
+        let accepted = await network.complete(retry.id, with: .success(Profile(userID: user, name: "Runtime success")))
         try require(accepted, "Retry success was not delivered")
         let loaded = await trace.wait { if case .loaded = $0 { true } else { false } }
         try require(loaded.revision == 4 && label.text == "Runtime success", "Success did not follow typed retry")
@@ -130,12 +133,12 @@ nonisolated private struct ResultFile: Encodable {
         _ = try editor.cancel()
         _ = try editor.load()
         let replacement = await network.nextRequest()
-        let oldAccepted = await network.complete(cancelled.id, with: .success(.init(userID: user, name: "Obsolete")))
+        let oldAccepted = await network.complete(cancelled.id, with: .success(Profile(userID: user, name: "Obsolete")))
         let duplicate = await network.complete(cancelled.id, with: .failure(.unauthorized))
         try require(oldAccepted && !duplicate, "Fake did not enforce one physical completion")
         let replacementAccepted = await network.complete(
             replacement.id,
-            with: .success(.init(userID: user, name: "Replacement"))
+            with: .success(Profile(userID: user, name: "Replacement"))
         )
         try require(replacementAccepted, "Replacement did not complete")
         let replaced = await trace.wait { snapshot in
@@ -152,7 +155,7 @@ nonisolated private struct ResultFile: Encodable {
         let invalidatedRevision = editor.presentation.snapshot.revision
         let oldAccount = await network.complete(
             accountRequest.id,
-            with: .success(.init(userID: user, name: "Prior account"))
+            with: .success(Profile(userID: user, name: "Prior account"))
         )
         try require(oldAccount, "Prior account response was not released")
         let openOwnerRevision = try openAccountInvalidation(request, user: user)
@@ -189,7 +192,7 @@ nonisolated private struct ResultFile: Encodable {
         )
     }
     private func openAccountInvalidation(_ request: ProfileRequest, user: UserID) throws -> UInt64 {
-        var local = GeneratedProfile.Local(.init(userID: user))
+        var local = GeneratedProfile.Local(GeneratedProfile.Idle(userID: user))
         guard case .prepared(let start) = GeneratedProfile.prepare(.load(request), on: local.snapshot()),
             case .committed = local.commit(start),
             case .fetch(let work) = local.drainCommands(limit: 1).first?.commands.first,
@@ -197,7 +200,7 @@ nonisolated private struct ResultFile: Encodable {
             case .committed = local.commit(invalidation)
         else { throw SmokeFailure(message: "Open-owner account invalidation setup failed") }
         let revision = local.snapshot().revision
-        guard case .stale = local.deliver(.fetch(work.succeeded(.init(userID: user, name: "Unauthorized late value"))))
+        guard case .stale = local.deliver(.fetch(work.succeeded(Profile(userID: user, name: "Unauthorized late value"))))
         else {
             throw SmokeFailure(message: "Account invalidation relied on close to revoke completion")
         }
@@ -218,9 +221,9 @@ nonisolated private struct ResultFile: Encodable {
     }
     private func isolatedEditor() async throws {
         let owner = IsolatedNote.MainActorHost(
-            .init(text: "Confined note", tags: ["editor"]),
-            drivers: .init(save: { input in
-                .success(.init(text: input.text, tags: input.tags))
+            IsolatedNote.Draft(text: "Confined note", tags: ["editor"]),
+            drivers: IsolatedNote.MainActorDrivers(save: { input in
+                .success(IsolatedNote.Saved(text: input.text, tags: input.tags))
             })
         )
         let trace = Trace<IsolatedNote.Snapshot>()
@@ -242,12 +245,12 @@ nonisolated private struct ResultFile: Encodable {
     private func actorAndLocal() async throws {
         let user = try UserID("actor-user")
         let request = try ProfileRequest(userID: user)
-        var local = GeneratedProfile.Local(.init(userID: user))
+        var local = GeneratedProfile.Local(GeneratedProfile.Idle(userID: user))
         guard case .prepared(let preparation) = GeneratedProfile.prepare(.load(request), on: local.snapshot()),
             case .committed = local.commit(preparation),
             case .fetch(let work) = local.drainCommands(limit: 1).first?.commands.first
         else { throw SmokeFailure(message: "Local did not issue typed work") }
-        guard case .committed = local.deliver(.fetch(work.succeeded(.init(userID: user, name: "Actor value")))) else {
+        guard case .committed = local.deliver(.fetch(work.succeeded(Profile(userID: user, name: "Actor value")))) else {
             throw SmokeFailure(message: "Local rejected its own terminal completion")
         }
         let acknowledgment = local.acknowledgeExecution(work.execution, disposition: .terminated)
@@ -257,13 +260,11 @@ nonisolated private struct ResultFile: Encodable {
         let localQuiescent = local.isQuiescent
         try require(localQuiescent, "Local manual obligations did not settle")
         let actor = GeneratedProfile.ActorHost(
-            .init(userID: user),
-            drivers: .init(
-                fetch: { input in
-                    .success(.init(userID: input.userID, name: "Actor value"))
-                },
-                audit: { _ in .failure(.unavailable) }
-            )
+            GeneratedProfile.Idle(userID: user),
+            fetchDriver: { input in
+                .success(Profile(userID: input.userID, name: "Actor value"))
+            },
+            auditDriver: { _ in .failure(.unavailable) }
         )
         let (stream, events) = AsyncStream<GeneratedProfile.Snapshot>.makeStream()
         let token = try await actor.subscribe { events.yield($0) }
@@ -296,7 +297,7 @@ nonisolated private struct ResultFile: Encodable {
     private func persistence() async throws {
         let user = try UserID("runtime-user")
         let archive = try ReferenceProfile.Archive(
-            model: .loaded(.init(profile: .init(userID: user, name: "Persisted"))),
+            model: .loaded(ReferenceProfile.Loaded(profile: Profile(userID: user, name: "Persisted"))),
             presentation: "screen"
         )
         let data = try JSONEncoder().encode(archive)
@@ -348,8 +349,8 @@ nonisolated private struct ResultFile: Encodable {
     }
     private func terminalSubscription() async throws {
         let owner = GeneratedNote.MainActorHost(
-            .init(text: "terminal"),
-            drivers: .init(save: { .success(.init(text: $0.text)) })
+            GeneratedNote.Draft(text: "terminal"),
+            saveDriver: { .success(GeneratedNote.Saved(text: $0.text)) }
         )
         var revisions: [UInt64] = []
         var finishes = 0
@@ -372,8 +373,8 @@ nonisolated private struct ResultFile: Encodable {
     }
     private func snapshotSequence() async throws {
         let owner = GeneratedNote.MainActorHost(
-            .init(text: "sequence"),
-            drivers: .init(save: { .success(.init(text: $0.text)) })
+            GeneratedNote.Draft(text: "sequence"),
+            saveDriver: { .success(GeneratedNote.Saved(text: $0.text)) }
         )
         let label = UILabel()
         var revisions: [UInt64] = []
@@ -414,7 +415,7 @@ nonisolated private struct ResultFile: Encodable {
     }
     private func finishResource(_ releases: AtomicRecordStorage<[Int]>) throws -> Int {
         let owned = ResourceWorkflow.start(
-            .init(
+            ResourceWorkflow.Resource(
                 identifier: 7,
                 onRelease: { id in
                     while true {

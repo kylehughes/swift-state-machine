@@ -261,6 +261,11 @@
     "scope": "a resolved reference of the wrong kind is rejected at its spelling by actual macro expansion"
   },
   {
+    "id": "GMT-006-initial-default-access",
+    "pattern": "internal and cannot be referenced from a default argument",
+    "scope": "a default the initial payload's access level cannot support is diagnosed by the compiler at the authored default"
+  },
+  {
     "id": "GHOST-MainActor",
     "pattern": "main actor-isolated|MainActor",
     "scope": "G5 normal-import generated confined host boundary"

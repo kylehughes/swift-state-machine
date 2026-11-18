@@ -7,7 +7,7 @@ nonisolated public enum Flow: Sendable {
     public struct Loading: Sendable { let request: Int }
     public struct Loaded: Sendable { let value: String }
     public struct Failed: Sendable { let reason: Problem }
-    @Initial case idle(Idle)
+    @Initial case idle(Idle = makeIdle())
     case loading(Loading)
     case loaded(Loaded)
     case failed(Failed)
@@ -26,6 +26,7 @@ nonisolated public enum Flow: Sendable {
         public typealias Output = Int
         public typealias Failure = Never
     }
+    public static func makeIdle() -> Idle { Idle(attempts: 0) }
     @Restoration
     fileprivate static func restore(_ saved: Int) throws(Problem) -> Restoration {
         guard saved >= 0 else { throw .negative }

@@ -137,7 +137,7 @@ public consuming func begin(_ input: Int) -> Advance<Self, Owned<Loading>, Effec
 }
 
 /// Creates ownership only in the declared initial phase.
-public static func owned(_ initial: consuming Idle) -> Owned<Idle> {
+public static func owned(_ initial: consuming Idle = Flow.makeIdle()) -> Owned<Idle> {
     Owned(initial)
 }
 
@@ -886,7 +886,7 @@ public struct Local: ~Copyable {
     fileprivate var engine: _StateMachineEngine
     fileprivate var ledger = _StateMachineLedger()
     /// Creates fresh authority only in the declared initial phase.
-    public init(_ initial: Idle, configuration: LocalConfiguration = .default) {
+    public init(_ initial: Idle = Flow.makeIdle(), configuration: LocalConfiguration = .default) {
         engine = _StateMachineEngine(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration)
     }
     /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
@@ -1026,7 +1026,7 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
     private typealias Host = RuntimeMainActorHost<Flow, Effect, Completion, PreparationRejection>
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
-    public init(_ initial: Idle, drivers: MainActorDrivers, configuration: Configuration = .default,
+    public init(_ initial: Idle = Flow.makeIdle(), drivers: MainActorDrivers, configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
         }) {
@@ -1091,6 +1091,30 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
             prepare: {
                 _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh initial authority, selecting one driver closure per operation.
+    public convenience init(_ initial: Idle = Flow.makeIdle(),
+        fetchDriver: @escaping @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
+        auditDriver: @escaping @MainActor (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
+        }) {
+        self.init(initial, drivers: MainActorDrivers(fetch: fetchDriver, audit: auditDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
+    public convenience init(restoring saved: Int,
+        fetchDriver: @escaping @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
+        auditDriver: @escaping @MainActor (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
+        }) throws(Problem) {
+        try self.init(restoring: saved, drivers: MainActorDrivers(fetch: fetchDriver, audit: auditDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
     }
     /// Captures a complete historical observation.
     public func snapshot() -> Snapshot {
@@ -1242,7 +1266,7 @@ public let fetch: @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Fa
 public final class Shared: Sendable {
     private let host: RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>
     /// Creates fresh initial authority and retains the driver selection immutably.
-    public init(_ initial: Idle, drivers: Drivers, configuration: Configuration = .default,
+    public init(_ initial: Idle = Flow.makeIdle(), drivers: Drivers, configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
@@ -1305,6 +1329,30 @@ public final class Shared: Sendable {
             }, prepare: {
                 _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh initial authority, selecting one driver closure per operation.
+    public convenience init(_ initial: Idle = Flow.makeIdle(),
+        fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
+        }) {
+        self.init(initial, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
+    public convenience init(restoring saved: Int,
+        fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
+        }) throws(Problem) {
+        try self.init(restoring: saved, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
     }
     /// Captures a coherent historical observation.
     public func snapshot() -> Snapshot {
@@ -1422,7 +1470,7 @@ public final class ActorHost: Sendable {
     private typealias Host = RuntimeActorHost<Flow, Effect, Completion, PreparationRejection>
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
-    public init(_ initial: Idle, drivers: Drivers, configuration: Configuration = .default,
+    public init(_ initial: Idle = Flow.makeIdle(), drivers: Drivers, configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
@@ -1487,6 +1535,30 @@ public final class ActorHost: Sendable {
             prepare: {
                 _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh initial authority, selecting one driver closure per operation.
+    public convenience init(_ initial: Idle = Flow.makeIdle(),
+        fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
+        }) {
+        self.init(initial, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
+    public convenience init(restoring saved: Int,
+        fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
+        }) throws(Problem) {
+        try self.init(restoring: saved, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
     }
     /// Captures a complete historical observation.
     public func snapshot() async -> Snapshot {

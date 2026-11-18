@@ -13,6 +13,8 @@ struct Schema {
     struct Case {
         let caseName: String
         let payloadType: String?
+        /// The declared default construction, spelled so it resolves outside the schema.
+        var defaultValue: String?
     }
 
     enum Mode: String {
@@ -118,6 +120,8 @@ struct Schema {
     let access: Access
     let mode: Mode
     let initial: String
+    /// The declared default construction of the initial payload, spelled so it resolves outside the schema.
+    let initialDefault: String?
     let scopes: [String]
     let phases: [Phase]
     let inputs: [Case]
@@ -369,7 +373,45 @@ private struct SchemaParser {
         return matches.first
     }
 
-    private func cases(_ declaration: EnumDeclSyntax, payloads: ClosedRange<Int>) throws -> [Schema.Case] {
+    /// Reads the default value of the `@Initial` case: a no-argument construction of its payload, or a call to
+    /// a no-argument static function of the schema, spelled so it resolves outside the schema.
+    private func initialDefault(
+        _ expression: ExprSyntax,
+        payload: String,
+        schema: String,
+        functions: Set<String>
+    ) throws -> String {
+        func path(_ expression: ExprSyntax) -> [String]? {
+            if let reference = expression.as(DeclReferenceExprSyntax.self), reference.argumentNames == nil {
+                return [reference.baseName.text]
+            }
+            if let member = expression.as(MemberAccessExprSyntax.self), member.declName.argumentNames == nil {
+                guard let base = member.base else { return [".", member.declName.baseName.text] }
+                return path(base).map { $0 + [member.declName.baseName.text] }
+            }
+            return nil
+        }
+        if let call = expression.as(FunctionCallExprSyntax.self), call.arguments.isEmpty,
+            call.trailingClosure == nil, call.additionalTrailingClosures.isEmpty,
+            var names = path(call.calledExpression)
+        {
+            if names.count > 1, names.first == schema || names.first == "Self" { names.removeFirst() }
+            if names == [".", "init"] || names == [payload] || names == [payload, "init"] {
+                return "\(schema).\(payload)()"
+            }
+            if names.count == 1, functions.contains(names[0]) { return "\(schema).\(names[0])()" }
+        }
+        try reject(
+            expression,
+            "Put this construction in a static function that returns \(payload) and name that function here."
+        )
+    }
+
+    private func cases(
+        _ declaration: EnumDeclSyntax,
+        payloads: ClosedRange<Int>,
+        initial: String? = nil
+    ) throws -> [Schema.Case] {
         guard declaration.genericParameterClause == nil, declaration.genericWhereClause == nil else {
             try reject(declaration, "Input and Scope must be nongeneric closed enums.")
         }
@@ -387,6 +429,14 @@ private struct SchemaParser {
         let qualifier = NestedTypeQualifier(
             owner: declaration.name.text,
             names: declaration.name.text == "Input" ? nested : []
+        )
+        let staticFunctions = Set(
+            declaration.memberBlock.members.compactMap { member -> String? in
+                guard let function = member.decl.as(FunctionDeclSyntax.self),
+                    function.modifiers.contains(where: { $0.name.text == "static" })
+                else { return nil }
+                return function.name.text
+            }
         )
         for member in declaration.memberBlock.members {
             guard let cases = member.decl.as(EnumCaseDeclSyntax.self) else { continue }
@@ -406,15 +456,34 @@ private struct SchemaParser {
                                 : "Each Input case accepts zero or one unlabeled payload."
                     )
                 }
+                var defaultValue: String?
                 if let parameter = parameters?.first {
-                    guard parameter.firstName == nil || parameter.firstName?.text == "_",
-                        parameter.defaultValue == nil
-                    else { try reject(parameter, "Use an unlabeled payload without a default value.") }
+                    let defaultable = element.name.text == initial
+                    guard parameter.firstName == nil || parameter.firstName?.text == "_" else {
+                        try reject(
+                            parameter,
+                            defaultable
+                                ? "Use an unlabeled payload."
+                                : "Use an unlabeled payload without a default value."
+                        )
+                    }
+                    guard defaultable || parameter.defaultValue == nil else {
+                        try reject(parameter, "Use an unlabeled payload without a default value.")
+                    }
+                    if defaultable, let value = parameter.defaultValue?.value {
+                        defaultValue = try initialDefault(
+                            value,
+                            payload: qualifier.qualify(parameter.type),
+                            schema: declaration.name.text,
+                            functions: staticFunctions
+                        )
+                    }
                 }
                 result.append(
                     Schema.Case(
                         caseName: element.name.text,
-                        payloadType: parameters?.first.map { qualifier.qualify($0.type) }
+                        payloadType: parameters?.first.map { qualifier.qualify($0.type) },
+                        defaultValue: defaultValue
                     )
                 )
             }
@@ -542,7 +611,7 @@ private struct SchemaParser {
                 }
             }
         }
-        let rootCases = try cases(declaration, payloads: 1 ... 1)
+        let rootCases = try cases(declaration, payloads: 1 ... 1, initial: initial)
         let phases = try rootCases.map { value -> Schema.Phase in
             guard let type = value.payloadType, identifier(type), nominalNames.contains(type),
                 !["Input", "Effect", "Scope"].contains(type)
@@ -1027,6 +1096,7 @@ private struct SchemaParser {
             access: access,
             mode: mode,
             initial: initial,
+            initialDefault: rootCases.first { $0.caseName == initial }?.defaultValue,
             scopes: scopes,
             phases: phases,
             inputs: inputs,

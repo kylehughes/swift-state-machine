@@ -19,8 +19,11 @@ nonisolated private enum PlatformWorkflow: Sendable {
 public func stateMachinePlatformCheck() throws -> UInt64 {
     let user = try UserID("platform-check")
     let owner = ReferenceProfile.Shared(
-        .init(userID: user),
-        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        ReferenceProfile.Idle(userID: user),
+        drivers: ReferenceProfile.Drivers(
+            fetch: { _ in .failure(.unavailable) },
+            audit: { _ in .failure(.unavailable) }
+        )
     )
     guard case .idle(let idle) = owner.snapshot() else { return 0 }
     let request = try ProfileRequest(userID: user)
@@ -34,7 +37,7 @@ public func stateMachinePlatformCheck() throws -> UInt64 {
 
 /// Links a client-authored macro expansion and its manually driven value owner.
 public func stateMachineSchemaPlatformCheck() throws -> UInt64 {
-    var owner = PlatformWorkflow.Local(.init(value: 0))
+    var owner = PlatformWorkflow.Local(PlatformWorkflow.Idle(value: 0))
     guard case .idle(let initial) = owner.snapshot(),
         case .committed(let receipt) = owner.commit(try initial.edit(1))
     else { return 0 }
@@ -50,7 +53,7 @@ public func stateMachineSchemaPlatformCheck() throws -> UInt64 {
     let user = try UserID("platform-ui")
     let editor = try ProfileEditor(
         request: ProfileRequest(userID: user),
-        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        drivers: GeneratedProfile.MainActorDrivers(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
     )
     let receipt = try editor.load()
     let background = SnapshotPresentation(editor.presentation.snapshot, revision: { $0.revision })
@@ -67,8 +70,9 @@ public func stateMachineSchemaPlatformCheck() throws -> UInt64 {
 public func stateMachineActorPlatformCheck() async throws -> UInt64 {
     let user = try UserID("platform-actor")
     let owner = GeneratedProfile.ActorHost(
-        .init(userID: user),
-        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        GeneratedProfile.Idle(userID: user),
+        fetchDriver: { _ in .failure(.unavailable) },
+        auditDriver: { _ in .failure(.unavailable) }
     )
     let receipt = try await owner.send(.load(ProfileRequest(userID: user)))
     await owner.shutdown()
@@ -78,8 +82,8 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
 /// Links the snapshot sequences of every hosted owner and the presentation that observes one.
 @MainActor public func stateMachineSequencePlatformCheck() async throws -> UInt64 {
     let note = GeneratedNote.MainActorHost(
-        .init(text: "platform-sequence"),
-        drivers: .init(save: { .success(.init(text: $0.text)) })
+        GeneratedNote.Draft(text: "platform-sequence"),
+        saveDriver: { .success(GeneratedNote.Saved(text: $0.text)) }
     )
     var last: UInt64 = 0
     for await revision in try note.snapshots({ $0.revision }).prefix(1) { last += revision }
@@ -89,8 +93,9 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
     }
     let user = try UserID("platform-sequence")
     let shared = GeneratedProfile.Shared(
-        .init(userID: user),
-        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        GeneratedProfile.Idle(userID: user),
+        fetchDriver: { _ in .failure(.unavailable) },
+        auditDriver: { _ in .failure(.unavailable) }
     )
     let presentation = SnapshotPresentation(shared.snapshot())
     presentation.observe(try shared.snapshots())
@@ -105,16 +110,18 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
     }
     presentation.stopObserving()
     let actor = GeneratedProfile.ActorHost(
-        .init(userID: user),
-        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        GeneratedProfile.Idle(userID: user),
+        fetchDriver: { _ in .failure(.unavailable) },
+        auditDriver: { _ in .failure(.unavailable) }
     )
     for await snapshot in try await actor.snapshots() {
         last += snapshot.revision
         if !snapshot.isClosed { _ = await actor.close() }
     }
     let main = GeneratedProfile.MainActorHost(
-        .init(userID: user),
-        drivers: .init(fetch: { _ in .failure(.unavailable) }, audit: { _ in .failure(.unavailable) })
+        GeneratedProfile.Idle(userID: user),
+        fetchDriver: { _ in .failure(.unavailable) },
+        auditDriver: { _ in .failure(.unavailable) }
     )
     let sequence: GeneratedProfile.Snapshots = try main.snapshots()
     for await revision in sequence.map({ $0.revision }).prefix(1) { last += revision }

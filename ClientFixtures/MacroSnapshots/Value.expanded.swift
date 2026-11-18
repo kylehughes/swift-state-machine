@@ -53,7 +53,7 @@ internal consuming func finish(_ input: Int) -> Owned<Done> where Phase == Idle 
 }
 
 /// Creates ownership only in the declared initial phase.
-internal static func owned(_ initial: consuming Idle) -> Owned<Idle> {
+internal static func owned(_ initial: consuming Idle = Counter.Idle()) -> Owned<Idle> {
     Owned(initial)
 }
 
@@ -406,7 +406,7 @@ internal struct Local: ~Copyable {
     fileprivate var engine: _StateMachineEngine
     fileprivate var ledger = _StateMachineLedger()
     /// Creates fresh authority only in the declared initial phase.
-    internal init(_ initial: Idle, configuration: LocalConfiguration = .default) {
+    internal init(_ initial: Idle = Counter.Idle(), configuration: LocalConfiguration = .default) {
         engine = _StateMachineEngine(.idle(initial), scopes: [], limits: configuration)
     }
     /// Returns an immutable historical observation.
@@ -515,7 +515,7 @@ internal struct Local: ~Copyable {
     private typealias Host = RuntimeMainActorHost<Counter, Effect, Completion, PreparationRejection>
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
-    internal init(_ initial: Idle, drivers: MainActorDrivers = .init(), configuration: Configuration = .default,
+    internal init(_ initial: Idle = Counter.Idle(), drivers: MainActorDrivers = .init(), configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
         }) {
@@ -666,7 +666,7 @@ internal struct Drivers: Sendable {
 internal final class Shared: Sendable {
     private let host: RuntimeSharedHost<Counter, Effect, Completion, PreparationRejection>
     /// Creates fresh initial authority and retains the driver selection immutably.
-    internal init(_ initial: Idle, drivers: Drivers = .init(), configuration: Configuration = .default,
+    internal init(_ initial: Idle = Counter.Idle(), drivers: Drivers = .init(), configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {
@@ -787,7 +787,7 @@ internal final class ActorHost: Sendable {
     private typealias Host = RuntimeActorHost<Counter, Effect, Completion, PreparationRejection>
     private let host: Host
     /// Creates fresh authority and immutable execution selections.
-    internal init(_ initial: Idle, drivers: Drivers = .init(), configuration: Configuration = .default,
+    internal init(_ initial: Idle = Counter.Idle(), drivers: Drivers = .init(), configuration: Configuration = .default,
         completionPolicy: CompletionPolicy = .manualOnConflict,
         onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
         }) {

@@ -570,6 +570,114 @@ struct SchemaTests {
         }
     }
 
+    @Test func initialCaseMayDeclareADefaultConstruction() throws {
+        #expect(try Self.parse(Self.schema).initialDefault == nil)
+        let helper = "struct Idle {}\n    static func makeIdle() -> Idle { Idle() }"
+        let spellings: [(String, String)] = [
+            ("Idle()", "Flow.Idle()"),
+            (".init()", "Flow.Idle()"),
+            ("Idle.init()", "Flow.Idle()"),
+            ("Flow.Idle()", "Flow.Idle()"),
+            ("Self.Idle()", "Flow.Idle()"),
+            ("makeIdle()", "Flow.makeIdle()"),
+            ("Flow.makeIdle()", "Flow.makeIdle()"),
+            ("Self.makeIdle()", "Flow.makeIdle()"),
+        ]
+        for (written, generated) in spellings {
+            let source = Self.schema.replacingOccurrences(of: "struct Idle {}", with: helper)
+                .replacingOccurrences(of: "@Initial case idle(Idle)", with: "@Initial case idle(Idle = \(written))")
+            let result = try Self.parse(source)
+            #expect(result.initialDefault == generated, "\(written)")
+            #expect(result.phases.first?.typeName == "Idle")
+        }
+        let unlabeled = Self.schema.replacingOccurrences(
+            of: "@Initial case idle(Idle)",
+            with: "@Initial case idle(_ value: Idle = Idle())"
+        )
+        #expect(try Self.parse(unlabeled).initialDefault == "Flow.Idle()")
+    }
+
+    @Test func ownedOnlyInitialCaseMayDeclareADefaultConstruction() throws {
+        let source = #"""
+            @StateMachine(mode: .ownedOnly)
+            enum Resource {
+                struct Idle: ~Copyable {}
+                @Initial case idle(Idle = Idle())
+                enum Input {}
+            }
+            """#
+        #expect(try Self.parse(source).initialDefault == "Resource.Idle()")
+    }
+
+    @Test func diagnosesAnInitialDefaultThatIsNotAPlainConstructionOrStaticFunctionCall() throws {
+        let helper =
+            "struct Idle {}\n    static func makeIdle() -> Idle { Idle() }\n    func notStatic() -> Idle { Idle() }"
+        let message = "Put this construction in a static function that returns Idle and name that function here."
+        for written in [
+            "Idle(attempts: 0)",
+            "Idle(0)",
+            "Loading()",
+            "Idle().self",
+            "makeIdle(1)",
+            "makeIdle",
+            "unknown()",
+            "notStatic()",
+            "Other.makeIdle()",
+            ".makeIdle()",
+            "Flow.Idle.makeIdle()",
+            "makeIdle() ?? makeIdle()",
+            "try makeIdle()",
+            "makeIdle { Idle() }",
+            "Idle<Int>()",
+            "0",
+        ] {
+            let source = Self.schema.replacingOccurrences(of: "struct Idle {}", with: helper)
+                .replacingOccurrences(of: "@Initial case idle(Idle)", with: "@Initial case idle(Idle = \(written))")
+            do {
+                _ = try Self.parse(source)
+                Issue.record("Expected rejection of the default \(written)")
+            } catch let error as DiagnosticsError {
+                #expect(error.diagnostics.map(\.message) == [message], "\(written)")
+                #expect(error.diagnostics.first?.node.trimmedDescription == written, "\(written)")
+            }
+        }
+    }
+
+    @Test func diagnosesDefaultsOutsideTheInitialCase() throws {
+        let message = "Use an unlabeled payload without a default value."
+        let failures: [(String, String)] = [
+            (
+                "another phase",
+                Self.schema.replacingOccurrences(of: "case loading(Loading)", with: "case loading(Loading = Loading())")
+            ),
+            ("an input", Self.schema.replacingOccurrences(of: "case start(Int)", with: "case start(Int = 0)")),
+            (
+                "a phase of an initial case with a default",
+                Self.schema
+                    .replacingOccurrences(of: "@Initial case idle(Idle)", with: "@Initial case idle(Idle = Idle())")
+                    .replacingOccurrences(of: "case loading(Loading)", with: "case loading(Loading = Loading())")
+            ),
+        ]
+        for (name, source) in failures {
+            do {
+                _ = try Self.parse(source)
+                Issue.record("Expected rejection of a default on \(name)")
+            } catch let error as DiagnosticsError {
+                #expect(error.diagnostics.map(\.message) == [message], "\(name)")
+            }
+        }
+        let labeled = Self.schema.replacingOccurrences(
+            of: "@Initial case idle(Idle)",
+            with: "@Initial case idle(value: Idle = Idle())"
+        )
+        do {
+            _ = try Self.parse(labeled)
+            Issue.record("Expected rejection of a labeled initial payload")
+        } catch let error as DiagnosticsError {
+            #expect(error.diagnostics.map(\.message) == ["Use an unlabeled payload."])
+        }
+    }
+
     @Test func caseNamesFollowSwiftIdentifierGrammar() throws {
         let source = Self.schema.replacingOccurrences(of: "case idle(Idle)", with: "case начало(Idle)")
         #expect(try Self.parse(source).initial == "начало")

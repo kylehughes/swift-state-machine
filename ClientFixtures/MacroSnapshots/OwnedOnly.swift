@@ -3,9 +3,9 @@ import StateMachineSchema
 
 @StateMachine(mode: .ownedOnly)
 nonisolated enum UniqueCounter: ~Copyable {
-    struct Idle: ~Copyable { let value: Int }
+    struct Idle: ~Copyable { var value: Int = 0 }
     struct Done: ~Copyable { let value: Int }
-    @Initial case idle(Idle)
+    @Initial case idle(Idle = .init())
     case done(Done)
     enum Input { case finish(Bool) }
     enum Rejection: Error { case declined }

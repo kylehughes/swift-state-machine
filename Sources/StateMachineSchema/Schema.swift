@@ -38,6 +38,13 @@ public macro StateMachine(mode: StateMachineMode) =
 /// Marks the phase case in which fresh authority is created.
 ///
 /// Apply it to exactly one single-phase `case` declaration directly inside the schema.
+///
+/// This is the only case that may give its payload a default, as in `@Initial case idle(Idle = Idle())`.
+/// Every fresh entry point then takes the initial payload as an optional argument: `owned(_:)`, `Local`,
+/// `Shared`, `ActorHost`, and `MainActorHost`. The default is a call with no arguments that constructs the
+/// payload, or calls a static function of the schema that returns it: `Idle()`, `makeIdle()`, or
+/// `Lookup.makeIdle()`. The compiler checks the call, so a public schema needs a public initializer or
+/// function. A `restoring:` initializer never has a default.
 @attached(peer)
 public macro Initial() = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 

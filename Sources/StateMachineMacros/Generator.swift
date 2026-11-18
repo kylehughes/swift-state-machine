@@ -12,6 +12,8 @@ struct Generator {
     }
     var sendable: String { schema.mode == .shared ? ": Sendable" : "" }
     var initialType: String { schema.phases.first { $0.caseName == schema.initial }!.typeName }
+    /// The default of every fresh entry point's initial parameter, when the schema declares one.
+    var initialDefault: String { schema.initialDefault.map { " = \($0)" } ?? "" }
     var engine: String { "RuntimeState<\(name), Effect>" }
     func declaration(_ source: String) -> DeclSyntax { DeclSyntax(stringLiteral: source) }
 
@@ -201,7 +203,7 @@ struct Generator {
                 \(methods)
             }
             /// Creates ownership only in the declared initial phase.
-            \(access)static func owned(_ initial: consuming \(initialType)) -> Owned<\(initialType)> { Owned(initial) }
+            \(access)static func owned(_ initial: consuming \(initialType)\(initialDefault)) -> Owned<\(initialType)> { Owned(initial) }
             """
     }
 
@@ -715,7 +717,7 @@ struct Generator {
             fileprivate var engine: _StateMachineEngine
             fileprivate var ledger = _StateMachineLedger()
             /// Creates fresh authority only in the declared initial phase.
-            \(access)init(_ initial: \(initialType), configuration: LocalConfiguration = .default) {
+            \(access)init(_ initial: \(initialType)\(initialDefault), configuration: LocalConfiguration = .default) {
                 engine = _StateMachineEngine(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration)
             }\(restoringLocal)
             /// Returns an immutable historical observation.
@@ -874,11 +876,11 @@ struct Generator {
                 private typealias Host = \(runtime)<\(name), Effect, Completion, PreparationRejection>
                 private let host: Host
                 /// Creates fresh authority and immutable execution selections.
-                \(access)init(_ initial: \(initialType), drivers: \(drivers)\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
+                \(access)init(_ initial: \(initialType)\(initialDefault), drivers: \(drivers)\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
                     completionPolicy: CompletionPolicy = .manualOnConflict,
                     onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in }) {
                     \(construction(model: ".\(schema.initial)(initial)", scopes: "[\(initialScopes)]"))
-                }\(restoring ?? "")
+                }\(restoring ?? "")\(closureInitializers(drivers: drivers, isolation: isolation))
                 /// Captures a complete historical observation.
                 \(access)func snapshot()\(asynchronous) -> Snapshot { _stateMachineSnapshot(\(awaiting)host.snapshot()) }
                 /// Routes, prepares and admits one input in a single isolated turn without suspension.
@@ -998,11 +1000,11 @@ struct Generator {
             \(access)final class Shared: Sendable {
                 private let host: RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>
                 /// Creates fresh initial authority and retains the driver selection immutably.
-                \(access)init(_ initial: \(initialType), drivers: Drivers\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
+                \(access)init(_ initial: \(initialType)\(initialDefault), drivers: Drivers\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
                     completionPolicy: CompletionPolicy = .manualOnConflict,
                     onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in }) {
                     \(construction(model: ".\(schema.initial)(initial)", scopes: "[\(initialScopes)]"))
-                }\(restoring ?? "")
+                }\(restoring ?? "")\(closureInitializers(drivers: "Drivers", isolation: "@Sendable"))
                 /// Captures a coherent historical observation.
                 \(access)func snapshot() -> Snapshot { _stateMachineSnapshot(host.snapshot()) }
                 /// Registers a serial capacity-one latest-value observation callback.
@@ -1068,6 +1070,48 @@ struct Generator {
                     }
                 }
             }
+            """
+    }
+
+    /// The convenience initializers of a managed owner that take each operation's driver as its own parameter.
+    ///
+    /// Each label is the operation's effect case followed by `Driver`, so no operation name can collide with
+    /// another parameter. A schema without operations has none.
+    private func closureInitializers(drivers: String, isolation: String) -> String {
+        guard !schema.operations.isEmpty else { return "" }
+        let closures = schema.operations
+            .map {
+                "\($0.effect)Driver: @escaping \(isolation) (\($0.name).Input) async -> Result<\($0.name).Output, \($0.name).Failure>"
+            }
+            .joined(separator: ",\n")
+        let selection = schema.operations.map { "\($0.effect): \($0.effect)Driver" }.joined(separator: ", ")
+        let restoring = schema.restoration.map { validator in
+            """
+
+                /// Creates fresh authority in the phase `\(validator.name)` validates from saved data, selecting one driver closure per operation.
+                \(access)convenience init(restoring saved: \(validator.archiveType),
+                    \(closures),
+                    configuration: Configuration = .default,
+                    completionPolicy: CompletionPolicy = .manualOnConflict,
+                    onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in })\(restorationThrows) {
+                    \(validator.failureType == nil ? "" : "try ")self.init(restoring: saved, drivers: \(drivers)(\(selection)),
+                        configuration: configuration, completionPolicy: completionPolicy,
+                        onReconciliationRequired: onReconciliationRequired)
+                }
+            """
+        }
+        return """
+
+                /// Creates fresh initial authority, selecting one driver closure per operation.
+                \(access)convenience init(_ initial: \(initialType)\(initialDefault),
+                    \(closures),
+                    configuration: Configuration = .default,
+                    completionPolicy: CompletionPolicy = .manualOnConflict,
+                    onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in }) {
+                    self.init(initial, drivers: \(drivers)(\(selection)),
+                        configuration: configuration, completionPolicy: completionPolicy,
+                        onReconciliationRequired: onReconciliationRequired)
+                }\(restoring ?? "")
             """
     }
 

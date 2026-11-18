@@ -19,7 +19,7 @@ import StateMachineUI
         self.request = request
         presentation = try StateMachinePresentation(
             GeneratedProfile.MainActorHost(
-                .init(userID: request.userID),
+                GeneratedProfile.Idle(userID: request.userID),
                 drivers: drivers,
                 configuration: configuration
             )

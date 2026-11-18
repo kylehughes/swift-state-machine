@@ -743,6 +743,28 @@ internal let save: @MainActor (Save.Input) async -> Result<Save.Output, Save.Fai
                 _stateMachineDeliveryPreparation($0)
             }, reconciliationRequired: onReconciliationRequired)
     }
+    /// Creates fresh initial authority, selecting one driver closure per operation.
+    internal convenience init(_ initial: Draft,
+        saveDriver: @escaping @MainActor (Save.Input) async -> Result<Save.Output, Save.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
+        }) {
+        self.init(initial, drivers: MainActorDrivers(save: saveDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
+    }
+    /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
+    internal convenience init(restoring saved: Box,
+        saveDriver: @escaping @MainActor (Save.Input) async -> Result<Save.Output, Save.Failure>,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .manualOnConflict,
+        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
+        }) {
+        self.init(restoring: saved, drivers: MainActorDrivers(save: saveDriver),
+            configuration: configuration, completionPolicy: completionPolicy,
+            onReconciliationRequired: onReconciliationRequired)
+    }
     /// Captures a complete historical observation.
     internal func snapshot() -> Snapshot {
         _stateMachineSnapshot(host.snapshot())

@@ -57,6 +57,6 @@ internal consuming func finish(_ input: Bool) -> Advance<Self, Owned<Done>, Neve
 }
 
 /// Creates ownership only in the declared initial phase.
-internal static func owned(_ initial: consuming Idle) -> Owned<Idle> {
+internal static func owned(_ initial: consuming Idle = UniqueCounter.Idle()) -> Owned<Idle> {
     Owned(initial)
 }

@@ -5,7 +5,7 @@ import Foundation
 import os
 
 func uncontendedLocal(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?) throws -> ResultRow {
-    var owner = PerformanceFlow.Local(.init(bytes: Array(repeating: 0, count: bytes)))
+    var owner = PerformanceFlow.Local(PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)))
     var participant = Participant(role: "writer")
     if timing {
         participant.snapshotNanoseconds.reserveCapacity(operations)
@@ -67,8 +67,8 @@ func uncontendedLocal(bytes: Int, operations: Int, timing: Bool, probe: Allocato
 
 func uncontended(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?) async throws -> ResultRow {
     let owner = PerformanceFlow.Shared(
-        .init(bytes: Array(repeating: 0, count: bytes)),
-        drivers: .init(work: { .success($0) })
+        PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)),
+        drivers: PerformanceFlow.Drivers(work: { .success($0) })
     )
     var participant = Participant(role: "writer")
     if timing {
@@ -144,8 +144,8 @@ func concurrent(
     probe: AllocatorProbe?
 ) async throws -> ResultRow {
     let owner = PerformanceFlow.Shared(
-        .init(bytes: Array(repeating: 0, count: bytes)),
-        drivers: .init(work: { .success($0) })
+        PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)),
+        drivers: PerformanceFlow.Drivers(work: { .success($0) })
     )
     let results = OSAllocatedUnfairLock(initialState: [Participant]())
     let start = now()
@@ -260,8 +260,8 @@ func pressure(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?)
     #endif
     let gate = DriverGate()
     let owner = PerformanceFlow.Shared(
-        .init(bytes: Array(repeating: 0, count: bytes)),
-        drivers: .init(work: { await gate.run($0) }),
+        PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)),
+        drivers: PerformanceFlow.Drivers(work: { await gate.run($0) }),
         configuration: try .init(commits: 8, descriptors: 1, executions: 16, subscribers: 2),
         completionPolicy: .retryPure
     )
@@ -413,8 +413,8 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
         #endif
         let gate = DriverGate()
         var owner: PerformanceFlow.Shared? = PerformanceFlow.Shared(
-            .init(bytes: Array(repeating: 0, count: bytes)),
-            drivers: .init(work: { await gate.run($0) })
+            PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)),
+            drivers: PerformanceFlow.Drivers(work: { await gate.run($0) })
         )
         weak let marker = owner
         #if PERFORMANCE_RESOURCE_INSTRUMENTED

@@ -10,6 +10,8 @@ nonisolated public enum GeneratedNote {
         public let text: String
         /// Creates ordinary draft data.
         public init(text: String) { self.text = text }
+        /// Creates an empty draft.
+        public init() { text = "" }
     }
     /// Historical submitted data, independent of whether its task remains authorized.
     public struct Saving: ~Sendable {
@@ -25,7 +27,7 @@ nonisolated public enum GeneratedNote {
         /// Creates ordinary result data without granting completion authority.
         public init(text: String) { self.text = text }
     }
-    @Initial case draft(Draft)
+    @Initial case draft(Draft = Draft())
     case saving(Saving)
     case saved(Saved)
     /// Authority that edges invalidate and operations hold.
