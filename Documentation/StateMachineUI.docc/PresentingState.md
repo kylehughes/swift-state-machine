@@ -19,13 +19,11 @@ import SwiftUI
 func makePresentation() throws -> ObservableStateMachinePresentation<GeneratedProfile.MainActorHost> {
     let user = try UserID("taylor")
     let host = GeneratedProfile.MainActorHost(
-        .init(userID: user),
-        drivers: .init(
-            fetch: { request in
-                .success(Profile(userID: request.userID, name: "Taylor"))
-            },
-            audit: { _ in .failure(.unavailable) }
-        )
+        GeneratedProfile.Idle(userID: user),
+        fetchDriver: { request in
+            .success(Profile(userID: request.userID, name: "Taylor"))
+        },
+        auditDriver: { _ in .failure(.unavailable) }
     )
     return try ObservableStateMachinePresentation(host)
 }

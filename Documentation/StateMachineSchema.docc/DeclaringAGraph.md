@@ -27,14 +27,15 @@ nonisolated enum Approval: Sendable {
 }
 
 func approveDraft() {
-    let approved = Approval.owned(.init(title: "Launch checklist")).approve()
+    let draft = Approval.Draft(title: "Launch checklist")
+    let approved = Approval.owned(draft).approve()
     print(approved.withValue { $0.title })
 }
 ```
 
-`Approval.owned(_:)` creates an owner in the initial phase, and `withValue`
-reads the payload an owner holds. The generated `Owned<Draft>` exposes
-`approve`; `Owned<Approved>` does not.
+`Approval.owned(_:)` takes the draft and creates an owner in the initial phase,
+and `withValue` reads the payload an owner holds. The generated `Owned<Draft>`
+exposes `approve`; `Owned<Approved>` does not.
 Calling the edge consumes the draft owner and returns `Owned<Approved>`. An edge
 that starts nothing returns its destination payload directly, and the macro
 derives the edge's endpoints from its signature: `approve` takes a `Draft` and
@@ -52,6 +53,7 @@ The plain `Draft` and `Approved` values remain ordinary data. Constructing an
 | The ownership contract | `@StateMachine(mode: .shared)`, `.isolated`, or `.ownedOnly` on a `nonisolated enum` |
 | A phase | A `case` with one payload type declared inside the schema |
 | The initial phase | `@Initial` on exactly one `case` |
+| A default initial payload | A default on the initial case, as in `@Initial case idle(Idle = Idle())` |
 | An input | A case of the nested `enum Input` |
 | An edge that starts nothing | `@Transition(on: Input.approve)` on a function returning the destination payload |
 | An edge that starts operations | `@Transition(on: Input.begin, starts: [Fetch.self])` on a function returning `Change<Destination, Effect.Begin>` |
@@ -71,6 +73,21 @@ be written `Draft`, `Self.Draft`, or `Approval.Draft`. An operation can spell
 its infallible `Failure` as `Never` or `Swift.Never`. An `Input` case can also
 carry a type declared inside `Input`.
 
+The `@Initial` case, and only that case, may give its payload a default. Every
+fresh entry point then takes the initial payload as an optional argument:
+`Local`, `Shared`, `ActorHost`, `MainActorHost`, and `owned(_:)`. An
+`init(restoring:)` is unaffected, because saved data is always explicit. The
+default is a call with no arguments. It either constructs the payload, as in
+`Idle()`, or calls a static function of the schema that returns the payload, as
+in `makeIdle()` or `Lookup.makeIdle()`. An owner created without the payload
+evaluates the call once. The macro rejects any other expression, so to default
+to something more involved, put the construction in a static function that
+returns the payload and name that function. Swift checks the call itself: a
+public schema needs a public initializer or function, and a payload whose
+construction can throw or fail has no default. Declare one only when an empty
+start is true to the domain. A payload that carries required data, such as a
+user identifier, is passed explicitly.
+
 ## Start an operation
 
 An operation is work the host runs and whose result returns through a
@@ -83,7 +100,7 @@ nonisolated enum Lookup: Sendable {
     struct Searching: Sendable { let query: String }
     struct Found: Sendable { let answer: String }
 
-    @Initial case idle(Idle)
+    @Initial case idle(Idle = Idle())
     case searching(Searching)
     case found(Found)
 
@@ -174,27 +191,40 @@ nonisolated enum Note {
 
 @MainActor
 func saveNote() throws {
-    let host = Note.MainActorHost(.init(text: "Outline"))
+    let host = Note.MainActorHost(Note.Draft(text: "Outline"))
     try host.send(.save)
 }
 ```
 
 A managed owner takes a driver for each operation when it is created. A graph
-with no operations takes no `drivers:` argument, as `Note.MainActorHost` shows
-above. A driver returns `Result<Output, Failure>`:
+with no operations takes no drivers, as `Note.MainActorHost` shows above. A
+driver returns `Result<Output, Failure>`. Pass each driver as its own closure,
+labelled with the operation's effect case followed by `Driver`, so `Fetch` takes
+`fetchDriver:`. The closures follow the order the operations are declared, and
+each is required. With the default that `Lookup` declares, the host also needs
+no initial payload:
 
 ```swift
 @MainActor
 func search() async throws {
-    let host = Lookup.MainActorHost(
-        .init(),
-        drivers: .init(fetch: { query in .success("Results for \(query)") })
-    )
+    let host = Lookup.MainActorHost(fetchDriver: { query in .success("Results for \(query)") })
 
     let receipt = try host.send(.search("swift"))
     print("Accepted revision \(receipt.revision)")
 
     await host.shutdown()
+}
+```
+
+The same owner also takes a `Drivers` value through `drivers:`, or a
+`MainActorDrivers` value for `MainActorHost`. Prefer the value when one set of
+drivers serves several owners, when a test injects stubs, and when a graph has
+many operations, where one value is easier to read and pass than a long list of
+closures:
+
+```swift
+func makeOwners(drivers: Lookup.Drivers) -> (Lookup.Shared, Lookup.ActorHost) {
+    (Lookup.Shared(drivers: drivers), Lookup.ActorHost(drivers: drivers))
 }
 ```
 
@@ -372,7 +402,7 @@ nonisolated enum Rename: Sendable {
 
 @MainActor
 func renameDraft() {
-    let host = Rename.MainActorHost(.init(title: "Notes"))
+    let host = Rename.MainActorHost(Rename.Draft(title: "Notes"))
     do {
         try host.send(.rename(""))
     } catch .preparation(.rename(.empty)) {
@@ -413,7 +443,7 @@ nonisolated enum Upload: ~Copyable {
 }
 
 func sealUpload() {
-    switch Upload.owned(.init(handle: 3)).seal(false) {
+    switch Upload.owned(Upload.Open(handle: 3)).seal(false) {
     case .advanced(let sealed, _):
         sealed.withValue { print("Sealed \($0.handle)") }
     case .rejected(let failure, let open):
@@ -480,7 +510,7 @@ nonisolated enum MessageFlow: Sendable {
 }
 
 func publishLocally() throws {
-    var machine = MessageFlow.Local(.init(message: "Approved"))
+    var machine = MessageFlow.Local(MessageFlow.Ready(message: "Approved"))
     try machine.send(.send)
 
     for batch in machine.drainCommands(limit: 8) {
@@ -537,7 +567,7 @@ property on each value widens it to the schema-wide `Effect`:
 
 ```swift
 func ownedSearch() {
-    let change = Lookup.owned(.init()).begin("swift")
+    let change = Lookup.owned().begin("swift")
     print(change.effects.map(\.effect))
 
     let idle = change.next.cancel()
@@ -619,7 +649,7 @@ nonisolated enum Download: Sendable {
 func resume(_ saved: Download) async throws {
     let host = try Download.MainActorHost(
         restoring: saved,
-        drivers: .init(transfer: { name in .success(name.count) })
+        transferDriver: { name in .success(name.count) }
     )
     print(host.snapshot().revision)
 
@@ -632,7 +662,9 @@ The function takes the saved data as its one parameter, which can be any type
 that the application defines, and returns `Restoration`. It may use typed
 `throws`. Declaring it gives every owner except `Owned` an `init(restoring:)`
 that mirrors the ordinary initializer, takes the saved data in place of the
-initial payload, and throws exactly when the function does. A restored owner
+initial payload, and throws exactly when the function does. A managed owner's
+`init(restoring:)` also has the form with one closure per operation, as
+`transferDriver:` does here. A restored owner
 starts at revision zero with fresh authority. It adopts no ticket, task, or
 pending completion from any other owner.
 
@@ -650,7 +682,7 @@ the schema itself, a fork of a running owner is one initializer call:
 func fork(_ original: Download.Shared) throws -> Download.Shared {
     try Download.Shared(
         restoring: original.snapshot().model,
-        drivers: .init(transfer: { name in .success(name.count) })
+        transferDriver: { name in .success(name.count) }
     )
 }
 ```

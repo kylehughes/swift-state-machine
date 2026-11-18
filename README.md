@@ -6,16 +6,14 @@
 [![Test](https://github.com/kylehughes/swift-state-machine/actions/workflows/ci.yml/badge.svg)](https://github.com/kylehughes/swift-state-machine/actions/workflows/ci.yml)
 
 State Machine models a workflow as a graph of phases and generates a typed Swift
-API for it. The compiler only offers the edges declared for the current phase,
-and an owner only admits a change that was prepared from its current revision. A
-completion is admitted only while its operation still has authority.
+API for it. Each phase holds its own data and exposes only the transitions
+declared from it, so calling a transition that does not exist from that phase
+does not compile.
 
-Two bugs motivate the design. An asynchronous result can arrive after a request
-was cancelled or the account changed, and overwrite newer state with stale data.
-A value that a transition already consumed can be used a second time. State
-Machine closes both: a late result is rejected because the operation that
-produced it has lost its authority, and a consumed predecessor cannot be named
-again.
+State Machine also manages the asynchronous work that a transition starts. It
+applies a result only while the work that produced it is still current. If a
+request is cancelled, the account changes, or the workflow moves on first, a
+late result is rejected instead of overwriting newer state.
 
 The core `StateMachine` and `StateMachineSchema` modules have no UI
 dependencies. The same generated workflow runs in services, actors, background
@@ -83,18 +81,20 @@ nonisolated enum Approval: Sendable {
 }
 
 func approveDraft() {
-    let approved = Approval.owned(.init(title: "Launch checklist")).approve()
+    let draft = Approval.Draft(title: "Launch checklist")
+    let approved = Approval.owned(draft).approve()
     print(approved.withValue { $0.title })
 }
 ```
 
-`Approval.owned(_:)` creates an owner in the initial phase. `approve` takes a
-`Draft` and returns an `Approved`, so the macro derives an edge from the `draft`
-phase to the `approved` phase, with `Input.approve` as its trigger. The generated
-`Owned<Draft>` has `approve`, and `Owned<Approved>` does not, so calling the edge
-twice or in the wrong phase does not compile. Calling it consumes the draft
-owner. `Draft` and `Approved` are ordinary structs: constructing one gives no
-one authority to change an owner.
+`Approval.owned(_:)` takes the draft and creates an owner in the initial phase.
+`approve` takes a `Draft` and returns an `Approved`, so the macro derives an
+edge from the `draft` phase to the `approved` phase, with `Input.approve` as its
+trigger. The generated `Owned<Draft>` has `approve`, and `Owned<Approved>` does
+not, so calling the edge twice or in the wrong phase does not compile. Calling
+the edge consumes the `Owned<Draft>` value, so a phase owner that a transition
+already consumed cannot be used a second time. `Draft` and `Approved` are
+ordinary structs: constructing one gives no one authority to change an owner.
 
 To keep the state where other code can read and observe it, host the same graph.
 A graph with no operations needs no drivers:
@@ -102,7 +102,7 @@ A graph with no operations needs no drivers:
 ```swift
 @MainActor
 func approveInHost() throws {
-    let host = Approval.MainActorHost(.init(title: "Launch checklist"))
+    let host = Approval.MainActorHost(Approval.Draft(title: "Launch checklist"))
     let receipt = try host.send(.approve)
     print(receipt)
 }
@@ -128,7 +128,7 @@ nonisolated enum Lookup: Sendable {
     struct Searching: Sendable { let query: String }
     struct Found: Sendable { let answer: String }
 
-    @Initial case idle(Idle)
+    @Initial case idle(Idle = Idle())
     case searching(Searching)
     case found(Found)
 
@@ -157,10 +157,7 @@ nonisolated enum Lookup: Sendable {
 }
 
 func runLookup() async throws {
-    let lookup = Lookup.ActorHost(
-        .init(),
-        drivers: .init(fetch: { query in .success("Results for \(query)") })
-    )
+    let lookup = Lookup.ActorHost(fetchDriver: { query in .success("Results for \(query)") })
     let snapshots = try await lookup.snapshots()
     _ = try await lookup.send(.search("swift"))
 
@@ -178,6 +175,13 @@ Creating the host starts no work. Sending `.search` admits the `searching`
 phase, then runs the `fetch` driver. When the driver returns, the host checks
 that `Fetch` still has authority, applies `received`, and delivers the `found`
 snapshot to observers.
+
+`@Initial case idle(Idle = Idle())` declares the start, so the host needs no
+initial payload. A managed owner takes one closure for each operation, labelled
+with the operation's effect case and `Driver`, as in `fetchDriver:`. The
+`drivers:` form takes a `Lookup.Drivers` value instead. Use it to pass one set
+of drivers around, to inject stubs in a test, or when the graph has many
+operations.
 
 The schema is the only place the graph is written down, and the compiler
 enforces it:
@@ -243,13 +247,15 @@ unchanged. Use `send` for an event that should act on the current state: a timer
 a push notification, or a tap that means "cancel the current search".
 
 Each case of a snapshot holds an `Observed<Phase>`. Its methods are the edges
-whose source is that phase, and each returns a `Prepared` proposal. An owner's
-`commit(_:)` admits the proposal only if that observation is still the owner's
-current revision, and returns a `CommitResult`: `.committed(receipt)` or
-`.rejected(reason, current:)`. The result is not discardable. Use this path when
-the action belongs to the exact observation the user saw, and handle `.conflict`
-if an intervening commit advances the same open owner. Closing the owner takes
-precedence and produces `.closed`.
+whose source is that phase, and each returns a `Prepared` proposal. A `Prepared`
+proposal is noncopyable and is consumed when passed to `commit(_:)`, so it
+cannot be committed a second time. An owner's `commit(_:)` admits the proposal
+only if that observation is still the owner's current revision, and returns a
+`CommitResult`: `.committed(receipt)` or `.rejected(reason, current:)`. The
+result is not discardable. Use this path when the action belongs to the exact
+observation the user saw, and handle `.conflict` if an intervening commit
+advances the same open owner. Closing the owner takes precedence and produces
+`.closed`.
 
 ```swift
 @MainActor
@@ -287,13 +293,11 @@ import StateMachineExamples
 
 let user = try UserID("taylor")
 let machine = GeneratedProfile.Shared(
-    .init(userID: user),
-    drivers: .init(
-        fetch: { request in
-            .success(Profile(userID: request.userID, name: "Taylor"))
-        },
-        audit: { _ in .failure(.unavailable) }
-    )
+    GeneratedProfile.Idle(userID: user),
+    fetchDriver: { request in
+        .success(Profile(userID: request.userID, name: "Taylor"))
+    },
+    auditDriver: { _ in .failure(.unavailable) }
 )
 let subscription = try machine.subscribe { snapshot in
     if case .loaded(let loaded) = snapshot {
@@ -428,7 +432,7 @@ import SwiftUI
 @MainActor
 func makeLookup() throws -> ObservableStateMachinePresentation<Lookup.MainActorHost> {
     try ObservableStateMachinePresentation(
-        Lookup.MainActorHost(.init(), drivers: .init(fetch: { query in .success("Results for \(query)") }))
+        Lookup.MainActorHost(fetchDriver: { query in .success("Results for \(query)") })
     )
 }
 
@@ -666,7 +670,8 @@ import Testing
 @testable import Approvals
 
 @Test func approvingADraftReachesApproved() {
-    let approved = Approval.owned(.init(title: "Launch checklist")).approve()
+    let draft = Approval.Draft(title: "Launch checklist")
+    let approved = Approval.owned(draft).approve()
 
     #expect(approved.withValue { $0.title } == "Launch checklist")
 }

@@ -24,7 +24,7 @@ nonisolated enum Lookup: Sendable, Equatable {
     struct Searching: Sendable, Equatable { let query: String }
     struct Found: Sendable, Equatable { let answer: String }
 
-    @Initial case idle(Idle)
+    @Initial case idle(Idle = Idle())
     case searching(Searching)
     case found(Found)
 
@@ -96,14 +96,14 @@ import Testing
 
 @Suite struct LookupEdgeTests {
     @Test func beginningASearchStartsItsEffectsInOrder() {
-        let change = Lookup.owned(.init()).begin("swift")
+        let change = Lookup.owned().begin("swift")
 
         #expect(change.effects.map(\.effect) == [.record("swift"), .fetch("swift")])
         #expect(change.next.withValue { $0 } == Lookup.Searching(query: "swift"))
     }
 
     @Test func cancellingReturnsToIdle() {
-        let change = Lookup.owned(.init()).begin("swift")
+        let change = Lookup.owned().begin("swift")
         let idle = change.next.cancel()
 
         #expect(idle.withValue { $0 } == Lookup.Idle())
@@ -120,7 +120,7 @@ and which typed failure it throws.
 
 Every snapshot has a `model`, which is the schema enum itself. When the schema
 and its payloads are `Equatable`, a test compares a whole model, as in
-`#expect(machine.snapshot().model == .found(.init(answer: "Swift.org")))`.
+`machine.snapshot().model == .found(Lookup.Found(answer: "Swift.org"))`.
 
 The generated `Effect` enum represents every operation in the schema. To
 synthesize its `Equatable` conformance, each operation's input must be
@@ -146,11 +146,11 @@ so a test needs no waiting:
 ```swift
 @Suite struct LookupLocalTests {
     @Test func aSearchIsRoutedAndItsFetchCompletes() throws {
-        var machine = Lookup.Local(.init())
+        var machine = Lookup.Local()
 
         let receipt = try machine.send(.search("swift"))
         #expect(receipt.revision == 1)
-        #expect(receipt.snapshot.model == .searching(.init(query: "swift")))
+        #expect(receipt.snapshot.model == .searching(Lookup.Searching(query: "swift")))
 
         let batches = machine.drainCommands(limit: 8)
         let batch = try #require(batches.first)
@@ -174,7 +174,7 @@ so a test needs no waiting:
             Issue.record("the completion was not admitted")
             return
         }
-        #expect(completed.snapshot.model == .found(.init(answer: "Swift.org")))
+        #expect(completed.snapshot.model == .found(Lookup.Found(answer: "Swift.org")))
         #expect(machine.acknowledgeExecution(fetch.execution, disposition: .terminated) == .recorded)
         #expect(machine.acknowledgeExecution(fetch.execution, disposition: .terminated) == .duplicate)
     }
@@ -194,7 +194,7 @@ holds cannot move the machine:
 ```swift
 extension LookupLocalTests {
     @Test func aCompletionAfterCancellationIsStale() throws {
-        var machine = Lookup.Local(.init())
+        var machine = Lookup.Local()
         try machine.send(.search("swift"))
         guard case .fetch(let fetch)? = machine.drainCommands(limit: 1).first?.commands.last else {
             Issue.record("the search did not start a fetch")
@@ -207,7 +207,7 @@ extension LookupLocalTests {
             Issue.record("the late completion was not stale")
             return
         }
-        #expect(machine.snapshot().model == .idle(.init()))
+        #expect(machine.snapshot().model == .idle(Lookup.Idle()))
     }
 }
 ```
@@ -223,7 +223,7 @@ batch makes the case easy to build:
 ```swift
 extension LookupLocalTests {
     @Test func aRetainedCompletionIsAdmittedWhenCapacityFrees() throws {
-        var machine = Lookup.Local(.init(), configuration: try .init(commits: 1))
+        var machine = Lookup.Local(configuration: try Lookup.LocalConfiguration(commits: 1))
         try machine.send(.search("swift"))
         guard case .fetch(let fetch)? = machine.drainCommands(limit: 1).first?.commands.last else {
             Issue.record("the search did not start a fetch")
@@ -236,7 +236,7 @@ extension LookupLocalTests {
             Issue.record("the completion was not retained")
             return
         }
-        #expect(machine.snapshot().model == .searching(.init(query: "swift testing")))
+        #expect(machine.snapshot().model == .searching(Lookup.Searching(query: "swift testing")))
 
         let drained = machine.drainCommands(limit: 1)
         #expect(drained.map(\.receipt.revision) == [2])
@@ -247,7 +247,7 @@ extension LookupLocalTests {
             return
         }
         #expect(receipt.revision == 3)
-        #expect(machine.snapshot().model == .found(.init(answer: "Swift.org")))
+        #expect(machine.snapshot().model == .found(Lookup.Found(answer: "Swift.org")))
     }
 }
 ```
@@ -276,24 +276,23 @@ struct Gate: Sendable {
     @Test(.timeLimit(.minutes(1)))
     func aSearchFindsItsAnswerOnceTheDriverReturns() async throws {
         let gate = Gate()
-        let host = Lookup.ActorHost(
-            .init(),
-            drivers: .init(
-                fetch: { query in
-                    await gate.wait()
-                    return .success("Results for \(query)")
-                },
-                record: { _ in .success(()) }
-            )
+        let drivers = Lookup.Drivers(
+            fetch: { query in
+                await gate.wait()
+                return .success("Results for \(query)")
+            },
+            record: { _ in .success(()) }
         )
+        let host = Lookup.ActorHost(drivers: drivers)
         let snapshots = try await host.snapshots()
 
         let receipt = try await host.send(.search("swift"))
-        #expect(receipt.snapshot.model == .searching(.init(query: "swift")))
+        #expect(receipt.snapshot.model == .searching(Lookup.Searching(query: "swift")))
 
         gate.open()
         var sawAnswer = false
-        for await snapshot in snapshots where snapshot.model == .found(.init(answer: "Results for swift")) {
+        for await snapshot in snapshots
+        where snapshot.model == .found(Lookup.Found(answer: "Results for swift")) {
             sawAnswer = true
             break
         }
@@ -312,9 +311,11 @@ result that never arrives into a failure. Create the sequence before sending, so
 the first element is the snapshot current at registration or a newer one.
 
 `shutdown()` closes the owner and waits for its tasks to terminate, so no driver
-outlives the test. `Shared` takes the same drivers and supports the same
-assertions. A `MainActorHost` takes `MainActor` drivers, and its test is marked
-`@MainActor`.
+outlives the test. A test builds its stubs as one `Drivers` value because the
+same value serves every owner: `Shared` takes it and supports the same
+assertions. A `MainActorHost` takes a `MainActorDrivers` value, and its test is
+marked `@MainActor`. A stub that needs no gate can use the `fetchDriver:` and
+`recordDriver:` closures of the initializer directly.
 
 Pass a deadline to `shutdownAndWait(deadline:)` to bound the wait. It returns
 `.quiescent` after the owner processes its terminal batch and its execution and
@@ -403,8 +404,8 @@ final class FakeHost: MainActorStateMachineHost {
         let host = FakeHost()
         let presentation = try ObservableStateMachinePresentation(host)
 
-        host.deliver(.init(revision: 2, title: "Second"))
-        host.deliver(.init(revision: 1, title: "First"))
+        host.deliver(FakeHost.Snapshot(revision: 2, title: "Second"))
+        host.deliver(FakeHost.Snapshot(revision: 1, title: "First"))
         #expect(presentation.snapshot.title == "Second")
 
         presentation.stopObserving()
@@ -437,7 +438,7 @@ to see the compiler diagnostic.
 
 ```swift
 func beginFromIdle() {
-    let idle = Lookup.owned(.init())
+    let idle = Lookup.owned()
     // _ = idle.cancel()
     _ = idle.begin("swift")
 }
@@ -457,7 +458,7 @@ time:
 ```swift
 extension LookupLocalTests {
     @Test func cancellingWhileIdleIsRejectedAndChangesNothing() {
-        var machine = Lookup.Local(.init())
+        var machine = Lookup.Local()
 
         do {
             try machine.send(.cancel)
