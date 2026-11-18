@@ -1,3 +1,3 @@
 import StateMachine
 import StateMachineExamples
-nonisolated func accepted(_ loading: GeneratedProfile.Observed<GeneratedProfile.Loading>, _ work: GeneratedProfile.FetchWork, _ value: Profile) throws { if case .success(let completion) = work.succeeded(value) { _ = try loading.received(completion) } }
+nonisolated func accepted(_ owner: inout GeneratedProfile.Local, _ work: GeneratedProfile.FetchWork, _ value: Profile) { _ = owner.deliver(work.succeeded(value)) }

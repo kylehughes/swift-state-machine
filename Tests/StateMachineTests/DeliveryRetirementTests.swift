@@ -119,7 +119,8 @@ import os
             #expect(releases.withLock { $0 } == 1)
             #expect(storage.load().value.core.executionReservations.first?.isPreparing == true)
             update(storage) { state in
-                _ = state.ledger.finish(attempt, preparation: .failure(.plan(.invalidPlan)), in: &state.core)
+                let invalid = Ledger.Preparation.failure(.admission(.plan(.invalidPlan)))
+                _ = state.ledger.finish(attempt, preparation: invalid, in: &state.core)
             }
             #expect(storage.load().value.core.executionReservations.isEmpty)
         }

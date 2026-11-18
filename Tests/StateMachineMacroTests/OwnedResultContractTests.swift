@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 import Testing
 import os
 
@@ -90,20 +89,17 @@ nonisolated private enum OwnedResourceContract: ~Copyable {
     }
     @Initial case ready(Ready)
     case finished(Finished)
-    enum Scope { case effects }
     enum Input { case finish(String) }
     enum Rejection: Error { case emptyLabel }
-    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
+    @Operation(activeIn: [Finished.self])
     enum Audit {
         typealias Input = Int
         typealias Output = Int
-        typealias Failure = Never
     }
-    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
+    @Operation(activeIn: [Finished.self])
     enum Publish {
         typealias Input = String
         typealias Output = String
-        typealias Failure = Never
     }
     @Transition(onSuccess: Audit.self)
     fileprivate static func audited(
@@ -141,11 +137,11 @@ extension OwnedResourceContract.Effect: Equatable {}
         let drivers = OwnedValueContract.Drivers(
             audit: { identifier in
                 executions.withLock { $0.append("audit:\(identifier)") }
-                return .success(identifier)
+                return identifier
             },
             publish: { label in
                 executions.withLock { $0.append("publish:\(label)") }
-                return .success(label)
+                return label
             }
         )
         let owner = OwnedValueContract.owned(.init(identifier: 17, history: ["before": [2, 5]]))
@@ -248,6 +244,30 @@ extension OwnedResourceContract.Effect: Equatable {}
         }
         #expect(releases.withLock { $0 } == [41])
         #expect(executions.withLock { $0 } == ["audit:41", "publish:complete"])
+    }
+
+    /// A consuming API that ends the payload it receives and reports what it held.
+    private func handOff(_ finished: consuming OwnedResourceContract.Finished) -> (Int, String) {
+        (finished.resource.identifier, finished.label)
+    }
+
+    @Test func takingTheValueHandsAFinishedUniquePayloadToAConsumingAPI() {
+        let releases = OSAllocatedUnfairLock(initialState: [Int]())
+        let resource = OwnedResourceContract.Resource(identifier: 67) { identifier in
+            releases.withLock { $0.append(identifier) }
+        }
+        let owner = OwnedResourceContract.owned(.init(resource: resource, history: [:]))
+        let accepted = owner.finish("handed off")
+        switch consume accepted {
+        case .advanced(let next, _):
+            let finished = next.takeValue()
+            #expect(releases.withLock { $0 }.isEmpty)
+            let (identifier, label) = handOff(finished)
+            #expect(identifier == 67 && label == "handed off")
+            #expect(releases.withLock { $0 } == [67])
+        case .rejected: Issue.record("Valid finish rejected")
+        }
+        #expect(releases.withLock { $0 } == [67])
     }
 
     @Test func generatedUniqueRejectedPredecessorDisposesOnceWithoutEffects_RT009_RT037() {

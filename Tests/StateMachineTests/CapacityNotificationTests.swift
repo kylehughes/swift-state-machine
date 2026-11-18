@@ -139,7 +139,7 @@ struct CapacityNotificationTests {
             Issue.record("Both gated drivers must start before the capacity scenario")
             _ = owner.close()
             await drivers.releaseAll()
-            _ = await owner.shutdownAndWait(deadline: .now.advanced(by: .seconds(5)))
+            await owner.shutdown(deadline: .now.advanced(by: .seconds(5)))
             watchdog.cancel()
             await watchdog.value
             return
@@ -155,7 +155,7 @@ struct CapacityNotificationTests {
         #expect(owner.isActive(first.ticket))
         _ = owner.close()
         await drivers.releaseAll()
-        #expect(await owner.shutdownAndWait(deadline: .now.advanced(by: .seconds(5))))
+        #expect(await owner.shutdown(deadline: .now.advanced(by: .seconds(5))) == nil)
         #expect(scenario.notifications.withLock { $0.count } == 1)
         scenario.reenter.withLock { $0 = nil }
         scenario.event.finish()
@@ -195,7 +195,7 @@ struct CapacityNotificationTests {
             Issue.record("Both gated drivers must start before the capacity scenario")
             _ = owner.close()
             await drivers.releaseAll()
-            _ = await owner.shutdownAndWait(deadline: .now.advanced(by: .seconds(5)))
+            await owner.shutdown(deadline: .now.advanced(by: .seconds(5)))
             watchdog.cancel()
             await watchdog.value
             return
@@ -208,7 +208,7 @@ struct CapacityNotificationTests {
         #expect(owner.snapshot().model == 2 && owner.runningCount == 2)
         _ = owner.close()
         await drivers.releaseAll()
-        #expect(await owner.shutdownAndWait(deadline: .now.advanced(by: .seconds(5))))
+        #expect(await owner.shutdown(deadline: .now.advanced(by: .seconds(5))) == nil)
         #expect(owner.runningCount == 0)
         #expect(scenario.notifications.withLock { $0.count } == 1)
         reenter = nil
@@ -238,7 +238,7 @@ struct CapacityNotificationTests {
             Issue.record("Both gated drivers must start before the capacity scenario")
             _ = await owner.close()
             await drivers.releaseAll()
-            _ = await owner.shutdownAndWait(deadline: .now.advanced(by: .seconds(5)))
+            await owner.shutdown(deadline: .now.advanced(by: .seconds(5)))
             watchdog.cancel()
             await watchdog.value
             return
@@ -252,7 +252,7 @@ struct CapacityNotificationTests {
         #expect(await owner.runningCount == 2)
         _ = await owner.close()
         await drivers.releaseAll()
-        #expect(await owner.shutdownAndWait(deadline: .now.advanced(by: .seconds(5))))
+        #expect(await owner.shutdown(deadline: .now.advanced(by: .seconds(5))) == nil)
         #expect(await owner.runningCount == 0)
         #expect(scenario.notifications.withLock { $0.count } == 1)
         scenario.event.finish()

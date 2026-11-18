@@ -51,7 +51,7 @@ actor DriverGate {
     private var finishes: [Int] = []
     private var cancelled = 0
     private var startWaiter: (Int, CheckedContinuation<Void, Never>)?
-    func run(_ id: Int) async -> Result<Int, Never> {
+    func run(_ id: Int) async -> Int {
         starts.append(id)
         if let waiter = startWaiter, starts.count >= waiter.0 {
             startWaiter = nil
@@ -60,7 +60,7 @@ actor DriverGate {
         if !open { await withCheckedContinuation { permits.append($0) } }
         finishes.append(id)
         if Task.isCancelled { cancelled += 1 }
-        return .success(id)
+        return id
     }
     func waitForStarts(_ count: Int) async {
         if starts.count >= count { return }
@@ -163,5 +163,5 @@ struct ResultRow: Codable {
 func checksum(_ bytes: [UInt8]) -> UInt64 { bytes.reduce(0) { $0 + UInt64($1) } }
 func prepared(_ snapshot: PerformanceFlow.Snapshot, salt: UInt64) throws -> PerformanceFlow.Prepared {
     guard case .ready(let observed) = snapshot else { throw Failure(description: "Unexpected phase") }
-    return try observed.bump(salt)
+    return observed.bump(salt)
 }

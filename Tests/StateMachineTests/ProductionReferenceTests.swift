@@ -26,6 +26,8 @@ import Testing
         case (.rejected(let reason, _), .rejected(let expectedReason)):
             let mapped: ReferenceRejection
             switch reason {
+            case .plan(.invalidPlan): mapped = .invalidPlan
+            case .plan(.planTooLarge): mapped = .planTooLarge
             case .foreignOwner: mapped = .foreignOwner
             case .closed: mapped = .closed
             case .obsoleteIncarnation: mapped = .obsoleteIncarnation
@@ -72,7 +74,7 @@ import Testing
                 case .loaded(let observed):
                     compare(flow.commit(try observed.refresh(request)), oracle.commit(try oracle.prepare(.refresh(1))))
                 case .failed(let observed):
-                    compare(flow.commit(try observed.retry()), oracle.commit(try oracle.prepare(.retry)))
+                    compare(flow.commit(observed.retry()), oracle.commit(try oracle.prepare(.retry)))
                 case .loading(let observed):
                     compare(flow.commit(observed.cancel()), oracle.commit(try oracle.prepare(.cancel)))
                 }
@@ -96,7 +98,7 @@ import Testing
                 if case .loading(let loading) = flow.snapshot(), let (work, ticket) = issued.last,
                     case .success(let completion) = work.succeeded(Profile(userID: id, name: "2"))
                 {
-                    let actual = flow.commit(try loading.received(completion))
+                    let actual = flow.commit(loading.received(completion))
                     let expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .success(2)))
                     compare(actual, expected)
                 }

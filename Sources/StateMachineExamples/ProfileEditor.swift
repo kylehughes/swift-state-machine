@@ -7,7 +7,7 @@ import StateMachineUI
 /// not authorize resurrecting an earlier request.
 @MainActor public final class ProfileEditor {
     /// The owner's complete snapshot, published through an `ObservableObject`.
-    public let presentation: StateMachinePresentation<GeneratedProfile.MainActorHost>
+    public let presentation: StateMachineObservableObject<GeneratedProfile.MainActorHost>
     private let request: ProfileRequest
 
     /// Creates a screen with immutable execution dependencies; initialization starts no request.
@@ -15,9 +15,9 @@ import StateMachineUI
         request: ProfileRequest,
         drivers: GeneratedProfile.MainActorDrivers,
         configuration: GeneratedProfile.Configuration = .default
-    ) throws(GeneratedProfile.SubscriptionFailure) {
+    ) {
         self.request = request
-        presentation = try StateMachinePresentation(
+        presentation = StateMachineObservableObject(
             GeneratedProfile.MainActorHost(
                 GeneratedProfile.Idle(userID: request.userID),
                 drivers: drivers,

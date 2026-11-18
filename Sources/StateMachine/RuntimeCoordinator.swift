@@ -2,7 +2,7 @@
 ///
 /// Hosts validate batch ownership and order before forwarding starts and cancellations.
 /// Callbacks synchronously consult or update the host; none runs inside a worker task.
-public actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
+package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     private struct Entry {
         let ticket: RuntimeTicket
         let identity: RuntimeIdentity
@@ -19,7 +19,7 @@ public actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     /// Creates an execution owner with synchronous host authority and settlement hooks.
-    public init(
+    package init(
         driver: @escaping @Sendable (Descriptor) async -> Outcome,
         authorized: @escaping @Sendable (RuntimeTicket) -> Bool,
         terminated: @escaping @Sendable (RuntimeTicket, Outcome, RuntimeCoordinator<Descriptor, Outcome>) -> Void,
@@ -39,14 +39,14 @@ public actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     }
 
     /// The number of workers whose actual termination has not yet been processed.
-    public var runningCount: Int { entries.count }
+    package var runningCount: Int { entries.count }
 
     /// Registers each authorized start without suspending between its authority checks.
     ///
     /// An already registered ticket is ignored. Hosts prevent replay of completed batches.
     /// Revocation before registration skips the driver; revocation during registration
     /// cancels its retained handle and still requires actual termination.
-    public func start(_ works: [RuntimeWork<Descriptor>]) {
+    package func start(_ works: [RuntimeWork<Descriptor>]) {
         for work in works where !entries.contains(where: { $0.ticket == work.ticket }) {
             guard authorized(work.ticket) else {
                 skipped(work.ticket)
@@ -74,7 +74,7 @@ public actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     }
 
     /// Requests cancellation while retaining handles until their drivers actually return.
-    public func cancel(_ tickets: [RuntimeTicket]) {
+    package func cancel(_ tickets: [RuntimeTicket]) {
         for ticket in tickets {
             guard let index = entries.firstIndex(where: { $0.ticket == ticket }),
                 !entries[index].cancellationRequested
@@ -87,7 +87,7 @@ public actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     /// Waits until no registered worker remains, including workers registered during the wait.
     ///
     /// Cancelling the waiting task neither ends the wait early nor acknowledges driver termination.
-    public func join() async {
+    package func join() async {
         guard !entries.isEmpty else { return }
         await withCheckedContinuation { waiters.append($0) }
     }

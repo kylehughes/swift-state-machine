@@ -43,7 +43,7 @@ nonisolated public protocol StateMachineReceipt {
     func subscribe(
         _ receive: @escaping @MainActor (Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription
+    ) throws(SubscriptionFailure) -> MainActorSnapshotSubscription
     /// Closes admission while preserving historical model data.
-    func close() -> Receipt
+    @discardableResult func close() -> Receipt
 }

@@ -2,6 +2,8 @@
 ///
 /// This lower-guarantee runtime constructs its own authority. A sealed domain facade keeps
 /// this instance private and performs synchronous preparation and admission in one turn.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 @MainActor public final class RuntimeMainActorHost<Model, Descriptor, Outcome, DomainFailure: Error> {
     /// The embedded value admission algorithm.
     public typealias Engine = RuntimeState<Model, Descriptor>
@@ -35,7 +37,7 @@
     public init(
         _ initial: Model,
         scopes: [RuntimeScopeID],
-        configuration: RuntimeManagedConfiguration = .default,
+        configuration: ManagedConfiguration = .default,
         policy: RuntimeCompletionPolicy = .manualOnConflict,
         driver: @escaping @MainActor (RuntimeWork<Descriptor>) async -> Outcome,
         ticket: @escaping @MainActor (Outcome) -> RuntimeTicket,
@@ -85,11 +87,13 @@
         changed()
         return result
     }
+    /// Reports a defective plan with ordinary admission precedence against the current root.
+    public func reject(_ defect: Engine.DefectivePlan) -> Engine.Admission { engine.reject(defect) }
     /// Registers an observer of the initial and subsequent complete snapshots; callbacks run outside mutable accesses.
     public func subscribe(
         _ receive: @escaping @MainActor (Engine.Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void = {}
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription {
+    ) throws(SubscriptionFailure) -> MainActorSnapshotSubscription {
         let initial = engine.snapshot
         let identity = RuntimeIdentity()
         if !initial.isClosed {
@@ -98,7 +102,7 @@
                 Subscriber(identity: identity, revision: initial.revision, receive: receive, finish: onFinish)
             )
         }
-        let token = RuntimeMainActorSubscription { [weak self] in
+        let token = MainActorSnapshotSubscription { [weak self] in
             self?.subscribers.removeAll { $0.identity === identity }
         }
         receive(initial)
@@ -130,9 +134,9 @@
             id,
             policy: policy,
             automatic: automatic,
-            claim: {
+            claim: { decision in
                 defer { scheduledClaim = false }
-                return self.ledger.claim(id, in: &self.engine, scheduledRetry: scheduledClaim)
+                return self.ledger.claim(id, in: &self.engine, continuing: decision, scheduledRetry: scheduledClaim)
             },
             prepare: preparation,
             finish: { attempt, candidate in
@@ -152,9 +156,9 @@
                 if !retrying, let pending, pending.status == .reconciliationRequired {
                     self.reconciliationRequired(pending)
                 }
-                return (finish, reason)
+                return (finish, pending)
             },
-            scheduleRetry: { self.scheduleRetry($0) }
+            scheduleRetry: { self.scheduleRetry($0, after: $1) }
         )
         switch result {
         case .inProgress: return .inProgress
@@ -281,18 +285,20 @@
     private func handleCapacityConflicts(_ conflicts: [Ledger.Pending]) {
         for pending in conflicts {
             switch policy {
-            case .retryPure: scheduleRetry(pending.id)
+            case .retryPure: _ = scheduleRetry(pending.id, after: pending.decision)
             case .manualOnConflict: reconciliationRequired(pending)
             }
         }
     }
-    private func scheduleRetry(_ id: RuntimePendingID) {
-        ledger.scheduleRetry(id)
-        guard ready.enqueue(id) else { return }
+    // Scheduling is bound to the decision that lost the conflict, so a newer attempt keeps its own.
+    private func scheduleRetry(_ id: RuntimePendingID, after decision: RuntimeDeliveryDecision) -> Bool {
+        guard ledger.scheduleRetry(id, after: decision) else { return false }
+        guard ready.enqueue(id) else { return true }
         Task { @MainActor [weak self] in
             await Task.yield()
             self?.retryTurn()
         }
+        return true
     }
     private func retryTurn() {
         ready.prune(keeping: ledger.pending.map(\.id))
@@ -335,23 +341,27 @@
     /// Whether closure, FIFO, executions, retained delivery, and claims have all settled.
     public var isQuiescent: Bool { engine.isQuiescent && entries.isEmpty && !draining && ready.isIdle }
     /// Captures the obligations still tracked, without exposing a ticket or other authority.
-    public func diagnostics() -> RuntimeShutdownDiagnostics {
-        RuntimeShutdownDiagnostics(
+    package func diagnostics() -> ShutdownDiagnostics {
+        ShutdownDiagnostics(
             engine: engine,
             processedThrough: processedRevision,
             isDraining: draining,
+            isRetrying: !ready.isIdle,
             pendingCompletions: ledger.pending.map(\.id)
         )
     }
-    /// Closes and waits for actual termination and settlement, optionally bounded by a deadline.
-    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
+    /// Closes admission, then waits until every execution, delivery, and preparation obligation settles
+    /// or `deadline` passes.
+    ///
+    /// Returns `nil` once the owner is quiescent. Otherwise it returns the obligations observed in the
+    /// same main-actor turn that found the deadline expired; that work stays tracked and can still settle.
+    @discardableResult
+    public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownDiagnostics? {
         let receipt = close()
         while !isQuiescent || processedRevision < receipt.revision {
-            if let deadline, ContinuousClock.now >= deadline { return false }
+            if let deadline, ContinuousClock.now >= deadline { return diagnostics() }
             await waitForChange(deadline: deadline)
         }
-        return true
+        return nil
     }
-    /// Closes and waits for physical termination and all retained obligations.
-    public func shutdown() async { _ = await shutdownAndWait() }
 }

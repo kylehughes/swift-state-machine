@@ -9,7 +9,7 @@
 /// when the owner is released without closing. Only the first iterator receives elements; a later
 /// iterator ends immediately. Releasing the sequence and its iterator removes the registration,
 /// and the sequence does not keep its owner alive.
-nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Sendable {
+nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Sendable {
     /// Iteration never throws.
     public typealias Failure = Never
 
@@ -183,8 +183,8 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
         register: (
             _ receive: @escaping @Sendable (Raw) -> Void,
             _ finish: @escaping @Sendable () -> Void
-        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSubscription
-    ) throws(RuntimeHostSubscriptionFailure) {
+        ) throws(SubscriptionFailure) -> SnapshotSubscription
+    ) throws(SubscriptionFailure) {
         let mailbox = Mailbox()
         let feeder = Feeder(mailbox, onDetach: onDetach)
         let token = try register({ feeder.mailbox.offer(transform($0)) }, { feeder.mailbox.finish() })
@@ -201,8 +201,8 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
         register: (
             _ receive: @escaping @MainActor (Raw) -> Void,
             _ finish: @escaping @MainActor () -> Void
-        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription
-    ) throws(RuntimeHostSubscriptionFailure) {
+        ) throws(SubscriptionFailure) -> MainActorSnapshotSubscription
+    ) throws(SubscriptionFailure) {
         let mailbox = Mailbox()
         let feeder = Feeder(mailbox, onDetach: onDetach)
         let token = try register({ feeder.mailbox.offer(transform($0)) }, { feeder.mailbox.finish() })
@@ -234,7 +234,7 @@ nonisolated public struct RuntimeSnapshots<Element: Sendable>: AsyncSequence, Se
 /// `AsyncSequence` algorithms require a deployment target of iOS 18, macOS 15, tvOS 18,
 /// watchOS 11, or visionOS 2. A `Sendable` element has no such requirement when it is observed
 /// through ``RuntimeMainActorHost/sendableSnapshots()`` or ``RuntimeMainActorHost/sendableSnapshots(_:)``.
-nonisolated public struct RuntimeMainActorSnapshots<Element> {
+nonisolated public struct MainActorSnapshotSequence<Element> {
     // Confined to the main actor, except for the waiter slot that a task cancellation
     // handler reaches from any thread.
     @MainActor fileprivate final class Mailbox {
@@ -346,9 +346,9 @@ nonisolated public struct RuntimeMainActorSnapshots<Element> {
 
     fileprivate final class Lifetime: Sendable {
         let mailbox: Mailbox
-        let token: RuntimeMainActorSubscription
+        let token: MainActorSnapshotSubscription
 
-        init(_ mailbox: Mailbox, _ token: RuntimeMainActorSubscription) {
+        init(_ mailbox: Mailbox, _ token: MainActorSnapshotSubscription) {
             self.mailbox = mailbox
             self.token = token
         }
@@ -365,8 +365,8 @@ nonisolated public struct RuntimeMainActorSnapshots<Element> {
         register: (
             _ receive: @escaping @MainActor (Raw) -> Void,
             _ finish: @escaping @MainActor () -> Void
-        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription
-    ) throws(RuntimeHostSubscriptionFailure) {
+        ) throws(SubscriptionFailure) -> MainActorSnapshotSubscription
+    ) throws(SubscriptionFailure) {
         let mailbox = Mailbox()
         let feeder = Feeder(mailbox, onDetach: onDetach)
         let token = try register({ feeder.mailbox.offer(transform($0)) }, { feeder.mailbox.finish() })
@@ -374,7 +374,7 @@ nonisolated public struct RuntimeMainActorSnapshots<Element> {
     }
 }
 
-extension RuntimeMainActorSnapshots: @MainActor AsyncSequence {
+extension MainActorSnapshotSequence: @MainActor AsyncSequence {
     /// Iteration never throws.
     public typealias Failure = Never
 
@@ -402,22 +402,22 @@ extension RuntimeMainActorSnapshots: @MainActor AsyncSequence {
 
 extension RuntimeSharedHost {
     /// Registers a single-pass latest-value sequence of complete snapshots.
-    public func snapshots() throws(SubscriptionFailure) -> RuntimeSnapshots<Engine.Snapshot> {
+    public func snapshots() throws(SubscriptionFailure) -> SnapshotSequence<Engine.Snapshot> {
         try snapshots { $0 }
     }
     /// Registers a single-pass latest-value sequence of projected snapshots.
     public func snapshots<Element: Sendable>(
         _ transform: @escaping @Sendable (Engine.Snapshot) -> Element
-    ) throws(SubscriptionFailure) -> RuntimeSnapshots<Element> {
+    ) throws(SubscriptionFailure) -> SnapshotSequence<Element> {
         try snapshots(transform, onDetach: {})
     }
     /// Registers a sequence and reports when this host has released its callbacks.
     package func snapshots<Element: Sendable>(
         _ transform: @escaping @Sendable (Engine.Snapshot) -> Element,
         onDetach: @escaping @Sendable () -> Void
-    ) throws(SubscriptionFailure) -> RuntimeSnapshots<Element> {
-        try RuntimeSnapshots(transform, onDetach: onDetach) {
-            (receive, finish) throws(RuntimeHostSubscriptionFailure) in
+    ) throws(SubscriptionFailure) -> SnapshotSequence<Element> {
+        try SnapshotSequence(transform, onDetach: onDetach) {
+            (receive, finish) throws(SubscriptionFailure) in
             try subscribe(receive, onFinish: finish)
         }
     }
@@ -425,22 +425,22 @@ extension RuntimeSharedHost {
 
 extension RuntimeActorHost {
     /// Registers a single-pass latest-value sequence of complete snapshots.
-    public func snapshots() throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Engine.Snapshot> {
+    public func snapshots() throws(SubscriptionFailure) -> SnapshotSequence<Engine.Snapshot> {
         try snapshots { $0 }
     }
     /// Registers a single-pass latest-value sequence of projected snapshots.
     public func snapshots<Element: Sendable>(
         _ transform: @escaping @Sendable (Engine.Snapshot) -> Element
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Element> {
+    ) throws(SubscriptionFailure) -> SnapshotSequence<Element> {
         try snapshots(transform, onDetach: {})
     }
     /// Registers a sequence and reports when this host has released its callbacks.
     package func snapshots<Element: Sendable>(
         _ transform: @escaping @Sendable (Engine.Snapshot) -> Element,
         onDetach: @escaping @Sendable () -> Void
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Element> {
-        try RuntimeSnapshots(transform, onDetach: onDetach) {
-            (receive, finish) throws(RuntimeHostSubscriptionFailure) in
+    ) throws(SubscriptionFailure) -> SnapshotSequence<Element> {
+        try SnapshotSequence(transform, onDetach: onDetach) {
+            (receive, finish) throws(SubscriptionFailure) in
             try subscribe(receive, onFinish: finish)
         }
     }
@@ -448,22 +448,22 @@ extension RuntimeActorHost {
 
 extension RuntimeMainActorHost {
     /// Registers a single-pass latest-value sequence of complete snapshots.
-    public func snapshots() throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSnapshots<Engine.Snapshot> {
+    public func snapshots() throws(SubscriptionFailure) -> MainActorSnapshotSequence<Engine.Snapshot> {
         try snapshots { $0 }
     }
     /// Registers a single-pass latest-value sequence of projected snapshots.
     public func snapshots<Element>(
         _ transform: @escaping @MainActor (Engine.Snapshot) -> Element
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSnapshots<Element> {
+    ) throws(SubscriptionFailure) -> MainActorSnapshotSequence<Element> {
         try snapshots(transform, onDetach: {})
     }
     /// Registers a sequence and reports when this host has released its callbacks.
     package func snapshots<Element>(
         _ transform: @escaping @MainActor (Engine.Snapshot) -> Element,
         onDetach: @escaping @Sendable () -> Void
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSnapshots<Element> {
-        try RuntimeMainActorSnapshots(transform, onDetach: onDetach) {
-            (receive, finish) throws(RuntimeHostSubscriptionFailure) in
+    ) throws(SubscriptionFailure) -> MainActorSnapshotSequence<Element> {
+        try MainActorSnapshotSequence(transform, onDetach: onDetach) {
+            (receive, finish) throws(SubscriptionFailure) in
             try subscribe(receive, onFinish: finish)
         }
     }
@@ -471,7 +471,7 @@ extension RuntimeMainActorHost {
     /// Registers a single-pass latest-value sequence of complete `Sendable` snapshots.
     ///
     /// The sequence supports every `AsyncSequence` operator on every supported OS version.
-    public func sendableSnapshots() throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Engine.Snapshot>
+    public func sendableSnapshots() throws(SubscriptionFailure) -> SnapshotSequence<Engine.Snapshot>
     where Engine.Snapshot: Sendable {
         try sendableSnapshots { $0 }
     }
@@ -481,16 +481,16 @@ extension RuntimeMainActorHost {
     /// every `AsyncSequence` operator on every supported OS version.
     public func sendableSnapshots<Element: Sendable>(
         _ transform: @escaping @MainActor (Engine.Snapshot) -> Element
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Element> {
+    ) throws(SubscriptionFailure) -> SnapshotSequence<Element> {
         try sendableSnapshots(transform, onDetach: {})
     }
     /// Registers a sequence and reports when this host has released its callbacks.
     package func sendableSnapshots<Element: Sendable>(
         _ transform: @escaping @MainActor (Engine.Snapshot) -> Element,
         onDetach: @escaping @Sendable () -> Void
-    ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Element> {
-        try RuntimeSnapshots(mainActor: transform, onDetach: onDetach) {
-            (receive, finish) throws(RuntimeHostSubscriptionFailure) in
+    ) throws(SubscriptionFailure) -> SnapshotSequence<Element> {
+        try SnapshotSequence(mainActor: transform, onDetach: onDetach) {
+            (receive, finish) throws(SubscriptionFailure) in
             try subscribe(receive, onFinish: finish)
         }
     }

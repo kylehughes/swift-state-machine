@@ -15,12 +15,18 @@ struct Generator {
     /// The default of every fresh entry point's initial parameter, when the schema declares one.
     var initialDefault: String { schema.initialDefault.map { " = \($0)" } ?? "" }
     var engine: String { "RuntimeState<\(name), Effect>" }
+    /// Whether the schema declares any operation, and so generates work, completion, and delivery surfaces.
+    var hasOperations: Bool { !schema.operations.isEmpty }
+    /// The retained-outcome type of the runtime hosts: the sealed completion, or `Never` without operations.
+    var outcome: String { hasOperations ? "Completion" : "Never" }
     func declaration(_ source: String) -> DeclSyntax { DeclSyntax(stringLiteral: source) }
 
     func members() throws -> [DeclSyntax] {
         var result = [witnesses(), effects(), owned()]
         if schema.mode != .ownedOnly {
-            result += [values(), operations(), preparation(), restoration(), local(), managed(mainActor: true)]
+            result += [values()]
+            if hasOperations { result += [operations()] }
+            result += [preparation(), restoration(), local(), managed(mainActor: true)]
             if schema.mode == .shared { result += [shared(), managed(mainActor: false)] }
         }
         return result.flatMap { source in
@@ -38,7 +44,7 @@ struct Generator {
             switch trigger.kind {
             case .input: schema.inputs.first { $0.caseName == trigger.name }!.payloadType!
             case .success: "\(operation(trigger.name).name).Output"
-            case .failure: "\(operation(trigger.name).name).Failure"
+            case .failure: operation(trigger.name).failure
             }
         }
         let edges = schema.transitions
@@ -64,7 +70,7 @@ struct Generator {
                 return lines.joined(separator: "\n")
             }
             .joined(separator: "\n")
-        let operationWitnesses = schema.operations
+        let operationWitnesses = schema.operations.filter(\.declaresFailure)
             .map { "let _ = _OperationFailureIsError<\($0.name).Failure>()" }
             .joined(separator: "\n")
         let routeWitnesses = schema.routes
@@ -136,22 +142,178 @@ struct Generator {
             """
     }
 
+    /// The router that selects among the edges sharing this edge's source phase and trigger, if any.
+    func router(of edge: Schema.Transition) -> Schema.Route? {
+        schema.routes.first { $0.from == edge.from && $0.trigger == edge.trigger && !$0.choices.isEmpty }
+    }
+
+    /// The access of an edge's own `Owned` or `Observed` method.
+    ///
+    /// A routed edge is reached only through its router's method, so a typed call obeys the router. An
+    /// observation's completion edge is reached only through delivery, so the first retained outcome is
+    /// the only one that can commit. An unrouted `Owned` completion edge stays callable: `Owned` holds
+    /// no work authority and retains no outcome, so it is the caller's only way to finish its own typestate.
+    func edgeAccess(_ edge: Schema.Transition, observed: Bool) -> String {
+        if router(of: edge) != nil { return "fileprivate " }
+        return observed && edge.trigger.kind != .input ? "fileprivate " : access
+    }
+
+    /// The input routers that become `Observed` methods: those with candidate edges.
+    var inputRouters: [Schema.Route] { schema.routes.filter { $0.trigger.kind == .input && !$0.choices.isEmpty } }
+
+    /// The routers that become `Owned` methods: every router with candidate edges, for an input or a completion.
+    var ownedRouters: [Schema.Route] { schema.routes.filter { !$0.choices.isEmpty } }
+
+    /// A router's candidate edges in declaration order.
+    func branches(_ route: Schema.Route) -> [Schema.Transition] {
+        route.choices.map { choice in schema.transitions.first { $0.name == choice }! }
+    }
+
+    /// The functions of a routed group that can throw, as (function name, failure type) pairs.
+    func throwers(_ route: Schema.Route) -> [(name: String, type: String)] {
+        (route.failureType.map { [(route.name, $0)] } ?? [])
+            + branches(route).compactMap { edge in edge.failureType.map { (edge.name, $0) } }
+    }
+
+    /// The failure type of a router's `Observed` method, or `nil` when no function of its group throws.
+    ///
+    /// It is the type every throwing function of the group shares, however many of them throw, and
+    /// `PreparationRejection`, whose cases are named for each throwing function, when their types differ.
+    func routedFailure(_ route: Schema.Route) -> String? {
+        let types = throwers(route).map(\.type)
+        guard let first = types.first else { return nil }
+        return types.allSatisfy { $0 == first } ? first : "PreparationRejection"
+    }
+
+    /// Whether a router's `Observed` method wraps each function's failure in `PreparationRejection`.
+    func routedFailureWraps(_ route: Schema.Route) -> Bool { routedFailure(route) == "PreparationRejection" }
+
+    /// The typed throws clause of a router's `Observed` method.
+    func routedThrows(_ route: Schema.Route) -> String { routedFailure(route).map { " throws(\($0))" } ?? "" }
+
+    /// What an edge's `Owned` method returns, with its own source spelled `source`.
+    func ownedResult(_ edge: Schema.Transition, source: String) -> String {
+        let after = "Owned<\(phase(edge.to))>"
+        let effect = authoredEffect(edge)
+        switch edge.shape {
+        case .advance: return "Advance<\(source), \(after), \(effect), \(edge.failureType ?? "Never")>"
+        case .change where edge.failureType != nil:
+            return "Advance<\(source), \(after), \(effect), \(edge.failureType!)>"
+        case .change: return "Change<\(after), \(effect)>"
+        case .destination where edge.failureType != nil:
+            return "Advance<\(source), \(after), Never, \(edge.failureType!)>"
+        case .destination: return after
+        }
+    }
+
+    /// The type a router's `Owned` method returns.
+    ///
+    /// When the router cannot throw and every candidate edge returns the same type, that type; otherwise
+    /// `Route.<Router>Result`, which has one case per candidate edge and, when the router can throw, a
+    /// `rejected` case that returns the source.
+    func ownedRoutedResult(_ route: Schema.Route) -> String {
+        let results = Set(branches(route).map { ownedResult($0, source: "Self") })
+        if route.failureType == nil, results.count == 1 { return results.first! }
+        return "Route.\(route.namespace!)Result"
+    }
+
+    /// The `Route.<Router>Result` declaration of a router whose `Owned` method needs one.
+    func ownedRoutedResultDeclaration(_ route: Schema.Route) -> String? {
+        guard ownedRoutedResult(route) == "Route.\(route.namespace!)Result" else { return nil }
+        let source = "Owned<\(phase(route.from))>"
+        var cases = branches(route).map { "case \($0.name)(\(ownedResult($0, source: source)))" }
+        if let failure = route.failureType {
+            cases.append(
+                "/// The router declined; the source is returned unchanged.\ncase rejected(\(failure), \(source))"
+            )
+        }
+        return """
+            /// The result of `\(route.name)` on an owned `\(phase(route.from))`: one case per edge it may select.
+            \(access)enum \(route.namespace!)Result: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
+                \(cases.joined(separator: "\n"))
+            }
+            """
+    }
+
+    /// The `Owned` method that runs a router and then advances through the edge it selects.
+    func ownedRoutedMethod(_ route: Schema.Route) -> String {
+        let parameter = route.payloadType.map { "_ input: \($0)" } ?? ""
+        let argument = route.payloadType == nil ? "" : ", input"
+        let branchArgument = route.payloadType == nil ? "" : "input"
+        let result = ownedRoutedResult(route)
+        let wraps = result == "Route.\(route.namespace!)Result"
+        let call = "\(name).\(route.name)(phase\(argument))"
+        let selection =
+            route.failureType == nil
+            ? "let selection: Route.\(route.namespace!) = \(call)"
+            : "let selection: Route.\(route.namespace!)\ndo { selection = try \(call) } catch { return .rejected(error, self) }"
+        let cases = route.choices
+            .map { choice in
+                wraps
+                    ? "case .\(choice): return .\(choice)(\(choice)(\(branchArgument)))"
+                    : "case .\(choice): return \(choice)(\(branchArgument))"
+            }
+            .joined(separator: "\n")
+        return """
+            /// Runs the router `\(route.name)`, then advances through the edge it selects.
+            \(access)consuming func \(route.name)(\(parameter)) -> \(result) where Phase == \(phase(route.from)) {
+                \(selection)
+                switch selection { \(cases) }
+            }
+            """
+    }
+
+    /// The `Observed` method that runs a router and then prepares the edge it selects.
+    func observedRoutedMethod(_ route: Schema.Route) -> String {
+        let parameter = route.payloadType.map { "_ input: \($0)" } ?? ""
+        let argument = route.payloadType == nil ? "" : ", input"
+        let branchArgument = route.payloadType == nil ? "" : "input"
+        let wraps = routedFailureWraps(route)
+        let call = "\(name).\(route.name)(payload\(argument))"
+        let selection: String
+        switch (route.failureType != nil, wraps) {
+        case (false, _): selection = "let selection: Route.\(route.namespace!) = \(call)"
+        case (true, false): selection = "let selection: Route.\(route.namespace!) = try \(call)"
+        case (true, true):
+            selection =
+                "let selection: Route.\(route.namespace!)\ndo { selection = try \(call) } catch { throw .\(route.name)(error) }"
+        }
+        let cases = branches(route)
+            .map { edge in
+                let branch = "\(edge.name)(\(branchArgument))"
+                switch (edge.failureType != nil, wraps) {
+                case (false, _): return "case .\(edge.name): return \(branch)"
+                case (true, false): return "case .\(edge.name): return try \(branch)"
+                case (true, true):
+                    return "case .\(edge.name): do { return try \(branch) } catch { throw .\(edge.name)(error) }"
+                }
+            }
+            .joined(separator: "\n")
+        return """
+            /// Runs the router `\(route.name)`, then prepares the edge it selects.
+            \(access)func \(route.name)(\(parameter))\(routedThrows(route)) -> Prepared where Phase == \(phase(route.from)) {
+                \(selection)
+                switch selection { \(cases) }
+            }
+            """
+    }
+
     func owned() -> String {
         let methods = schema.transitions
             .map { edge in
                 let before = phase(edge.from)
                 let after = phase(edge.to)
+                let visibility = edgeAccess(edge, observed: false)
                 let payload = edge.payloadType.map { "_ input: \($0)" } ?? ""
                 let argument = edge.payloadType == nil ? "" : ", input"
-                let failure = edge.failureType ?? "Never"
                 let call = "\(name).\(edge.name)(phase\(argument))"
                 // The edge's own effect type, so a caller switches over only what this edge can start.
-                let effect = authoredEffect(edge)
+                let result = ownedResult(edge, source: "Self")
                 switch edge.shape {
                 case .advance:
                     return """
                         /// Consumes the predecessor and preserves it on authored rejection.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, \(effect), \(failure)> where Phase == \(before) {
+                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             switch \(call) {
                             case .advanced(let next, let effects): return .advanced(Owned<\(after)>(next), effects: effects)
                             case .rejected(let failure, let original): return .rejected(failure, Owned<\(before)>(original))
@@ -161,7 +323,7 @@ struct Generator {
                 case .change where edge.failureType != nil:
                     return """
                         /// Advances through the authored edge or returns the original predecessor.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, \(effect), \(failure)> where Phase == \(before) {
+                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             do {
                                 let change = try \(call)
                                 return .advanced(Owned<\(after)>(change.next), effects: change.effects)
@@ -171,7 +333,7 @@ struct Generator {
                 case .change:
                     return """
                         /// Advances through the authored edge, preserving effect order.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Change<Owned<\(after)>, \(effect)> where Phase == \(before) {
+                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             let change = \(call)
                             return Change(Owned<\(after)>(change.next), effects: change.effects)
                         }
@@ -179,28 +341,34 @@ struct Generator {
                 case .destination where edge.failureType != nil:
                     return """
                         /// Advances through the authored edge or returns the original predecessor.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Advance<Self, Owned<\(after)>, Never, \(failure)> where Phase == \(before) {
+                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             do { return .advanced(Owned<\(after)>(try \(call)), effects: []) } catch { return .rejected(error, self) }
                         }
                         """
                 case .destination:
                     return """
                         /// Advances through the authored edge, which starts no operation.
-                        \(access)consuming func \(edge.name)(\(payload)) -> Owned<\(after)> where Phase == \(before) {
+                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             Owned<\(after)>(\(call))
                         }
                         """
                 }
             }
             .joined(separator: "\n")
+        let routed = ownedRouters.map(ownedRoutedMethod).joined(separator: "\n")
         return """
             /// Unique authority over one declared workflow phase.
             \(access)struct Owned<Phase: ~Copyable\(schema.mode == .shared ? " & Sendable" : "")>: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
                 fileprivate let phase: Phase
                 fileprivate init(_ phase: consuming Phase) { self.phase = phase }
-                /// Borrows the payload without copying a unique resource.
-                \(access)borrowing func withValue<Result>(_ body: (borrowing Phase) -> Result) -> Result { body(phase) }
+                /// Borrows the payload without copying a unique resource, returning what `body` returns or throws.
+                \(access)borrowing func withValue<Result: ~Copyable, Failure: Error>(
+                    _ body: (borrowing Phase) throws(Failure) -> Result
+                ) throws(Failure) -> Result { try body(phase) }
+                /// Consumes this authority and returns its payload, so a unique resource can move on.
+                \(access)consuming func takeValue() -> Phase { phase }
                 \(methods)
+                \(routed)
             }
             /// Creates ownership only in the declared initial phase.
             \(access)static func owned(_ initial: consuming \(initialType)\(initialDefault)) -> Owned<\(initialType)> { Owned(initial) }
@@ -226,39 +394,45 @@ struct Generator {
             (schema.transitions.compactMap { edge in edge.failureType.map { "case \(edge.name)(\($0))" } }
             + schema.routes.compactMap { route in route.failureType.map { "case \(route.name)(\($0))" } })
             .joined(separator: "\n")
-        let choices = schema.routes
+        let choiceTypes = schema.routes
             .compactMap { route -> String? in
                 guard let namespace = route.namespace else { return nil }
                 let cases = route.choices.map { "case \($0)" }.joined(separator: "\n")
                 return "/// The edges `\(route.name)` may choose.\n\(access)enum \(namespace)\(sendable) { \(cases) }"
             }
-            .joined(separator: "\n")
+        let choices = (choiceTypes + ownedRouters.compactMap(ownedRoutedResultDeclaration)).joined(separator: "\n")
         let routeNamespace =
             choices.isEmpty ? "" : "/// The edges each router may choose among.\n\(access)enum Route { \(choices) }"
-        let methods = schema.transitions.map(observedMethod).joined(separator: "\n")
+        let methods = (schema.transitions.map(observedMethod) + inputRouters.map(observedRoutedMethod))
+            .joined(separator: "\n")
+        // The runtime's short type names are module-qualified, so a client's own `Subscription`, such as
+        // Combine's, cannot capture them. The rest of the expansion names them through these aliases.
+        let policies =
+            hasOperations
+            ? """
+            /// The disposition of a retained completion.
+            \(access)typealias PendingStatus = StateMachine.PendingStatus
+            """ : ""
         let snapshotSequence =
             schema.mode == .shared
-            ? "/// A single-pass latest-value sequence of an owner's snapshots.\n\(access)typealias Snapshots = RuntimeSnapshots<Snapshot>"
-            : "/// A single-pass latest-value sequence of a MainActor owner's snapshots.\n\(access)typealias MainActorSnapshots = RuntimeMainActorSnapshots<Snapshot>"
+            ? "/// A single-pass latest-value sequence of an owner's snapshots.\n\(access)typealias Snapshots = StateMachine.SnapshotSequence<Snapshot>"
+            : "/// A single-pass latest-value sequence of a MainActor owner's snapshots.\n\(access)typealias MainActorSnapshots = StateMachine.MainActorSnapshotSequence<Snapshot>"
         return """
             fileprivate typealias _StateMachineEngine = \(engine)
             /// Validated bounds for managed admission and serial subscriptions.
-            \(access)typealias Configuration = RuntimeManagedConfiguration
+            \(access)typealias Configuration = StateMachine.ManagedConfiguration
             /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
-            \(access)typealias LocalConfiguration = RuntimeLimits
+            \(access)typealias LocalConfiguration = StateMachine.Limits
             /// A live observation registration; cancelling or releasing it stops delivery.
-            \(access)typealias Subscription = RuntimeSubscription
+            \(access)typealias Subscription = StateMachine.SnapshotSubscription
             /// A live MainActor observation registration; cancelling or releasing it stops delivery.
-            \(access)typealias MainActorSubscription = RuntimeMainActorSubscription
+            \(access)typealias MainActorSubscription = StateMachine.MainActorSnapshotSubscription
             /// Failure to register another live observer.
-            \(access)typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
+            \(access)typealias SubscriptionFailure = StateMachine.SubscriptionFailure
             \(snapshotSequence)
-            /// Whether a managed owner retries a conflicting completion or waits for reconciliation.
-            \(access)typealias CompletionPolicy = RuntimeCompletionPolicy
-            /// The disposition of a retained completion.
-            \(access)typealias PendingStatus = RuntimePendingStatus
-            /// Admission rejection reasons in exact evaluation precedence.
-            \(access)typealias CommitRejection = \(engine).Rejection
+            \(policies)
+            /// Why an owner refused a prepared candidate, in precedence order.
+            \(access)typealias CommitRejection = StateMachine.CommitRejection
             /// An immutable historical payload with sealed complete-root provenance.
             \(access)struct Observed<Phase\(bound)>: \(schema.mode == .shared ? "Sendable, " : "")CustomStringConvertible {
                 fileprivate let payload: Phase
@@ -289,24 +463,21 @@ struct Generator {
                 switch record.model { \(observationCases) }
             }
             /// A sealed inert candidate consumed by admission.
+            ///
+            /// A plan defect found while preparing travels inside it with the snapshot it was prepared on,
+            /// so admission installs nothing and reports `CommitRejection.plan` unless the snapshot is
+            /// another owner's or the owner is closed, which it reports first.
             \(access)struct Prepared: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
-                fileprivate let candidate: _StateMachineEngine.Candidate
-                fileprivate init(_ candidate: _StateMachineEngine.Candidate) { self.candidate = candidate }
+                fileprivate let candidate: _StateMachineEngine.Proposal
+                fileprivate init(_ candidate: _StateMachineEngine.Proposal) { self.candidate = candidate }
             }
             /// A closed typed dynamic routing rejection.
             \(access)enum PreparationRejection: Error {
                 /// The input or outcome has no edge from the observed phase.
                 case invalidPhase
-                /// Actual emitted effects violate metadata or immutable limits.
-                case plan(PlanRejection)
                 \(edgeFailures)
             }
             \(routeNamespace)
-            /// A prepared candidate or typed routing rejection.
-            \(access)enum PreparationResult: ~Copyable\(schema.mode == .shared ? ", Sendable" : "") {
-                case prepared(Prepared)
-                case rejected(PreparationRejection)
-            }
             /// A historical receipt for an atomic acceptance.
             \(access)struct Receipt: \(schema.mode == .shared ? "Sendable, " : "")StateMachineReceipt, CustomStringConvertible {
                 /// The accepted historical observation.
@@ -321,7 +492,8 @@ struct Generator {
             \(access)enum SendRejection: Error {
                 /// Routing or the authored transition declined the input before a candidate existed.
                 case preparation(PreparationRejection)
-                /// The owner refused the prepared candidate; read `snapshot()` for the current root.
+                /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`);
+                /// read `snapshot()` for the current root.
                 case commit(CommitRejection)
             }
             /// Admission either publishes the entire candidate or leaves all state unchanged.
@@ -343,36 +515,39 @@ struct Generator {
     func observedMethod(_ edge: Schema.Transition) -> String {
         let before = phase(edge.from)
         let after = phase(edge.to)
-        let failure = edge.failureType ?? "Never"
         let argument: String
         let parameter: String
         let ticket: String
+        let documentation: String
         if edge.trigger.kind == .input {
             parameter = edge.payloadType.map { "_ input: \($0)" } ?? ""
             argument = edge.payloadType == nil ? "" : ", input"
             ticket = "nil"
+            documentation =
+                router(of: edge).map { "/// Prepares the declared edge that the router `\($0.name)` selects." }
+                ?? "/// Prepares the declared edge with phase authority preserved."
         } else {
             let op = operation(edge.trigger.name)
-            parameter = "_ completion: \(op.name)\(edge.trigger.kind == .success ? "Success" : "Failure")Completion"
-            argument = ", completion.value"
-            ticket = "completion.authority"
+            let value = edge.trigger.kind == .success ? "\(op.name).Output" : op.failure
+            parameter = "_ value: \(value), authority: RuntimeTicket"
+            argument = ", value"
+            ticket = "authority"
+            documentation =
+                "/// Prepares the completion edge that delivery selects, with operation authority preserved."
         }
         let call = "\(edge.failureType == nil ? "" : "try ")\(name).\(edge.name)(payload\(argument))"
         let starts = edge.effectNamespace != nil
         let result = starts ? "change" : "next"
         let resultType = starts ? "Change<\(after), \(authoredEffect(edge))>" : after
+        let throwsClause = edge.failureType.map { " throws(\($0))" } ?? ""
         return """
-            /// Prepares the declared edge with phase and operation authority preserved.
-            \(access)func \(edge.name)(\(parameter)) throws(PreparationFailure<\(failure)>) -> Prepared where Phase == \(before) {
-                let \(result): \(resultType)
-                \(edge.failureType == nil ? "\(result) = \(call)" : "do { \(result) = \(call) } catch { throw .domain(error) }")
-                do {
-                    let candidate = try _stateMachinePrepare(on: record, next: .\(edge.to)(\(starts ? "change.next" : "next")),
-                        effects: \(starts ? "change.effects.map(\\.effect)" : "[]"),
-                        from: \(index(edge.from)), to: \(index(edge.to)), invalidates: \(scopeIndices(edge.invalidates)),
-                        requiring: \(ticket), claim: claim)
-                    return Prepared(candidate)
-                } catch { throw .plan(error) }
+            \(documentation)
+            \(edgeAccess(edge, observed: true))func \(edge.name)(\(parameter))\(throwsClause) -> Prepared where Phase == \(before) {
+                let \(result): \(resultType) = \(call)
+                return _stateMachinePrepare(on: record, next: .\(edge.to)(\(starts ? "change.next" : "next")),
+                    effects: \(starts ? "change.effects.map(\\.effect)" : "[]"),
+                    from: \(index(edge.from)), to: \(index(edge.to)), invalidates: \(scopeIndices(edge.invalidates)),
+                    requiring: \(ticket), claim: claim)
             }
             """
     }
@@ -386,7 +561,7 @@ struct Generator {
     }
     func index(_ phase: String) -> Int { schema.phases.firstIndex { $0.caseName == phase }! }
     func scopeIndices(_ scopes: [String]) -> String {
-        "[" + scopes.map { String(schema.scopes.firstIndex(of: $0)!) }.joined(separator: ", ") + "]"
+        "[" + scopes.map { String(schema.scopeKeys.firstIndex(of: $0)!) }.joined(separator: ", ") + "]"
     }
 
     func operations() -> String {
@@ -402,34 +577,16 @@ struct Generator {
                     \(access)var execution: ExecutionHandle { ExecutionHandle(authority: authority) }
                     /// Seals a successful terminal result for this exact work.
                     \(access)func succeeded(_ value: \(op.name).Output) -> \(op.name)Completion {
-                        .success(\(op.name)SuccessCompletion(value: value, authority: authority))
+                        \(op.name)Completion(\(op.isInfallible ? "value: value" : "result: .success(value)"), authority: authority)
                     }
                     \(["Void", "()"].contains(op.outputType) ? "/// Seals a successful terminal result that carries no value.\n\(access)func succeeded() -> \(op.name)Completion { succeeded(()) }" : "")
-                    /// Seals a failed terminal result for this exact work.
-                    \(access)func failed(_ value: \(op.name).Failure) -> \(op.name)Completion {
-                        \(op.failureType == "Never" ? "" : ".failure(\(op.name)FailureCompletion(value: value, authority: authority))")
-                    }
+                    \(op.isInfallible ? "" : "/// Seals a failed terminal result for this exact work.\n\(access)func failed(_ value: \(op.failure)) -> \(op.name)Completion {\n\(op.name)Completion(result: .failure(value), authority: authority)\n}")
                 }
-                /// A sealed successful terminal result for one declared operation.
-                \(access)struct \(op.name)SuccessCompletion\(sendable) {
-                    /// The typed successful value.
-                    \(access)let value: \(op.name).Output
+                /// The sealed terminal result of one execution, which only its owner's `deliver` admits.
+                \(access)struct \(op.name)Completion\(sendable) {
+                    \(op.isInfallible ? "/// The value the operation produced; it cannot fail." : "/// The typed terminal value.")
+                    \(access)let \(op.isInfallible ? "value: \(op.name).Output" : "result: Result<\(op.name).Output, \(op.failure)>")
                     fileprivate let authority: RuntimeTicket
-                }
-                /// A sealed failed terminal result for one declared operation.
-                \(access)struct \(op.name)FailureCompletion\(sendable) {
-                    /// The typed failure value.
-                    \(access)let value: \(op.name).Failure
-                    fileprivate let authority: RuntimeTicket
-                }
-                /// The closed terminal vocabulary for this operation.
-                \(access)enum \(op.name)Completion\(sendable) {
-                    case success(\(op.name)SuccessCompletion)
-                    case failure(\(op.name)FailureCompletion)
-                    fileprivate var authority: RuntimeTicket { switch self {
-                        case .success(let value): return value.authority
-                        case .failure(let value): return value.authority
-                    } }
                 }
                 """
             }
@@ -493,10 +650,17 @@ struct Generator {
             """
     }
 
+    /// The dispatch of one prepared edge from `source`, mapping an authored failure into `PreparationRejection`.
+    func dispatchEdge(_ edge: Schema.Transition, source: String, arguments: String) -> String {
+        let call = "\(source).\(edge.name)(\(arguments))"
+        guard edge.failureType != nil else { return "return \(call)" }
+        return "do { return try \(call) } catch { throw .\(edge.name)(error) }"
+    }
+
     func preparation() -> String {
-        let eligibility = schema.scopes
+        let eligibility = schema.scopeKeys
             .map { scope in
-                if let op = schema.operations.first(where: { $0.scope == scope }) {
+                if let op = schema.operations.first(where: { $0.scopeKey == scope }) {
                     return "[" + op.activeIn.map { String(index($0)) }.joined(separator: ", ") + "]"
                 }
                 return "Array(0..<\(schema.phases.count))"
@@ -504,8 +668,8 @@ struct Generator {
             .joined(separator: ", ")
         let starts = schema.operations.enumerated()
             .map { i, op in
-                let scope = schema.scopes.firstIndex(of: op.scope)!
-                let dependencies = op.requires.map { "RuntimeScopeID(kind: \(schema.scopes.firstIndex(of: $0)!))" }
+                let scope = schema.scopeKeys.firstIndex(of: op.scopeKey)!
+                let dependencies = op.requires.map { "RuntimeScopeID(kind: \(schema.scopeKeys.firstIndex(of: $0)!))" }
                     .joined(separator: ", ")
                 let admission = policy(op.admission)
                 return """
@@ -520,7 +684,7 @@ struct Generator {
             .joined(separator: "\n")
         // Only pairs that have an edge get a case. One default covers the rest, which keeps the
         // switch small and its exhaustiveness check trivial for a graph with many inputs.
-        let missing = "default: return .rejected(.invalidPhase)"
+        let missing = "default: throw .invalidPhase"
         var inputCases = schema.phases
             .flatMap { p in
                 schema.inputs.compactMap { input -> String? in
@@ -540,96 +704,125 @@ struct Generator {
         if inputCases.count < schema.phases.count * schema.inputs.count { inputCases.append(missing) }
         var completionCases = schema.operations
             .flatMap { op in
-                schema.phases.flatMap { phase in
+                schema.phases.compactMap { phase -> String? in
                     let p = phase.caseName
-                    return [Schema.Trigger.Kind.success, .failure]
-                        .compactMap { outcome -> String? in
-                            let kind = outcome.rawValue
-                            let trigger = Schema.Trigger(kind: outcome, name: op.effect)
-                            let dispatch =
-                                dispatch(from: p, trigger: trigger, source: "source", payload: "completion")
-                            guard let dispatch else { return nil }
-                            return "case (.\(op.effect)(.\(kind)(let completion)), .\(p)(let source)): \(dispatch)"
-                        }
+                    let success = dispatch(
+                        from: p,
+                        trigger: Schema.Trigger(kind: .success, name: op.effect),
+                        source: "source",
+                        payload: "value"
+                    )
+                    let failure = dispatch(
+                        from: p,
+                        trigger: Schema.Trigger(kind: .failure, name: op.effect),
+                        source: "source",
+                        payload: "value"
+                    )
+                    guard success != nil || failure != nil else { return nil }
+                    // An infallible completion carries its value directly and has no failure edge.
+                    if op.isInfallible, let success {
+                        return """
+                            case (.\(op.effect)(let completion), .\(p)(let source)):
+                                let value: \(op.name).Output = completion.value
+                                \(success)
+                            """
+                    }
+                    let succeeded =
+                        success.map { "case .success(let value): \($0)" } ?? "case .success: throw .invalidPhase"
+                    let failed =
+                        failure.map { "case .failure(let value): \($0)" }
+                        ?? (op.failureType == "Never"
+                            ? "case .failure(let value): switch value {}" : "case .failure: throw .invalidPhase")
+                    return """
+                        case (.\(op.effect)(let completion), .\(p)(let source)):
+                            switch completion.result {
+                            \(succeeded)
+                            \(failed)
+                            }
+                        """
                 }
             }
-        if completionCases.count < schema.operations.count * schema.phases.count * 2 { completionCases.append(missing) }
+        if completionCases.count < schema.operations.count * schema.phases.count { completionCases.append(missing) }
+        let completion =
+            hasOperations
+            ? """
+            fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
+                switch (completion, snapshot) { \(completionCases.joined(separator: "\n")) }
+            }
+            """ : ""
         return """
             fileprivate static var _stateMachineEligibility: [[Int]] { [\(eligibility)] }
             fileprivate static func _stateMachinePrepare(
                 on record: _StateMachineEngine.Snapshot, next: \(name), effects: [Effect], from: Int, to: Int,
                 invalidates: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
-            ) throws(PlanRejection) -> _StateMachineEngine.Candidate {
-                var edits: [_StateMachineEngine.ScopeEdit] = []
-                for (scope, phases) in _stateMachineEligibility.enumerated() {
-                    let before = phases.contains(from)
-                    let after = phases.contains(to)
-                    if after && (!before || invalidates.contains(scope)) { edits.append(.activate(RuntimeScopeID(kind: UInt32(scope)))) }
-                    else if before && !after { edits.append(.remove(RuntimeScopeID(kind: UInt32(scope)))) }
-                }
-                \(schema.operations.isEmpty ? "let" : "var") starts: [_StateMachineEngine.Start] = []
-                \(schema.operations.isEmpty ? "" : "var counts = Array(repeating: 0, count: \(schema.operations.count))")
-                for effect in effects { switch effect { \(starts) } }
-                return try _StateMachineEngine.prepare(on: record, next: next, requiring: ticket.map { [$0] } ?? [],
-                    plan: .init(scopes: edits, retire: ticket.map { [$0] } ?? [], starts: starts,
-                        controlCount: invalidates.count, finishingClaims: claim.map { [$0] } ?? []))
+            ) -> Prepared {
+                do throws(PlanRejection) {
+                    var edits: [_StateMachineEngine.ScopeEdit] = []
+                    for (scope, phases) in _stateMachineEligibility.enumerated() {
+                        let before = phases.contains(from)
+                        let after = phases.contains(to)
+                        if after && (!before || invalidates.contains(scope)) { edits.append(.activate(RuntimeScopeID(kind: UInt32(scope)))) }
+                        else if before && !after { edits.append(.remove(RuntimeScopeID(kind: UInt32(scope)))) }
+                    }
+                    \(schema.operations.isEmpty ? "let" : "var") starts: [_StateMachineEngine.Start] = []
+                    \(schema.operations.isEmpty ? "" : "var counts = Array(repeating: 0, count: \(schema.operations.count))")
+                    for effect in effects { switch effect { \(starts) } }
+                    return Prepared(.candidate(try _StateMachineEngine.prepare(on: record, next: next, requiring: ticket.map { [$0] } ?? [],
+                        plan: .init(scopes: edits, retire: ticket.map { [$0] } ?? [], starts: starts,
+                            controlCount: invalidates.count, finishingClaims: claim.map { [$0] } ?? []))))
+                } catch { return Prepared(.defective(.init(error, preparedOn: record))) }
             }
             /// Routes an input against a historical snapshot, rejecting a missing phase edge explicitly.
-            \(access)static func prepare(_ input: Input, on snapshot: Snapshot) -> PreparationResult {
+            ///
+            /// A plan defect is not a routing rejection: it travels inside the result, and admission reports it.
+            \(access)static func prepare(_ input: Input, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
                 \(schema.inputs.isEmpty ? "" : "switch (input, snapshot) { \(inputCases.joined(separator: "\n")) }")
             }
-            fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
-                \(schema.operations.isEmpty ? "" : "switch (completion, snapshot) { \(completionCases.joined(separator: "\n")) }")
-            }
+            \(completion)
             """
     }
 
+    /// The dispatch of one (source phase, trigger) pair, or `nil` when the pair has no edge or router.
+    ///
+    /// An input dispatches to the phase's edge method, and a completion to its fileprivate edge with the
+    /// completion's authority. A routed pair runs its router inline and dispatches to the edge it selects.
     func dispatch(from: String, trigger: Schema.Trigger, source: String, payload: String?) -> String? {
-        func prepare(_ edge: Schema.Transition) -> String {
-            let call = "try \(source).\(edge.name)(\(payload ?? ""))"
-            let domain: String
-            if edge.failureType != nil {
-                domain = "case .domain(let error): return .rejected(.\(edge.name)(error))"
-            } else {
-                domain = "case .domain(let never): switch never {}"
-            }
-            return """
-                do { return .prepared(\(call)) }
-                catch { switch error { case .plan(let reason): return .rejected(.plan(reason)) \(domain) } }
-                """
-        }
+        let isInput = trigger.kind == .input
+        let arguments = isInput ? payload ?? "" : "\(payload!), authority: completion.authority"
         let edges = schema.transitions.filter { $0.from == from && $0.trigger == trigger }
         guard let route = schema.routes.first(where: { $0.from == from && $0.trigger == trigger }) else {
-            return edges.first.map(prepare)
+            return edges.first.map { dispatchEdge($0, source: source, arguments: arguments) }
         }
-        // A router sees plain values only; the sealed completion goes to the edge it selects.
-        let value = payload.map { trigger.kind == .input ? $0 : "\($0).value" }
-        let call = "\(name).\(route.name)(\(source).value\(value.map { ", " + $0 } ?? ""))"
+        // A router sees plain values only; a completion's authority goes to the edge it selects. Each
+        // function's failure becomes its own `PreparationRejection` case.
+        let call = "\(name).\(route.name)(\(source).value\(payload.map { ", " + $0 } ?? ""))"
         guard let namespace = route.namespace else {
-            return "do { try \(call) } catch { return .rejected(.\(route.name)(error)) }"
+            return "do { try \(call) } catch { throw .\(route.name)(error) }"
         }
         let selection =
             route.failureType == nil
             ? "let selection: Route.\(namespace) = \(call)"
-            : "let selection: Route.\(namespace)\ndo { selection = try \(call) } catch { return .rejected(.\(route.name)(error)) }"
-        let cases = edges.map { "case .\($0.name): \(prepare($0))" }.joined(separator: "\n")
+            : "let selection: Route.\(namespace)\ndo { selection = try \(call) } catch { throw .\(route.name)(error) }"
+        let cases = edges.map { "case .\($0.name): \(dispatchEdge($0, source: source, arguments: arguments))" }
+            .joined(separator: "\n")
         return """
             \(selection)
             switch selection { \(cases) }
             """
     }
 
-    /// The resting phases saved data may restore, and the validated root for each owner's `restoring:` initializer.
+    /// The phases saved data may restore, and the validated root for each owner's `restoring:` initializer.
     func restoration() -> String {
-        let cases = schema.restingPhases.map { "case \($0.caseName)(\($0.typeName))" }.joined(separator: "\n")
+        let cases = schema.restorablePhases.map { "case \($0.caseName)(\($0.typeName))" }.joined(separator: "\n")
         let declaration = """
-            /// A phase saved data can restore: one in which no operation is active, so no work resumes.
+            /// A phase saved data can restore: one in which no operation is active, or one the
+            /// `@Restoration` function lists in `allows:`. A restored owner has no outstanding work.
             \(access)enum Restoration\(sendable) {
                 \(cases)
             }
             """
         guard let validator = schema.restoration else { return declaration }
-        let roots = schema.restingPhases
+        let roots = schema.restorablePhases
             .map {
                 "case .\($0.caseName)(let payload): return (.\($0.caseName)(payload), [\(scopes(in: $0.caseName))])"
             }
@@ -652,157 +845,448 @@ struct Generator {
         "/// Creates fresh authority at revision zero in the phase `\(schema.restoration?.name ?? "")` validates from saved data."
     }
 
-    /// The `Local` initializer that restores saved data, preceded by a line break, when the schema declares one.
-    private var restoringLocal: String {
-        guard let validator = schema.restoration else { return "" }
-        return """
+    var ledger: String { "RuntimeDeliveryLedger<\(name), Effect, Completion, PreparationRejection>" }
 
-            \(restoringDocumentation)
-            \(access)init(restoring saved: \(validator.archiveType), configuration: LocalConfiguration = .default)\(restorationThrows) {
-                \(restoredRoot)
-                engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration)
+    /// The pending-completion vocabulary shared by every owner of a schema with operations.
+    func pendingDeclarations() -> String {
+        let outcomes = schema.operations
+            .map { op in
+                let value = op.isInfallible ? "\(op.name).Output" : "Result<\(op.name).Output, \(op.failure)>"
+                return "case \(op.effect)(\(value))"
+            }
+            .joined(separator: "\n")
+        let projections = schema.operations
+            .map {
+                "case .\($0.effect)(let completion): outcome = .\($0.effect)(completion.\($0.isInfallible ? "value" : "result"))"
+            }
+            .joined(separator: "\n")
+        return """
+            fileprivate typealias _StateMachineLedger = \(ledger)
+            /// The opaque identity of one retained terminal outcome of this schema's owners.
+            \(access)struct PendingCompletionID: Hashable, Sendable {
+                fileprivate let raw: RuntimePendingID
+            }
+            /// A retained terminal outcome and its delivery diagnostics.
+            ///
+            /// The outcome is an inert value: only `reconcile(id:)`, `retryAdmission(id:)`, or
+            /// `discardPending(id:)` can settle the retained completion it describes.
+            \(access)struct PendingCompletion\(sendable) {
+                /// The retained terminal value of one operation.
+                \(access)enum Outcome\(sendable) {
+                    \(outcomes)
+                }
+                /// Why the last preparation or admission of a retained outcome did not commit.
+                \(access)enum Rejection\(sendable) {
+                    /// The router or completion edge rejected the outcome.
+                    case preparation(PreparationRejection)
+                    /// The owner refused the prepared candidate, or its effect plan is defective.
+                    case admission(CommitRejection)
+                }
+                /// The opaque identity of this retained outcome.
+                \(access)let id: PendingCompletionID
+                /// The first retained terminal outcome.
+                \(access)let outcome: Outcome
+                /// The delivery state when this record was captured.
+                \(access)let status: PendingStatus
+                /// The last failed preparation or admission, when present.
+                \(access)let lastRejection: Rejection?
+                /// The saturating count of claimed preparations; capacity retries do not increment it.
+                \(access)let attempts: UInt64
+                /// Whether the preparation count has reached its representable limit.
+                \(access)var attemptsSaturated: Bool { attempts == UInt64.max }
+                fileprivate init(_ pending: _StateMachineLedger.Pending) {
+                    id = PendingCompletionID(raw: pending.id)
+                    switch pending.outcome { \(projections) }
+                    status = pending.status
+                    lastRejection = pending.lastRejection.map { reason in
+                        switch reason {
+                        case .preparation(let rejection): .preparation(rejection)
+                        case .admission(let rejection): .admission(rejection)
+                        }
+                    }
+                    attempts = pending.attempts
+                }
+            }
+            /// The decision `deliver` made about one terminal outcome.
+            \(access)enum DeliveryResult\(sendable) {
+                /// The outcome committed.
+                case committed(Receipt)
+                /// The outcome is retained; its status says what admission is waiting for.
+                case pending(PendingCompletionID, PendingStatus)
+                /// The operation's authority is inactive or its outcome was already settled.
+                case stale
+                /// The completion was issued by a different owner.
+                case foreignOwner
+            }
+            /// The result of one more attempt to admit a retained outcome.
+            \(access)enum ReconcileResult\(sendable) {
+                /// The retained outcome committed.
+                case committed(Receipt)
+                /// The outcome is still retained; its status says what admission is waiting for.
+                case pending(PendingCompletionID, PendingStatus)
+                /// Another attempt holds the only preparation claim.
+                case inProgress
+                /// No outcome with this identity is retained.
+                case notPending
+            }
+            /// The result of revoking a retained outcome's operation.
+            \(access)enum DiscardResult\(sendable) {
+                /// The authority-only commit revoked the operation and disposed of its outcome.
+                case discarded(Receipt)
+                /// The owner refused the authority-only commit; the outcome stays retained.
+                case rejected(CommitRejection)
+                /// No outcome with this identity is retained.
+                case notPending
+            }
+            fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> ReconcileResult {
+                switch result {
+                case .committed(let record): return .committed(Receipt(record))
+                case .pending(let id, let status): return .pending(PendingCompletionID(raw: id), status)
+                case .notPending: return .notPending
+                }
+            }
+            fileprivate static func _stateMachineDeliveryPreparation(_ attempt: _StateMachineLedger.Attempt) -> _StateMachineLedger.Preparation {
+                let prepared: Prepared
+                do {
+                    prepared = try _stateMachineCompletion(attempt.outcome, on: _stateMachineSnapshot(attempt.snapshot, claim: attempt.claim))
+                } catch { return .failure(.preparation(error)) }
+                switch prepared.candidate {
+                case .candidate(let candidate): return .success(candidate)
+                case .defective(let defect): return .failure(.admission(defect.rejection(against: attempt.snapshot)))
+                }
             }
             """
     }
 
-    var ledger: String { "RuntimeDeliveryLedger<\(name), Effect, Completion, PreparationRejection>" }
-    func local() -> String {
+    /// The members of `Local` that drain commands, acknowledge execution, and settle retained outcomes.
+    func localDelivery() -> String {
         """
-        fileprivate typealias _StateMachineLedger = \(ledger)
-        /// The opaque identity of a first retained terminal envelope.
-        \(access)typealias PendingCompletionID = RuntimePendingID
-        /// Typed historical diagnostics for a retained completion.
-        \(access)typealias PendingCompletion = \(ledger).Pending
-        /// The obligations a managed owner still tracked when its shutdown deadline expired.
-        \(access)typealias ShutdownDiagnostics = RuntimeShutdownDiagnostics
-        /// Whether shutdown joined every obligation or stopped waiting at its deadline.
+        /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
+        \(access)mutating func drainCommands(limit: Int) -> [CommandBatch] {
+            engine.drain(limit: limit).map { _stateMachineBatch($0) }
+        }
+        /// Records actual termination independently of cancellation and completion delivery.
+        \(access)mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
+            switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
+            case .recorded: return .recorded
+            case .duplicate: return .duplicate
+            case .foreignOwner: return .foreignOwner
+            }
+        }
+        /// Retains the first outcome and attempts one typed preparation against the current root.
         ///
-        /// A timeout leaves the owner closed and its outstanding work tracked.
-        \(access)enum ShutdownResult: Sendable {
-            case quiescent
-            case timedOut(ShutdownDiagnostics)
+        /// This is the only way to submit a terminal outcome. A later outcome for the same work never
+        /// replaces the retained one; it reports that outcome's status instead.
+        \(access)mutating func deliver(_ completion: Completion) -> DeliveryResult {
+            switch ledger.retain(completion, for: completion.authority, in: &engine) {
+            case .stale: return .stale
+            case .foreignOwner: return .foreignOwner
+            case .pending(let raw):
+                let id = PendingCompletionID(raw: raw)
+                guard let pending = ledger.pending.first(where: { $0.id == raw }) else { return .stale }
+                if pending.status != .awaitingAdmission { return .pending(id, pending.status) }
+                switch reconcile(id: id) {
+                case .committed(let receipt): return .committed(receipt)
+                case .pending(let id, let status): return .pending(id, status)
+                case .inProgress: return .pending(id, .preparing)
+                case .notPending: return .stale
+                }
+            }
         }
-        /// A closed completion delivery decision.
-        \(access)enum DeliveryResult\(sendable) {
-            case committed(Receipt)
-            case pending(PendingCompletionID, PendingStatus)
-            case inProgress
-            case notPending
-            /// The operation's authority is inactive or its outcome was already settled.
-            case stale
-            /// The completion was issued by a different owner.
-            case foreignOwner
-            case discarded(Receipt)
-            case rejected(CommitRejection)
-        }
-        fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> DeliveryResult {
-            switch result {
-            case .committed(let record): return .committed(Receipt(record))
-            case .pending(let id, let status): return .pending(id, status)
+        \(operationDeliveries(prefix: "mutating ", asynchronous: "", awaiting: ""))
+        /// Claims one retained outcome before evaluating domain code.
+        \(access)mutating func reconcile(id: PendingCompletionID) -> ReconcileResult {
+            switch ledger.claim(id.raw, in: &engine) {
+            case .inProgress: return .inProgress
             case .notPending: return .notPending
+            case .claimed(let attempt):
+                let preparation = _stateMachineDeliveryPreparation(attempt)
+                return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
             }
         }
-        fileprivate static func _stateMachineDeliveryPreparation(_ attempt: _StateMachineLedger.Attempt) -> _StateMachineLedger.Preparation {
-            \(schema.operations.isEmpty ? "return .failure(.domain(.invalidPhase))" : """
-            switch _stateMachineCompletion(attempt.outcome, on: _stateMachineSnapshot(attempt.snapshot, claim: attempt.claim)) {
-            case .prepared(let prepared): return .success(prepared.candidate)
-            case .rejected(let reason):
-                if case .plan(let plan) = reason { return .failure(.plan(plan)) }
-                return .failure(.domain(reason))
-            }
-            """)
+        /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
+        ///
+        /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
+        \(access)mutating func retryAdmission(id: PendingCompletionID) -> ReconcileResult {
+            _stateMachineFinish(ledger.retryAdmission(id.raw, in: &engine))
         }
-        /// A noncopyable manually driven owner with an embedded value engine.
-        \(access)struct Local: ~Copyable {
-            fileprivate var engine: _StateMachineEngine
-            fileprivate var ledger = _StateMachineLedger()
-            /// Creates fresh authority only in the declared initial phase.
-            \(access)init(_ initial: \(initialType)\(initialDefault), configuration: LocalConfiguration = .default) {
-                engine = _StateMachineEngine(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration)
-            }\(restoringLocal)
-            /// Returns an immutable historical observation.
-            \(access)borrowing func snapshot() -> Snapshot { _stateMachineSnapshot(engine.snapshot) }
-            /// Consumes and atomically accepts or rejects a complete candidate.
-            \(access)mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
-                let result = engine.commit(prepared.candidate)
-                ledger.prune(in: engine)
-                return _stateMachineAdmission(result)
+        /// Queries immutable first-outcome records without claiming preparation.
+        \(access)borrowing func pendingCompletions() -> [PendingCompletion] { ledger.pending.map(PendingCompletion.init) }
+        /// Revokes one retained operation using an atomic authority-only commit.
+        \(access)mutating func discardPending(id: PendingCompletionID) -> DiscardResult {
+            guard let result = ledger.discard(id.raw, in: &engine) else { return .notPending }
+            switch result {
+            case .committed(let record): return .discarded(Receipt(record))
+            case .rejected(let reason, _): return .rejected(reason)
             }
-            /// Routes, prepares and admits one input against the current root.
-            @discardableResult
-            \(access)mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
-                switch \(name).prepare(input, on: snapshot()) {
-                case .prepared(let prepared):
+        }
+        """
+    }
+
+    /// The shutdown and flush vocabulary shared by every managed owner.
+    func lifetimeDeclarations() -> String {
+        let operationFields =
+            hasOperations
+            ? """
+            /// Whether an automatic retry of a retained completion is still scheduled.
+            \(access)let isRetrying: Bool
+            /// The identities of the retained terminal outcomes.
+            \(access)let pendingCompletions: [PendingCompletionID]
+            /// The executions, deliveries, and preparations that remain tracked.
+            \(access)let outstandingExecutions: [OutstandingExecution]
+            """ : ""
+        let operationProjections =
+            hasOperations
+            ? """
+            isRetrying = raw.isRetrying
+            pendingCompletions = raw.pendingCompletions.map { PendingCompletionID(raw: $0) }
+            outstandingExecutions = raw.outstandingExecutions
+            """ : ""
+        return """
+            /// The obligations a managed owner still tracked when its shutdown deadline expired.
+            ///
+            /// It is captured in the same observation that found the deadline expired, so it always names
+            /// at least one unsettled obligation. It holds no model data and no authority over the owner.
+            \(access)struct ShutdownDiagnostics: Equatable, Sendable {
+                \(hasOperations ? "/// An execution and delivery obligation that remained tracked.\n\(access)typealias OutstandingExecution = StateMachine.ShutdownDiagnostics.OutstandingExecution" : "")
+                /// The owner's last accepted revision at the observation.
+                \(access)let acceptedRevision: UInt64
+                /// The revision of the last fully processed FIFO batch.
+                \(access)let processedThrough: UInt64
+                /// Whether accepted ordinary or terminal batches still await processing.
+                \(access)let hasQueuedBatches: Bool
+                /// Whether a FIFO processing turn still owns responsibility.
+                \(access)let isDraining: Bool
+                \(operationFields)
+                fileprivate init(_ raw: StateMachine.ShutdownDiagnostics) {
+                    acceptedRevision = raw.acceptedRevision
+                    processedThrough = raw.processedThrough
+                    hasQueuedBatches = raw.hasQueuedBatches
+                    isDraining = raw.isDraining
+                    \(operationProjections)
+                }
+            }
+            /// Whether shutdown joined every obligation or stopped waiting at its deadline.
+            ///
+            /// A timeout leaves the owner closed and its outstanding work tracked.
+            \(access)enum ShutdownResult: Equatable, Sendable {
+                /// Every execution, delivery, and preparation obligation settled.
+                case quiescent
+                /// The deadline passed first; the diagnostics describe what was still outstanding.
+                case timedOut(ShutdownDiagnostics)
+                fileprivate init(_ raw: StateMachine.ShutdownDiagnostics?) {
+                    self = raw.map { .timedOut(ShutdownDiagnostics($0)) } ?? .quiescent
+                }
+            }
+            /// Whether `flush(through:)` waited for a receipt's batch to be processed.
+            \(access)enum FlushResult: Equatable, Sendable {
+                /// \(hasOperations ? "Cancellation and launch decisions through the receipt have been processed." : "The owner offered every snapshot through the receipt to its subscriptions.")
+                case processed
+                /// The receipt was issued by a different owner, so there was nothing to wait for.
+                case foreignOwner
+            }
+            """
+    }
+
+    func local() -> String {
+        let ops = hasOperations
+        // A Local queues only batches that carry a command, and the terminal batch; every other
+        // receipt is the return value of `send` or `commit`. A run of plain edits needs no draining.
+        let batches = ", recording: .commands"
+        let restoring = schema.restoration.map { validator in
+            """
+
+            \(restoringDocumentation)
+            \(access)init(restoring saved: \(validator.archiveType), configuration: LocalConfiguration = .default)\(restorationThrows) {
+                \(restoredRoot)
+                engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration\(batches))
+            }
+            """
+        }
+        return """
+            \(ops ? pendingDeclarations() : "")
+            \(lifetimeDeclarations())
+            /// A noncopyable manually driven owner with an embedded value engine.
+            \(access)struct Local: ~Copyable {
+                fileprivate var engine: _StateMachineEngine
+                \(ops ? "fileprivate var ledger = _StateMachineLedger()" : "")
+                /// Creates fresh authority only in the declared initial phase.
+                \(access)init(_ initial: \(initialType)\(initialDefault), configuration: LocalConfiguration = .default) {
+                    engine = _StateMachineEngine(.\(schema.initial)(initial), scopes: [\(initialScopes)], limits: configuration\(batches))
+                }\(restoring ?? "")
+                /// Returns an immutable historical observation.
+                \(access)borrowing func snapshot() -> Snapshot { _stateMachineSnapshot(engine.snapshot) }
+                /// Consumes and atomically accepts or rejects a complete candidate.
+                \(access)mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
+                    switch prepared.candidate {
+                    case .defective(let defect): return _stateMachineAdmission(engine.reject(defect))
+                    case .candidate(let candidate):
+                        let result = engine.commit(candidate)
+                        \(ops ? "ledger.prune(in: engine)" : "")
+                        return _stateMachineAdmission(result)
+                    }
+                }
+                /// Routes, prepares and admits one input against the current root.
+                @discardableResult
+                \(access)mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
+                    let prepared: Prepared
+                    do { prepared = try \(name).prepare(input, on: snapshot()) } catch { throw .preparation(error) }
                     switch commit(prepared) {
                     case .committed(let receipt): return receipt
                     case .rejected(let reason, _): throw .commit(reason)
                     }
-                case .rejected(let reason): throw .preparation(reason)
                 }
-            }
-            /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
-            \(access)mutating func drainCommands(limit: Int) -> [CommandBatch] {
-                engine.drain(limit: limit).map { _stateMachineBatch($0) }
-            }
-            /// Records actual termination independently of cancellation and completion delivery.
-            \(access)mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
-                switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
-                case .recorded: return .recorded
-                case .duplicate: return .duplicate
-                case .foreignOwner: return .foreignOwner
+                \(ops ? localDelivery() : "")
+                /// Ends admission while retaining historical read access.
+                @discardableResult
+                \(access)mutating func close() -> Receipt {
+                    let result = engine.close()
+                    \(ops ? "ledger.prune(in: engine)" : "")
+                    return Receipt(result)
                 }
+                \(ops ? """
+                /// Closure, FIFO transfer, and all actual execution and delivery obligations have settled.
+                \(access)var isQuiescent: Bool { engine.isQuiescent }
+                """ : "")
             }
-            /// Retains the first outcome and attempts one typed preparation against the current root.
-            \(access)mutating func deliver(_ completion: Completion) -> DeliveryResult {
-                \(schema.operations.isEmpty ? "" : """
-                switch ledger.retain(completion, for: completion.authority, in: &engine) {
-                case .stale: return .stale
-                case .foreignOwner: return .foreignOwner
-                case .pending(let id):
-                    guard let pending = ledger.pending.first(where: { $0.id == id }) else { return .notPending }
-                    if pending.status != .awaitingAdmission { return .pending(id, pending.status) }
-                    return reconcile(id: id)
-                }
-                """)
-            }
-            \(operationDeliveries(prefix: "mutating ", asynchronous: "", awaiting: ""))
-            /// Claims one retained outcome before evaluating domain code.
-            \(access)mutating func reconcile(id: PendingCompletionID) -> DeliveryResult {
-                switch ledger.claim(id, in: &engine) {
-                case .inProgress: return .inProgress
-                case .notPending: return .notPending
-                case .claimed(let attempt):
-                    let preparation = _stateMachineDeliveryPreparation(attempt)
-                    return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
-                }
-            }
-            /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
-            ///
-            /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
-            \(access)mutating func retryAdmission(id: PendingCompletionID) -> DeliveryResult {
-                _stateMachineFinish(ledger.retryAdmission(id, in: &engine))
-            }
-            /// Queries immutable first-outcome records without claiming preparation.
-            \(access)borrowing func pendingCompletions() -> [PendingCompletion] { ledger.pending }
-            /// Revokes one retained operation using an atomic authority-only commit.
-            \(access)mutating func discardPending(id: PendingCompletionID) -> DeliveryResult {
-                guard let result = ledger.discard(id, in: &engine) else { return .notPending }
-                switch result {
-                case .committed(let record): return .discarded(Receipt(record))
-                case .rejected(let reason, _): return .rejected(reason)
-                }
-            }
-            /// Ends admission while retaining historical read access.
-            \(access)mutating func close() -> Receipt {
-                let result = engine.close()
-                ledger.prune(in: engine)
-                return Receipt(result)
-            }
-            /// Closure, FIFO transfer, and all actual execution and delivery obligations have settled.
-            \(access)var isQuiescent: Bool { engine.isQuiescent }
-        }
-        """
+            """
     }
+    /// The parameters after the initial payload or saved data in every managed owner's designated initializer.
+    private func managedParameters(drivers: String) -> String {
+        guard hasOperations else { return "configuration: Configuration = .default" }
+        return
+            "drivers: \(drivers), configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure"
+    }
+
+    /// The type of one operation's driver: the bare output when it cannot fail, otherwise a `Result`.
+    ///
+    /// A fallible driver returns `Result` rather than throwing, because a typed-throws closure literal
+    /// does not infer its thrown type.
+    func driverType(_ op: Schema.Operation, isolation: String) -> String {
+        let output = op.isInfallible ? "\(op.name).Output" : "Result<\(op.name).Output, \(op.failure)>"
+        return "\(isolation) (\(op.name).Input) async -> \(output)"
+    }
+
+    /// A managed owner's completion policy, which carries an optional handler in the owner's isolation.
+    ///
+    /// It begins with a line break so that a schema without operations gains no blank line.
+    private func completionPolicy(isolation: String, sendable: Bool) -> String {
+        guard hasOperations else { return "" }
+        let handler = "\(isolation) (PendingCompletion) -> Void"
+        return "\n" + """
+            /// How this owner settles a retained completion that cannot commit when it is delivered.
+            ///
+            /// The default, `.retryPure`, evaluates a completion's router and edge again after another
+            /// commit wins the race, so it assumes those functions are pure. Choose
+            /// `.manual(onReconciliationRequired:)` when they are not.
+            ///
+            /// A handler, when given, runs outside the owner's critical section each time a retained
+            /// completion's status becomes `reconciliationRequired`: its completion edge or router threw,
+            /// its effect plan is defective, the owner refused its admission, or an explicit
+            /// `reconcile(id:)` did not commit. Settle it with `reconcile(id:)` or `discardPending(id:)`.
+            \(access)struct CompletionPolicy\(sendable ? ": Sendable" : "") {
+                fileprivate let runtime: RuntimeCompletionPolicy
+                fileprivate let reconciliationRequired: \(isolation) (_StateMachineLedger.Pending) -> Void
+                private init(_ runtime: RuntimeCompletionPolicy, handler: @escaping \(handler)) {
+                    self.runtime = runtime
+                    reconciliationRequired = { handler(PendingCompletion($0)) }
+                }
+                /// Prepares a completion again against the current state when another commit wins the race,
+                /// at most four times per turn before yielding to other work, and notifies no one.
+                ///
+                /// Choose it only when every completion edge and router is deterministic and free of side
+                /// effects; the compiler does not check that. A completion retained for any other reason
+                /// stays visible only through `pendingCompletions()`.
+                \(access)static var retryPure: CompletionPolicy { CompletionPolicy(.retryPure, handler: { _ in }) }
+                /// Retries lost races as `retryPure` does, and passes every completion that still needs
+                /// reconciliation to `handler`.
+                \(access)static func retryPure(onReconciliationRequired handler: @escaping \(handler)) -> CompletionPolicy {
+                    CompletionPolicy(.retryPure, handler: handler)
+                }
+                /// Never prepares a completion again on its own: every completion that needs reconciliation,
+                /// including one whose preparation lost a race with another commit, goes to `handler`.
+                \(access)static func manual(onReconciliationRequired handler: @escaping \(handler)) -> CompletionPolicy {
+                    CompletionPolicy(.manualOnConflict, handler: handler)
+                }
+            }
+            """
+    }
+
+    /// The runtime host arguments after `configuration`, which wire execution and delivery or, without
+    /// operations, close over the uninhabited outcome.
+    private var managedHooks: String {
+        guard hasOperations else {
+            return """
+                driver: { raw in switch raw.descriptor {} },
+                ticket: { (outcome: Never) -> RuntimeTicket in },
+                prepare: { attempt in switch attempt.outcome {} }
+                """
+        }
+        return """
+            policy: completionPolicy.runtime, driver: { raw in
+                switch raw.descriptor { \(managedExecutions) }
+            }, ticket: { (outcome: Completion) -> RuntimeTicket in outcome.authority },
+            prepare: { _stateMachineDeliveryPreparation($0) },
+            reconciliationRequired: completionPolicy.reconciliationRequired
+            """
+    }
+
+    /// The pending-completion members of a managed owner; a managed owner offers no `deliver`, because
+    /// no caller holds its work.
+    private func managedPending(asynchronous: String, awaiting: String, delivery: String) -> String {
+        guard hasOperations else { return "" }
+        return """
+            /// Reads immutable retained first-outcome diagnostics.
+            \(access)func pendingCompletions()\(asynchronous) -> [PendingCompletion] { \(awaiting)host.pendingCompletions().map(PendingCompletion.init) }
+            /// Explicitly claims a fresh preparation attempt for a retained outcome.
+            \(access)func reconcile(id: PendingCompletionID)\(asynchronous) -> ReconcileResult { Self.reconciled(\(awaiting)host.reconcile(id: id.raw)) }
+            /// Revokes retained delivery with an authority-only admission.
+            \(access)func discardPending(id: PendingCompletionID)\(asynchronous) -> DiscardResult { Self.discarded(\(awaiting)host.discardPending(id: id.raw)) }
+            // The raw host reports only the cases each operation can produce; the rest cannot occur.
+            private static func reconciled(_ result: \(delivery)) -> ReconcileResult {
+                switch result {
+                case .committed(let record): return .committed(Receipt(record))
+                case .pending(let id, let status): return .pending(PendingCompletionID(raw: id), status)
+                case .inProgress: return .inProgress
+                default: return .notPending
+                }
+            }
+            private static func discarded(_ result: \(delivery)) -> DiscardResult {
+                switch result {
+                case .discarded(let record): return .discarded(Receipt(record))
+                case .rejected(let reason): return .rejected(reason)
+                default: return .notPending
+                }
+            }
+            """
+    }
+
+    /// The flush and shutdown members every managed owner shares.
+    private var lifetimeMembers: String {
+        let flush =
+            hasOperations
+            ? "/// Waits until cancellation and launch decisions through this owner's receipt have been processed."
+            : "/// Waits until this owner has offered every snapshot through its receipt to its subscriptions."
+        let obligations =
+            hasOperations
+            ? "every execution, delivery, and preparation obligation settles" : "every accepted batch is processed"
+        return """
+            \(flush)
+            \(access)func flush(through receipt: Receipt) async -> FlushResult {
+                await host.flush(through: receipt.snapshot.record) ? .processed : .foreignOwner
+            }
+            /// Closes admission, then waits until \(obligations).
+            ///
+            /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
+            /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
+            /// it always returns `.quiescent`.
+            @discardableResult
+            \(access)func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+                ShutdownResult(await host.shutdown(deadline: deadline))
+            }
+            """
+    }
+
     func managed(mainActor: Bool) -> String {
         let facade = mainActor ? "MainActorHost" : "ActorHost"
         let runtime = mainActor ? "RuntimeMainActorHost" : "RuntimeActorHost"
@@ -813,17 +1297,15 @@ struct Generator {
         let token = mainActor ? "MainActorSubscription" : "Subscription"
         let fields = schema.operations
             .map {
-                "/// Executes this operation within the selected isolation.\n\(access)let \($0.effect): @MainActor (\($0.name).Input) async -> Result<\($0.name).Output, \($0.name).Failure>"
+                "/// Executes this operation within the selected isolation.\n\(access)let \($0.effect): \(driverType($0, isolation: "@MainActor"))"
             }
             .joined(separator: "\n")
         let params = schema.operations
-            .map {
-                "\($0.effect): @escaping @MainActor (\($0.name).Input) async -> Result<\($0.name).Output, \($0.name).Failure>"
-            }
+            .map { "\($0.effect): @escaping \(driverType($0, isolation: "@MainActor"))" }
             .joined(separator: ", ")
         let assignments = schema.operations.map { "self.\($0.effect) = \($0.effect)" }.joined(separator: "\n")
         let driverDeclaration =
-            mainActor
+            mainActor && hasOperations
             ? """
             /// Immutable operation selections whose non-Sendable values stay within MainActor.
             @MainActor \(access)struct MainActorDrivers {
@@ -842,7 +1324,7 @@ struct Generator {
                 "/// `AsyncSequence` operator on every supported OS version.",
                 "\(access)func snapshots<Projection: Sendable>(",
                 "    _ transform: @escaping @MainActor (Snapshot) -> Projection",
-                ") throws(SubscriptionFailure) -> RuntimeSnapshots<Projection> {",
+                ") throws(SubscriptionFailure) -> StateMachine.SnapshotSequence<Projection> {",
                 "    try host.sendableSnapshots { transform(_stateMachineSnapshot($0)) }",
                 "}",
             ]
@@ -851,19 +1333,14 @@ struct Generator {
         func construction(model: String, scopes: String) -> String {
             """
             host = Host(\(model), scopes: \(scopes), configuration: configuration,
-                        policy: completionPolicy, driver: { raw in
-                            switch raw.descriptor { \(managedExecutions) }
-                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") },
-                        prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
+                        \(managedHooks))
             """
         }
         let restoring = schema.restoration.map { validator in
             """
 
                 \(restoringDocumentation)
-                \(access)init(restoring saved: \(validator.archiveType), drivers: \(drivers)\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
-                    completionPolicy: CompletionPolicy = .manualOnConflict,
-                    onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in })\(restorationThrows) {
+                \(access)init(restoring saved: \(validator.archiveType), \(managedParameters(drivers: drivers)))\(restorationThrows) {
                     \(restoredRoot)
                     \(construction(model: "restored.model", scopes: "restored.scopes"))
                 }
@@ -873,12 +1350,10 @@ struct Generator {
             \(driverDeclaration)
             /// A sealed sole-writer \(mainActor ? "MainActor" : "native actor") owner with managed execution.
             \(mainActor ? "@MainActor " : "")\(access)final class \(facade): \(mainActor ? "MainActorStateMachineHost" : "Sendable") {
-                private typealias Host = \(runtime)<\(name), Effect, Completion, PreparationRejection>
-                private let host: Host
-                /// Creates fresh authority and immutable execution selections.
-                \(access)init(_ initial: \(initialType)\(initialDefault), drivers: \(drivers)\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
-                    completionPolicy: CompletionPolicy = .manualOnConflict,
-                    onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in }) {
+                private typealias Host = \(runtime)<\(name), Effect, \(outcome), PreparationRejection>
+                private let host: Host\(completionPolicy(isolation: isolation, sendable: !mainActor))
+                /// Creates fresh authority\(hasOperations ? " and immutable execution selections" : "").
+                \(access)init(_ initial: \(initialType)\(initialDefault), \(managedParameters(drivers: drivers))) {
                     \(construction(model: ".\(schema.initial)(initial)", scopes: "[\(initialScopes)]"))
                 }\(restoring ?? "")\(closureInitializers(drivers: drivers, isolation: isolation))
                 /// Captures a complete historical observation.
@@ -886,22 +1361,28 @@ struct Generator {
                 /// Routes, prepares and admits one input in a single isolated turn without suspension.
                 @discardableResult
                 \(access)func send(_ input: Input)\(asynchronous) throws(SendRejection) -> Receipt {
-                    let result = \(awaiting)host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
-                        switch \(name).prepare(input, on: _stateMachineSnapshot(raw)) {
-                        case .prepared(let prepared): return .success(prepared.candidate)
-                        case .rejected(let reason): return .failure(reason)
+                    let result = \(awaiting)host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, SendRejection> in
+                        let prepared: Prepared
+                        do throws(PreparationRejection) {
+                            prepared = try \(name).prepare(input, on: _stateMachineSnapshot(raw))
+                        } catch { return .failure(.preparation(error)) }
+                        switch prepared.candidate {
+                        case .candidate(let candidate): return .success(candidate)
+                        case .defective(let defect): return .failure(.commit(defect.rejection(against: raw)))
                         }
                     }
                     switch result {
                     case .success(.committed(let record)): return Receipt(record)
                     case .success(.rejected(let reason, _)): throw .commit(reason)
-                    case .failure(let reason): throw .preparation(reason)
+                    case .failure(let reason): throw reason
                     }
                 }
                 /// Consumes an explicitly prepared historical candidate, rechecking freshness.
                 \(access)func commit(_ prepared: consuming Prepared)\(asynchronous) -> CommitResult {
-                    let candidate = prepared.candidate
-                    return _stateMachineAdmission(\(awaiting)host.commit(candidate))
+                    switch prepared.candidate {
+                    case .candidate(let candidate): return _stateMachineAdmission(\(awaiting)host.commit(candidate))
+                    case .defective(let defect): return _stateMachineAdmission(\(awaiting)host.reject(defect))
+                    }
                 }
                 /// Subscribes to initial, accepted and terminal complete snapshots.
                 \(access)func subscribe(_ receive: @escaping \(isolation) (Snapshot) -> Void,
@@ -915,44 +1396,17 @@ struct Generator {
                     try \(awaiting)host.\(mainActor && !confined ? "sendableSnapshots" : "snapshots") { _stateMachineSnapshot($0) }
                 }
                 \(projection)
-                /// Retains the first terminal outcome and validates current authority.
-                \(access)func deliver(_ completion: Completion)\(asynchronous) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(\(awaiting)host.deliver(completion))") }
-                \(operationDeliveries(prefix: "", asynchronous: asynchronous, awaiting: awaiting))
-                /// Reads immutable retained first-outcome diagnostics.
-                \(access)func pendingCompletions()\(asynchronous) -> [PendingCompletion] { \(awaiting)host.pendingCompletions() }
-                /// Explicitly claims a fresh preparation attempt for a retained outcome.
-                \(access)func reconcile(id: PendingCompletionID)\(asynchronous) -> DeliveryResult { Self.project(\(awaiting)host.reconcile(id: id)) }
-                /// Revokes retained delivery with an authority-only admission.
-                \(access)func discardPending(id: PendingCompletionID)\(asynchronous) -> DeliveryResult { Self.project(\(awaiting)host.discardPending(id: id)) }
+                \(managedPending(asynchronous: asynchronous, awaiting: awaiting, delivery: "RuntimeHostDelivery<\(name), Effect>"))
                 /// Closes admission while preserving historical model data.
+                @discardableResult
                 \(access)func close()\(asynchronous) -> Receipt { Receipt(\(awaiting)host.close()) }
-                /// Waits for cancellation and launch decisions through this owner-bound receipt.
-                \(access)func flush(through receipt: Receipt) async -> Bool { await host.flush(through: receipt.snapshot.record) }
-                /// Closes and joins actual execution and retained delivery obligations.
-                \(access)func shutdown() async { await host.shutdown() }
-                /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
-                \(access)func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
-                    if await host.shutdownAndWait(deadline: deadline) { return .quiescent }
-                    return .timedOut(\(awaiting)host.diagnostics())
-                }
-                /// Actual workers whose joined termination has not yet been processed.
-                \(access)var runningCount: Int { \(mainActor ? "host.runningCount" : "get async { await host.runningCount }") }
+                \(lifetimeMembers)
+                \(hasOperations ? "/// Actual workers whose joined termination has not yet been processed." : "")
+                \(hasOperations ? "\(access)var runningCount: Int { \(mainActor ? "host.runningCount" : "get async { await host.runningCount }") }" : "")
                 /// Live observer registrations.
                 \(access)var subscriberCount: Int { \(mainActor ? "host.subscriberCount" : "get async { await host.subscriberCount }") }
                 /// Whether closure and all managed obligations have settled.
                 \(access)var isQuiescent: Bool { \(mainActor ? "host.isQuiescent" : "get async { await host.isQuiescent }") }
-                private static func project(_ result: RuntimeHostDelivery<\(name), Effect>) -> DeliveryResult {
-                    switch result {
-                    case .committed(let record): return .committed(Receipt(record))
-                    case .pending(let id, let status): return .pending(id, status)
-                    case .inProgress: return .inProgress
-                    case .notPending: return .notPending
-                    case .stale: return .stale
-                    case .foreignOwner: return .foreignOwner
-                    case .discarded(let record): return .discarded(Receipt(record))
-                    case .rejected(let reason): return .rejected(reason)
-                    }
-                }
             }
             """
     }
@@ -960,49 +1414,47 @@ struct Generator {
     func shared() -> String {
         let fields = schema.operations
             .map {
-                "/// Executes one typed operation outside admission locks.\n\(access)let \($0.effect): @Sendable (\($0.name).Input) async -> Result<\($0.name).Output, \($0.name).Failure>"
+                "/// Executes one typed operation outside admission locks.\n\(access)let \($0.effect): \(driverType($0, isolation: "@Sendable"))"
             }
             .joined(separator: "\n")
         let params = schema.operations
-            .map {
-                "\($0.effect): @escaping @Sendable (\($0.name).Input) async -> Result<\($0.name).Output, \($0.name).Failure>"
-            }
+            .map { "\($0.effect): @escaping \(driverType($0, isolation: "@Sendable"))" }
             .joined(separator: ", ")
         let assignments = schema.operations.map { "self.\($0.effect) = \($0.effect)" }.joined(separator: "\n")
+        let raw = "RuntimeSharedHost<\(name), Effect, \(outcome), PreparationRejection>"
         func construction(model: String, scopes: String) -> String {
             """
             host = RuntimeSharedHost(\(model), scopes: \(scopes), limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
-                        policy: completionPolicy, driver: { raw in
-                            switch raw.descriptor { \(managedExecutions) }
-                        }, ticket: { (outcome: Completion) -> RuntimeTicket in \(schema.operations.isEmpty ? "" : "return outcome.authority") }, prepare: { _stateMachineDeliveryPreparation($0) }, reconciliationRequired: onReconciliationRequired)
+                        \(managedHooks))
             """
         }
         let restoring = schema.restoration.map { validator in
             """
 
                 \(restoringDocumentation)
-                \(access)init(restoring saved: \(validator.archiveType), drivers: Drivers\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
-                    completionPolicy: CompletionPolicy = .manualOnConflict,
-                    onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in })\(restorationThrows) {
+                \(access)init(restoring saved: \(validator.archiveType), \(managedParameters(drivers: "Drivers")))\(restorationThrows) {
                     \(restoredRoot)
                     \(construction(model: "restored.model", scopes: "restored.scopes"))
                 }
             """
         }
-        return """
+        let driverDeclaration =
+            hasOperations
+            ? """
             /// Immutable typed execution selection for one managed owner's lifetime.
             \(access)struct Drivers: Sendable {
                 \(fields)
                 /// Selects all drivers for this owner.
                 \(access)init(\(params)) { \(assignments) }
             }
+            """ : ""
+        return """
+            \(driverDeclaration)
             /// A synchronous shared owner with managed physical execution and terminal delivery.
             \(access)final class Shared: Sendable {
-                private let host: RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>
-                /// Creates fresh initial authority and retains the driver selection immutably.
-                \(access)init(_ initial: \(initialType)\(initialDefault), drivers: Drivers\(schema.operations.isEmpty ? " = .init()" : ""), configuration: Configuration = .default,
-                    completionPolicy: CompletionPolicy = .manualOnConflict,
-                    onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in }) {
+                private let host: \(raw)\(completionPolicy(isolation: "@Sendable", sendable: true))
+                /// Creates fresh initial authority\(hasOperations ? " and retains the driver selection immutably" : "").
+                \(access)init(_ initial: \(initialType)\(initialDefault), \(managedParameters(drivers: "Drivers"))) {
                     \(construction(model: ".\(schema.initial)(initial)", scopes: "[\(initialScopes)]"))
                 }\(restoring ?? "")\(closureInitializers(drivers: "Drivers", isolation: "@Sendable"))
                 /// Captures a coherent historical observation.
@@ -1024,51 +1476,31 @@ struct Generator {
                 /// a concurrent commit surfaces as `.commit(.conflict)` for the caller to resolve.
                 @discardableResult
                 \(access)func send(_ input: Input) throws(SendRejection) -> Receipt {
-                    switch \(name).prepare(input, on: snapshot()) {
-                    case .prepared(let prepared):
-                        switch commit(prepared) {
-                        case .committed(let receipt): return receipt
-                        case .rejected(let reason, _): throw .commit(reason)
-                        }
-                    case .rejected(let reason): throw .preparation(reason)
+                    let prepared: Prepared
+                    do { prepared = try \(name).prepare(input, on: snapshot()) } catch { throw .preparation(error) }
+                    switch commit(prepared) {
+                    case .committed(let receipt): return receipt
+                    case .rejected(let reason, _): throw .commit(reason)
                     }
                 }
                 /// Consumes one candidate into an atomic admission attempt.
-                \(access)func commit(_ prepared: consuming Prepared) -> CommitResult { _stateMachineAdmission(host.commit(prepared.candidate)) }
-                /// Retains and attempts delivery of the first typed terminal outcome.
-                \(access)func deliver(_ completion: Completion) -> DeliveryResult { \(schema.operations.isEmpty ? "" : "return Self.project(host.deliver(completion))") }
-                \(operationDeliveries(prefix: "", asynchronous: "", awaiting: ""))
-                /// Returns immutable first-outcome diagnostics.
-                \(access)func pendingCompletions() -> [PendingCompletion] { host.pendingCompletions() }
-                /// Claims one fresh preparation for a retained outcome.
-                \(access)func reconcile(id: PendingCompletionID) -> DeliveryResult { Self.project(host.reconcile(id: id)) }
-                /// Revokes one retained operation by an authority-only commit.
-                \(access)func discardPending(id: PendingCompletionID) -> DeliveryResult { Self.project(host.discardPending(id: id)) }
-                /// Ends admission and schedules cancellation in FIFO order.
-                \(access)func close() -> Receipt { Receipt(host.close()) }
-                /// Waits until cancellation and launch decisions through this receipt have been processed.
-                \(access)func flush(through receipt: Receipt) async -> Bool { await host.flush(through: receipt.snapshot.record) }
-                /// Closes and waits for actual execution termination and retained obligation settlement.
-                \(access)func shutdown() async { await host.shutdown() }
-                /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked.
-                \(access)func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
-                    if await host.shutdownAndWait(deadline: deadline) { return .quiescent }
-                    return .timedOut(host.diagnostics())
-                }
-                /// Whether closure and all managed obligations have settled.
-                \(access)var isQuiescent: Bool { host.isQuiescent }
-                private static func project(_ result: RuntimeSharedHost<\(name), Effect, Completion, PreparationRejection>.Delivery) -> DeliveryResult {
-                    switch result {
-                    case .committed(let record): return .committed(Receipt(record))
-                    case .pending(let id, let status): return .pending(id, status)
-                    case .inProgress: return .inProgress
-                    case .notPending: return .notPending
-                    case .stale: return .stale
-                    case .foreignOwner: return .foreignOwner
-                    case .discarded(let record): return .discarded(Receipt(record))
-                    case .rejected(let reason): return .rejected(reason)
+                \(access)func commit(_ prepared: consuming Prepared) -> CommitResult {
+                    switch prepared.candidate {
+                    case .candidate(let candidate): return _stateMachineAdmission(host.commit(candidate))
+                    case .defective(let defect): return _stateMachineAdmission(host.reject(defect))
                     }
                 }
+                \(managedPending(asynchronous: "", awaiting: "", delivery: "\(raw).Delivery"))
+                /// Ends admission and schedules cancellation in FIFO order.
+                @discardableResult
+                \(access)func close() -> Receipt { Receipt(host.close()) }
+                \(lifetimeMembers)
+                \(hasOperations ? "/// Actual workers whose joined termination has not yet been processed." : "")
+                \(hasOperations ? "\(access)var runningCount: Int { get async { await host.runningCount } }" : "")
+                /// Live observer registrations.
+                \(access)var subscriberCount: Int { host.subscriberCount }
+                /// Whether closure and all managed obligations have settled.
+                \(access)var isQuiescent: Bool { host.isQuiescent }
             }
             """
     }
@@ -1080,9 +1512,7 @@ struct Generator {
     private func closureInitializers(drivers: String, isolation: String) -> String {
         guard !schema.operations.isEmpty else { return "" }
         let closures = schema.operations
-            .map {
-                "\($0.effect)Driver: @escaping \(isolation) (\($0.name).Input) async -> Result<\($0.name).Output, \($0.name).Failure>"
-            }
+            .map { "\($0.effect)Driver: @escaping \(driverType($0, isolation: isolation))" }
             .joined(separator: ",\n")
         let selection = schema.operations.map { "\($0.effect): \($0.effect)Driver" }.joined(separator: ", ")
         let restoring = schema.restoration.map { validator in
@@ -1092,11 +1522,9 @@ struct Generator {
                 \(access)convenience init(restoring saved: \(validator.archiveType),
                     \(closures),
                     configuration: Configuration = .default,
-                    completionPolicy: CompletionPolicy = .manualOnConflict,
-                    onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in })\(restorationThrows) {
+                    completionPolicy: CompletionPolicy = .retryPure)\(restorationThrows) {
                     \(validator.failureType == nil ? "" : "try ")self.init(restoring: saved, drivers: \(drivers)(\(selection)),
-                        configuration: configuration, completionPolicy: completionPolicy,
-                        onReconciliationRequired: onReconciliationRequired)
+                        configuration: configuration, completionPolicy: completionPolicy)
                 }
             """
         }
@@ -1106,11 +1534,9 @@ struct Generator {
                 \(access)convenience init(_ initial: \(initialType)\(initialDefault),
                     \(closures),
                     configuration: Configuration = .default,
-                    completionPolicy: CompletionPolicy = .manualOnConflict,
-                    onReconciliationRequired: @escaping \(isolation) (PendingCompletion) -> Void = { _ in }) {
+                    completionPolicy: CompletionPolicy = .retryPure) {
                     self.init(initial, drivers: \(drivers)(\(selection)),
-                        configuration: configuration, completionPolicy: completionPolicy,
-                        onReconciliationRequired: onReconciliationRequired)
+                        configuration: configuration, completionPolicy: completionPolicy)
                 }\(restoring ?? "")
             """
     }
@@ -1134,9 +1560,9 @@ struct Generator {
 
     /// The scope identifiers a fresh owner activates in a phase, matching `_stateMachineEligibility`.
     private func scopes(in phase: String) -> String {
-        schema.scopes.enumerated()
+        schema.scopeKeys.enumerated()
             .compactMap { i, scope -> String? in
-                let operation = schema.operations.first { $0.scope == scope }
+                let operation = schema.operations.first { $0.scopeKey == scope }
                 guard operation == nil || operation!.activeIn.contains(phase) else { return nil }
                 return "RuntimeScopeID(kind: \(i))"
             }
@@ -1149,11 +1575,7 @@ struct Generator {
             .map { op in
                 """
                 case .\(op.effect)(let input):
-                    let work = \(op.name)Work(input: input, authority: raw.ticket)
-                    switch await drivers.\(op.effect)(input) {
-                    case .success(let value): return .\(op.effect)(work.succeeded(value))
-                    case .failure(let value): \(op.failureType == "Never" ? "switch value {}" : "return .\(op.effect)(work.failed(value))")
-                    }
+                    return .\(op.effect)(\(op.name)Completion(\(op.isInfallible ? "value" : "result"): await drivers.\(op.effect)(input), authority: raw.ticket))
                 """
             }
             .joined(separator: "\n")

@@ -17,7 +17,7 @@ import Testing
         var owner = GeneratedProfile.Local(.init(userID: user))
         let fetch = try begin(&owner)
         guard case .loading(let loading) = owner.snapshot(),
-            case .committed = owner.commit(try loading.audit("record")),
+            case .committed = owner.commit(loading.audit("record")),
             case .audit(let audit) = owner.drainCommands(limit: 1).first?.commands.first
         else { throw Failure.unexpected }
         #expect(audit.input == "record")
@@ -39,22 +39,16 @@ import Testing
         let user = try UserID("kyle")
         var owner = GeneratedProfile.Local(.init(userID: user))
         let fetch = try begin(&owner)
-        guard case .loading(let before) = owner.snapshot(),
-            case .success(let preparedOutcome) = fetch.succeeded(Profile(userID: user, name: "Prepared"))
-        else { throw Failure.unexpected }
-        let preparedBeforeRevocation = try before.received(preparedOutcome)
-        guard case .loading(let loading) = owner.snapshot(),
-            case .committed = owner.commit(try loading.authenticationChanged()),
-            case .loading(let current) = owner.snapshot()
-        else { throw Failure.unexpected }
-        guard case .rejected(.inactiveAuthority, _) = owner.commit(preparedBeforeRevocation) else {
-            throw Failure.unexpected
-        }
         let completion = fetch.succeeded(Profile(userID: user, name: "Stale"))
-        guard case .success(let outcome) = completion else { throw Failure.unexpected }
-        guard case .rejected(.inactiveAuthority, _) = owner.commit(try current.received(outcome)) else {
+        guard case .loading(let loading) = owner.snapshot(),
+            case .committed(let revocation) = owner.commit(loading.authenticationChanged())
+        else { throw Failure.unexpected }
+        // The sealed completion was issued before the dependency epoch rotated, so delivery reports it stale.
+        guard case .stale = owner.deliver(completion), case .loading(let current) = owner.snapshot() else {
             throw Failure.unexpected
         }
+        #expect(current.revision == revocation.revision)
+        #expect(owner.pendingCompletions().isEmpty)
         let acknowledgment2648 = owner.acknowledgeExecution(fetch.execution, disposition: .terminated)
         #expect(acknowledgment2648 == .recorded)
         _ = owner.close()
@@ -144,7 +138,7 @@ import Testing
             throw Failure.unexpected
         }
         let request = await network.nextRequest()
-        #expect(await owner.flush(through: receipt))
+        #expect(await owner.flush(through: receipt) == .processed)
         guard case .loading = owner.snapshot() else { throw Failure.unexpected }
         #expect(await network.complete(request.id, with: .success(.init(userID: user, name: "Managed"))))
         var iterator = snapshots.makeAsyncIterator()
@@ -167,7 +161,7 @@ import Testing
             throw Failure.unexpected
         }
         guard case .start(let fetch) = owner.drainCommands(limit: 1).first?.commands.first,
-            case .loading(let loading) = owner.snapshot(), case .committed = owner.commit(try loading.audit("audit")),
+            case .loading(let loading) = owner.snapshot(), case .committed = owner.commit(loading.audit("audit")),
             case .audit(let audit) = owner.drainCommands(limit: 1).first?.commands.first
         else { throw Failure.unexpected }
         guard case .committed = owner.deliver(.audit(audit.succeeded(Profile(userID: user, name: "Audit")))) else {
@@ -196,9 +190,9 @@ extension GeneratedProfileTests {
             case .committed(let receipt) = owner.commit(try idle.begin(.init(userID: user)))
         else { throw Failure.unexpected }
         let request = await network.nextRequest()
-        #expect(await owner.flush(through: receipt))
+        #expect(await owner.flush(through: receipt) == .processed)
         let terminal = owner.close()
-        #expect(await owner.flush(through: terminal))
+        #expect(await owner.flush(through: terminal) == .processed)
         #expect(!owner.isQuiescent)
         #expect(await network.inFlightCount == 1)
         #expect(await network.complete(request.id, with: .success(.init(userID: user, name: "Late"))))
@@ -215,7 +209,7 @@ private final class WeakGeneratedOwner {
 
 extension GeneratedProfileTests {
     @Test func retainedSubscriptionAndSnapshotDoNotOwnTheGeneratedFacade() throws {
-        func make() throws -> (RuntimeSubscription, GeneratedProfile.Snapshot, WeakGeneratedOwner) {
+        func make() throws -> (SnapshotSubscription, GeneratedProfile.Snapshot, WeakGeneratedOwner) {
             let user = try UserID("kyle")
             let owner = GeneratedProfile.Shared(
                 .init(userID: user),
@@ -237,18 +231,16 @@ extension GeneratedProfileTests {
         let user = try UserID("kyle")
         var owner = GeneratedProfile.Local(.init(userID: user))
         let work = try begin(&owner)
-        guard case .loading(let loading) = owner.snapshot(),
-            case .success(let outcome) = work.succeeded(Profile(userID: user, name: "Result"))
-        else { throw Failure.unexpected }
-        let terminal = try loading.received(outcome)
-        let cancellation = try loading.cancel()
+        guard case .loading(let loading) = owner.snapshot() else { throw Failure.unexpected }
+        let terminal = work.succeeded(Profile(userID: user, name: "Result"))
+        let cancellation = loading.cancel()
         if completionFirst {
-            guard case .committed = owner.commit(terminal), case .rejected(.conflict, _) = owner.commit(cancellation),
+            guard case .committed = owner.deliver(terminal), case .rejected(.conflict, _) = owner.commit(cancellation),
                 case .loaded = owner.snapshot()
             else { throw Failure.unexpected }
         } else {
-            guard case .committed = owner.commit(cancellation),
-                case .rejected(.inactiveAuthority, _) = owner.commit(terminal), case .idle = owner.snapshot()
+            guard case .committed = owner.commit(cancellation), case .stale = owner.deliver(terminal),
+                case .idle = owner.snapshot()
             else { throw Failure.unexpected }
         }
         let acknowledgment = owner.acknowledgeExecution(work.execution, disposition: .terminated)
@@ -266,7 +258,7 @@ extension GeneratedProfileTests {
         #expect(GeneratedProfile.Configuration.default.limits.commits == 256)
         #expect(GeneratedProfile.Configuration.default.limits.descriptors == 64)
         #expect(GeneratedProfile.Configuration.default.limits.executions == 256)
-        #expect(throws: RuntimeLimits.Failure.nonpositiveCapacity) {
+        #expect(throws: Limits.Failure.nonpositiveCapacity) {
             _ = try GeneratedProfile.Configuration(subscribers: 0)
         }
         let user = try UserID("kyle")
@@ -275,7 +267,7 @@ extension GeneratedProfileTests {
             audit: { _ in .failure(.unavailable) }
         )
         let owner = GeneratedProfile.Shared(.init(userID: user), drivers: drivers)
-        var tokens: [RuntimeSubscription] = []
+        var tokens: [SnapshotSubscription] = []
         for _ in 0 ..< 128 { tokens.append(try owner.subscribe { _ in }) }
         do {
             _ = try owner.subscribe { _ in }

@@ -1,15 +1,14 @@
 import StateMachine
-import StateMachineSchema
 import Testing
 
 @StateMachine(mode: .shared)
 nonisolated private enum QualifiedMarkers: Sendable {
     struct Idle: Sendable {}
     struct Done: Sendable {}
-    @StateMachineSchema.Initial case idle(Idle)
+    @StateMachine.Initial case idle(Idle)
     case done(Done)
     enum Input: Sendable { case finish }
-    @StateMachineSchema.Transition(on: Input.finish)
+    @StateMachine.Transition(on: Input.finish)
     fileprivate static func finish(_ source: Idle) -> Done { Done() }
 }
 
@@ -56,6 +55,36 @@ nonisolated private enum QualifiedNever: Sendable {
     fileprivate static func done(_ source: Busy, _ output: Work.Output) -> Idle { Idle() }
 }
 
+/// Every marker, including the schema macro itself, may be qualified by the one module a graph imports.
+@StateMachine.StateMachine(mode: .shared)
+nonisolated private enum FullyQualified: Sendable {
+    struct Idle: Sendable {}
+    struct Busy: Sendable {}
+    struct Done: Sendable { let value: Int }
+    @StateMachine.Initial case idle(Idle = Idle())
+    case busy(Busy)
+    case done(Done)
+    enum Input: Sendable { case go(Int) }
+    enum Refusal: Error, Sendable { case negative }
+    @StateMachine.Operation(activeIn: [Busy.self])
+    enum Work {
+        typealias Input = Int
+        typealias Output = Int
+    }
+    @StateMachine.Transition(on: Input.go, starts: [Work.self])
+    fileprivate static func go(_ source: Idle, _ value: Int) -> StateMachine.Change<Busy, Effect.Go> {
+        Change(Busy(), effects: [.work(value)])
+    }
+    @StateMachine.Transition(onSuccess: Work.self)
+    fileprivate static func done(_ source: Busy, _ value: Work.Output) -> Done { Done(value: value) }
+    @StateMachine.Transition(onSuccess: Work.self)
+    fileprivate static func reset(_ source: Busy, _ value: Work.Output) -> Idle { Idle() }
+    @StateMachine.Route(onSuccess: Work.self)
+    fileprivate static func settle(_ source: Busy, _ value: Work.Output) -> Route.Settle {
+        value > 0 ? .done : .reset
+    }
+}
+
 /// Equivalent Swift spellings declare the same graph.
 @Suite struct SchemaSpellingTests {
     @Test func moduleQualifiedMarkersDeclareTheEdge() throws {
@@ -67,6 +96,19 @@ nonisolated private enum QualifiedNever: Sendable {
         }
     }
 
+    @Test func aFullyQualifiedGraphRoutesItsCompletion() throws {
+        var machine = FullyQualified.Local()
+        try machine.send(.go(2))
+        guard case .work(let work)? = machine.drainCommands(limit: 1).first?.commands.first,
+            case .committed = machine.deliver(work.succeeded(2)),
+            case .done(let done) = machine.snapshot()
+        else {
+            Issue.record("the qualified graph did not route its completion")
+            return
+        }
+        #expect(done.value.value == 2)
+    }
+
     @MainActor @Test func aGraphWithoutOperationsNeedsNoDrivers() async throws {
         let main = QualifiedMarkers.MainActorHost(.init())
         try main.send(.finish)
@@ -74,7 +116,7 @@ nonisolated private enum QualifiedNever: Sendable {
         try shared.send(.finish)
         let actor = QualifiedMarkers.ActorHost(.init())
         try await actor.send(.finish)
-        if case .timedOut = await shared.shutdownAndWait() {
+        if case .timedOut = await shared.shutdown() {
             Issue.record("A graph without operations has nothing to join")
         }
         await main.shutdown()

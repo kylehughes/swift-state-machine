@@ -13,6 +13,11 @@ import Testing
         let raw: RuntimeWork<Int>
         func succeeded(_ value: Int) -> Outcome { Outcome(value: value, ticket: raw.ticket) }
     }
+    /// Separates this test's authored completion failure from a permanent plan failure.
+    private enum CompletionPreparationFailure: Error {
+        case domain(DomainFailure)
+        case plan(PlanRejection)
+    }
     private struct Outcome {
         let value: Int
         let ticket: RuntimeTicket
@@ -24,7 +29,7 @@ import Testing
     private func prepare(
         _ outcome: Outcome,
         on observation: Core.Snapshot
-    ) throws(PreparationFailure<DomainFailure>) -> Core.Candidate {
+    ) throws(CompletionPreparationFailure) -> Core.Candidate {
         guard observation.model.allowsCompletion else { throw .domain(.completionNotAllowed) }
         var next = observation.model
         next.completedValue = outcome.value

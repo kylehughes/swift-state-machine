@@ -68,7 +68,7 @@ func uncontendedLocal(bytes: Int, operations: Int, timing: Bool, probe: Allocato
 func uncontended(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?) async throws -> ResultRow {
     let owner = PerformanceFlow.Shared(
         PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)),
-        drivers: PerformanceFlow.Drivers(work: { .success($0) })
+        drivers: PerformanceFlow.Drivers(work: { $0 })
     )
     var participant = Participant(role: "writer")
     if timing {
@@ -145,7 +145,7 @@ func concurrent(
 ) async throws -> ResultRow {
     let owner = PerformanceFlow.Shared(
         PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)),
-        drivers: PerformanceFlow.Drivers(work: { .success($0) })
+        drivers: PerformanceFlow.Drivers(work: { $0 })
     )
     let results = OSAllocatedUnfairLock(initialState: [Participant]())
     let start = now()
@@ -292,7 +292,7 @@ func pressure(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?)
     for id in 0 ..< operations {
         let t = timing ? now() : 0
         guard case .ready(let observed) = owner.snapshot() else { throw Failure(description: "Wrong pressure phase") }
-        let candidate = try observed.start(id)
+        let candidate = observed.start(id)
         switch owner.commit(candidate) {
         case .committed:
             acceptedIDs.append(id)
@@ -420,7 +420,7 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
         #if PERFORMANCE_RESOURCE_INSTRUMENTED
         var privateMarkers = owner!.performanceWeakMarkers()
         #endif
-        guard case .ready(let ready) = owner!.snapshot(), case .committed = owner!.commit(try ready.start(cycle)) else {
+        guard case .ready(let ready) = owner!.snapshot(), case .committed = owner!.commit(ready.start(cycle)) else {
             throw Failure(description: "Lifecycle start rejected")
         }
         await gate.waitForStarts(1)
@@ -434,7 +434,7 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
         )
         #endif
         if cycle % 2 == 0 {
-            guard case .ready(let ready) = owner!.snapshot(), case .committed = owner!.commit(try ready.cancel()) else {
+            guard case .ready(let ready) = owner!.snapshot(), case .committed = owner!.commit(ready.cancel()) else {
                 throw Failure(description: "Lifecycle cancel rejected")
             }
             // Flush proves the cancellation decision reached the coordinator before release.

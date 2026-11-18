@@ -168,7 +168,7 @@ CONFINED_EXCLUSIONS = {
     'RuntimeMainActorHost.swift': {'Task': 7},
     'RuntimeConfinedSupport.swift': {'Task': 1},
 }
-CONFINED_TYPES = {'RuntimeActorHost', 'RuntimeMainActorHost', 'RuntimeMainActorSubscription', 'RuntimeConfinedExecution'}
+CONFINED_TYPES = {'RuntimeActorHost', 'RuntimeMainActorHost', 'MainActorSnapshotSubscription', 'RuntimeConfinedExecution'}
 
 
 def assert_shared_fixture_scope():

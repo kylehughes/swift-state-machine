@@ -164,10 +164,15 @@ nonisolated public enum ReferenceProfile {
             Prepared(Payload(stamp: stamp, record: record, action: .invalidateAuthentication))
         }
     }
-    /// A sealed, inert proposal consumed by admission.
+    /// A sealed, inert proposal consumed by admission, or the plan defect admission reports.
     public struct Prepared: ~Copyable, Sendable {
-        fileprivate let payload: Payload
-        fileprivate init(_ payload: Payload) { self.payload = payload }
+        fileprivate enum Proposal: Sendable {
+            case payload(Payload)
+            case defective(Engine.DefectivePlan)
+        }
+        fileprivate let payload: Proposal
+        fileprivate init(_ payload: Payload) { self.payload = .payload(payload) }
+        fileprivate init(defect: Engine.DefectivePlan) { payload = .defective(defect) }
     }
     /// A committed fetch capability issued by draining accepted commands.
     public struct FetchWork: Sendable {
@@ -205,12 +210,12 @@ nonisolated public enum ReferenceProfile {
     /// Whether completion preparation requires explicit reconciliation after conflict.
     public typealias CompletionConflictPolicy = RuntimeCompletionPolicy
     /// The historical delivery status of a retained completion.
-    public typealias PendingStatus = RuntimePendingStatus
+    public typealias PendingStatus = StateMachine.PendingStatus
     /// A typed routing failure for a retained fetch completion.
     public enum CompletionPreparationRejection: Error, Equatable, Sendable { case wrongPhase }
     /// The actionable preparation or commit failure from the last attempt.
     public enum CompletionRejection: Equatable, Sendable {
-        case preparation(PreparationFailure<CompletionPreparationRejection>)
+        case preparation(CompletionPreparationRejection)
         case commit(CommitRejection)
     }
     /// The declared managed operation vocabulary.
@@ -249,7 +254,7 @@ nonisolated public enum ReferenceProfile {
         case rejected(CommitRejection)
     }
     /// Whether this owner processed all offers and launch decisions through the receipt.
-    public enum FlushResult: Equatable, Sendable { case processed, foreignReceipt }
+    public enum FlushResult: Equatable, Sendable { case processed, foreignOwner }
     /// An opaque identity for one preparation still executing during shutdown.
     public struct PreparationHandle: Equatable, Sendable {
         fileprivate let claim: RuntimeDeliveryClaim
@@ -259,9 +264,9 @@ nonisolated public enum ReferenceProfile {
         /// The exact sealed operation whose physical termination is still tracked.
         public let execution: ExecutionHandle
         /// The execution disposition at the diagnostic observation.
-        public let disposition: RuntimeExecutionDisposition
+        public let disposition: StateMachine.ShutdownDiagnostics.ExecutionDisposition
         /// The separate delivery disposition at the diagnostic observation.
-        public let delivery: RuntimeDeliveryDisposition
+        public let delivery: StateMachine.ShutdownDiagnostics.DeliveryDisposition
         /// The exclusive preparation still executing, when present.
         public let preparation: PreparationHandle?
     }
@@ -275,6 +280,8 @@ nonisolated public enum ReferenceProfile {
         public let hasQueuedBatches: Bool
         /// Whether a FIFO processing turn still owns responsibility.
         public let isDraining: Bool
+        /// Whether an automatic retry of a retained completion is still scheduled.
+        public let isRetrying: Bool
         /// The retained envelope identities at the diagnostic observation.
         public let pending: [PendingCompletionID]
         /// Execution and preparation identities that remain tracked after timeout.
@@ -350,10 +357,12 @@ nonisolated public enum ReferenceProfile {
     }
     /// An invalid capacity configuration.
     public enum ConfigurationFailure: Error, Sendable { case nonpositiveCapacity }
-    /// A temporal or transient admission rejection.
+    /// A temporal or transient admission rejection, in precedence order.
     public enum CommitRejection: Equatable, Sendable {
         case foreignOwner
         case closed
+        /// The proposal's effect plan is defective, which preparation found before admission.
+        case plan(PlanRejection)
         case obsoleteIncarnation
         case inactiveAuthority
         case conflict
@@ -478,9 +487,9 @@ nonisolated public enum ReferenceProfile {
                 reconciliationRequired: { pending in onReconciliationRequired(Self.projectPending(pending)) }
             )
         }
-        private static func limits(_ configuration: Configuration) -> RuntimeLimits {
+        private static func limits(_ configuration: Configuration) -> Limits {
             // Configuration has already checked every capacity is positive.
-            try! RuntimeLimits(
+            try! Limits(
                 commits: configuration.commitCapacity,
                 descriptors: configuration.planCapacity,
                 executions: configuration.executionCapacity
@@ -588,7 +597,10 @@ nonisolated public enum ReferenceProfile {
         }
         /// Consumes an inert candidate into one atomic admission attempt.
         public func commit(_ prepared: consuming Prepared) -> CommitResult {
-            project(host.commit(prepared.payload.candidate))
+            switch prepared.payload {
+            case .payload(let payload): return project(host.commit(payload.candidate))
+            case .defective(let defect): return project(host.reject(defect))
+            }
         }
         /// Registers a capacity-one serial latest-value callback outside host locks.
         public func subscribe(
@@ -604,7 +616,7 @@ nonisolated public enum ReferenceProfile {
             } catch { throw .capacityExceeded }
         }
         /// Registers a single-pass sequence of the latest complete observations.
-        public func snapshots() throws(SubscriptionFailure) -> RuntimeSnapshots<Snapshot> {
+        public func snapshots() throws(SubscriptionFailure) -> SnapshotSequence<Snapshot> {
             do {
                 return try host.snapshots { [configuration] in State.project($0, configuration: configuration) }
             } catch { throw .capacityExceeded }
@@ -623,6 +635,7 @@ nonisolated public enum ReferenceProfile {
             )
         }
         /// Ends admission with the reserved terminal slot while retaining read access.
+        @discardableResult
         public func close() -> Receipt { Receipt(snapshot: State.project(host.close(), configuration: configuration)) }
         package func drainCommands(limit: Int) -> [CommandBatch] {
             host.drainCommands(limit: limit).map { Self.batch($0, configuration: configuration) }
@@ -668,6 +681,7 @@ nonisolated public enum ReferenceProfile {
         }
         private static func rejection(_ reason: Engine.Rejection) -> CommitRejection {
             switch reason {
+            case .plan(let plan): return .plan(plan)
             case .foreignOwner: return .foreignOwner
             case .closed: return .closed
             case .obsoleteIncarnation: return .obsoleteIncarnation
@@ -720,18 +734,21 @@ nonisolated public enum ReferenceProfile {
         public func discardPending(id: PendingCompletionID) -> DeliveryResult { project(host.discardPending(id: id)) }
         /// Waits for FIFO snapshot offers and launch decisions through this owner's receipt.
         public func flush(through receipt: Receipt) async -> FlushResult {
-            await host.flush(through: receipt.snapshot.stamp) ? .processed : .foreignReceipt
+            await host.flush(through: receipt.snapshot.stamp) ? .processed : .foreignOwner
         }
         /// Closes and waits for actual task termination and preparation claim exit, bounded by an optional deadline.
-        public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
-            if await host.shutdownAndWait(deadline: deadline) { return .quiescent }
-            let diagnostics = host.authorityDiagnostics()
+        ///
+        /// A timeout reports the obligations observed in the same atomic load that found the deadline expired.
+        @discardableResult
+        public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+            guard let diagnostics = await host.shutdownWithAuthority(deadline: deadline) else { return .quiescent }
             return .timedOut(
                 .init(
                     acceptedRevision: diagnostics.acceptedRevision,
                     processedThrough: diagnostics.processedThrough,
                     hasQueuedBatches: diagnostics.hasQueuedBatches,
                     isDraining: diagnostics.isDraining,
+                    isRetrying: diagnostics.isRetrying,
                     pending: diagnostics.pending,
                     outstanding: diagnostics.outstanding.map { reservation in
                         .init(
@@ -783,10 +800,13 @@ nonisolated public enum ReferenceProfile {
         }
         /// Consumes a proposal and checks owner, incarnation, authority, freshness, and capacities.
         public mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
-            let payload = prepared.payload
-            return state.commit(payload)
+            switch prepared.payload {
+            case .payload(let payload): return state.commit(payload)
+            case .defective(let defect): return state.project(state.engine.reject(defect))
+            }
         }
         /// Irreversibly closes using the reserved terminal record.
+        @discardableResult
         public mutating func close() -> Receipt { state.close() }
         /// Transfers up to the requested number of whole FIFO batches.
         public mutating func drainCommands(limit: Int) -> [CommandBatch] { state.drain(limit: limit) }
@@ -861,22 +881,18 @@ extension ReferenceProfile.Observed where Phase == ReferenceProfile.Idle {
     /// Validates the request and prepares the declared load edge.
     public func load(
         _ request: ProfileRequest
-    ) throws(PreparationFailure<ReferenceProfile.LoadRejection>) -> ReferenceProfile.Prepared {
-        guard request.userID == payload.userID else { throw .domain(.wrongUser) }
+    ) throws(ReferenceProfile.LoadRejection) -> ReferenceProfile.Prepared {
+        guard request.userID == payload.userID else { throw .wrongUser }
         var next = record
         next.model = .loading(ReferenceProfile.Loading(request: request))
-        do {
-            return ReferenceProfile.Prepared(
-                try ReferenceProfile.Payload(stamp: stamp, record: next, start: .fetch(request))
-            )
-        } catch { throw .plan(error) }
+        return ReferenceProfile.Prepared(starting: .fetch(request), stamp: stamp, record: next)
     }
 }
 extension ReferenceProfile.Observed where Phase == ReferenceProfile.Loading {
     /// Prepares the success edge using a sealed fetch completion.
     public func received(
         _ completion: ReferenceProfile.FetchSuccessCompletion
-    ) throws(PreparationFailure<Never>) -> ReferenceProfile.Prepared {
+    ) -> ReferenceProfile.Prepared {
         var next = record
         next.model = .loaded(ReferenceProfile.Loaded(profile: completion.value))
         return ReferenceProfile.Prepared(
@@ -886,7 +902,7 @@ extension ReferenceProfile.Observed where Phase == ReferenceProfile.Loading {
     /// Prepares the failure edge using a sealed fetch completion.
     public func failed(
         _ completion: ReferenceProfile.FetchFailureCompletion
-    ) throws(PreparationFailure<Never>) -> ReferenceProfile.Prepared {
+    ) -> ReferenceProfile.Prepared {
         var next = record
         next.model = .failed(ReferenceProfile.Failed(request: payload.request, failure: completion.value))
         return ReferenceProfile.Prepared(
@@ -904,27 +920,32 @@ extension ReferenceProfile.Observed where Phase == ReferenceProfile.Loaded {
     /// Validates a request and prepares the refresh edge.
     public func refresh(
         _ request: ProfileRequest
-    ) throws(PreparationFailure<ReferenceProfile.LoadRejection>) -> ReferenceProfile.Prepared {
-        guard request.userID == payload.profile.userID else { throw .domain(.wrongUser) }
+    ) throws(ReferenceProfile.LoadRejection) -> ReferenceProfile.Prepared {
+        guard request.userID == payload.profile.userID else { throw .wrongUser }
         var next = record
         next.model = .loading(ReferenceProfile.Loading(request: request))
-        do {
-            return ReferenceProfile.Prepared(
-                try ReferenceProfile.Payload(stamp: stamp, record: next, start: .fetch(request))
-            )
-        } catch { throw .plan(error) }
+        return ReferenceProfile.Prepared(starting: .fetch(request), stamp: stamp, record: next)
     }
 }
 extension ReferenceProfile.Observed where Phase == ReferenceProfile.Failed {
     /// Prepares the declared retry edge.
-    public func retry() throws(PreparationFailure<Never>) -> ReferenceProfile.Prepared {
+    public func retry() -> ReferenceProfile.Prepared {
         var next = record
         next.model = .loading(ReferenceProfile.Loading(request: payload.request))
-        do {
-            return ReferenceProfile.Prepared(
-                try ReferenceProfile.Payload(stamp: stamp, record: next, start: .fetch(payload.request))
-            )
-        } catch { throw .plan(error) }
+        return ReferenceProfile.Prepared(starting: .fetch(payload.request), stamp: stamp, record: next)
+    }
+}
+
+extension ReferenceProfile.Prepared {
+    /// Prepares a start, carrying a plan defect to admission instead of throwing it.
+    fileprivate init(
+        starting start: ReferenceProfile.Descriptor,
+        stamp: ReferenceProfile.Stamp,
+        record: ReferenceProfile.Record
+    ) {
+        do throws(PlanRejection) {
+            self.init(try ReferenceProfile.Payload(stamp: stamp, record: record, start: start))
+        } catch { self.init(defect: ReferenceProfile.Engine.DefectivePlan(error, preparedOn: stamp)) }
     }
 }
 
@@ -1040,11 +1061,13 @@ extension ReferenceProfile {
             engine = Engine(
                 record,
                 scopes: [RuntimeScopeID(kind: 1)],
-                limits: try! RuntimeLimits(
+                limits: try! Limits(
                     commits: configuration.commitCapacity,
                     descriptors: configuration.planCapacity,
                     executions: configuration.executionCapacity
-                )
+                ),
+                // The caller receives every commandless receipt from the commit itself.
+                recording: .commands
             )
         }
         mutating func retryCapacity() -> [RuntimePendingID] {
@@ -1092,6 +1115,7 @@ extension ReferenceProfile {
             case .rejected(let reason, let current):
                 let rejection: CommitRejection
                 switch reason {
+                case .plan(let plan): rejection = .plan(plan)
                 case .foreignOwner: rejection = .foreignOwner
                 case .closed: rejection = .closed
                 case .obsoleteIncarnation: rejection = .obsoleteIncarnation
@@ -1155,7 +1179,7 @@ extension ReferenceProfile {
     }
     fileprivate static func prepareDelivery(_ attempt: Ledger.Attempt) -> Ledger.Preparation {
         var record = attempt.snapshot.model
-        guard case .loading(let loading) = record.model else { return .failure(.domain(.wrongPhase)) }
+        guard case .loading(let loading) = record.model else { return .failure(.preparation(.wrongPhase)) }
         switch attempt.outcome {
         case .fetch(.success(let value)): record.model = .loaded(Loaded(profile: value.value))
         case .fetch(.failure(let value)):
@@ -1248,14 +1272,8 @@ extension ReferenceProfile.Local {
 
 extension ReferenceProfile.Observed where Phase == ReferenceProfile.Loading {
     /// Prepares an independent audit without replacing the active fetch epoch.
-    public func audit(
-        _ input: ReferenceProfile.Audit.Input
-    ) throws(PreparationFailure<Never>) -> ReferenceProfile.Prepared {
-        do {
-            return ReferenceProfile.Prepared(
-                try ReferenceProfile.Payload(stamp: stamp, record: record, start: .audit(input))
-            )
-        } catch { throw .plan(error) }
+    public func audit(_ input: ReferenceProfile.Audit.Input) -> ReferenceProfile.Prepared {
+        ReferenceProfile.Prepared(starting: .audit(input), stamp: stamp, record: record)
     }
     /// Retires only the accepted audit operation using its sealed successful outcome.
     public func audited(_ completion: ReferenceProfile.AuditSuccessCompletion) -> ReferenceProfile.Prepared {

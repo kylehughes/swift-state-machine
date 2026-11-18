@@ -1,6 +1,5 @@
 import Dispatch
 import StateMachine
-import StateMachineSchema
 import Testing
 import os
 
@@ -92,9 +91,9 @@ nonisolated private enum DeliveryFlow: Sendable {
             return true
         }
         func release() { permits.signal() }
-        func execute(_ value: Int) -> Result<Int, Never> {
+        func execute(_ value: Int) -> Int {
             state.withLock { $0.executions += 1 }
-            return .success(value)
+            return value
         }
         var counts: (Int, Int) { state.withLock { ($0.preparations, $0.executions) } }
     }
@@ -109,30 +108,33 @@ nonisolated private enum DeliveryFlow: Sendable {
         let owner = DeliveryFlow.Shared(
             .init(presentation: 0),
             drivers: .init(fetch: { gate.execute($0) }, audit: { gate.execute($0) }),
-            onReconciliationRequired: { event.yield($0) }
+            completionPolicy: .manual(onReconciliationRequired: { event.yield($0) })
         )
-        guard case .idle(let idle) = owner.snapshot(), case .committed = owner.commit(try idle.begin(7)) else {
+        guard case .idle(let idle) = owner.snapshot(), case .committed = owner.commit(idle.begin(7)) else {
             throw Failure.unexpected
         }
         var starts = entries.makeAsyncIterator()
         #expect(await starts.next() == 1)
-        // The retained first outcome is the only place a managed owner exposes a sealed completion.
-        let completion = try #require(owner.pendingCompletions().first).outcome
+        // A managed owner exposes its retained first outcome only as an inert value.
+        let retained = try #require(owner.pendingCompletions().first)
+        guard case .fetch(7) = retained.outcome else { throw Failure.unexpected }
+        #expect(retained.status == .preparing)
         let beforeDuplicates = owner.snapshot()
         guard case .loading(let beforeLoading) = beforeDuplicates else { throw Failure.unexpected }
         #expect(beforeLoading.value.request == 7)
         #expect(beforeLoading.value.presentation == 0)
         #expect(beforeDuplicates.revision == 1)
+        // The automatic attempt holds the only preparation claim, so concurrent reconciliation evaluates nothing.
         let duplicates = OSAllocatedUnfairLock(initialState: 0)
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
-            if case .pending(_, .preparing) = owner.deliver(completion) { duplicates.withLock { $0 += 1 } }
+            if case .inProgress = owner.reconcile(id: retained.id) { duplicates.withLock { $0 += 1 } }
         }
         #expect(duplicates.withLock { $0 } == 16)
         guard case .loading(let afterDuplicates) = owner.snapshot() else { throw Failure.unexpected }
         #expect(afterDuplicates.value.request == beforeLoading.value.request)
         #expect(afterDuplicates.value.presentation == beforeLoading.value.presentation)
         #expect(owner.snapshot().revision == beforeDuplicates.revision)
-        guard case .loading(let loading) = owner.snapshot(), case .committed = owner.commit(try loading.edit(9)) else {
+        guard case .loading(let loading) = owner.snapshot(), case .committed = owner.commit(loading.edit(9)) else {
             throw Failure.unexpected
         }
         gate.release()
@@ -141,11 +143,11 @@ nonisolated private enum DeliveryFlow: Sendable {
         #expect(pending.status == .reconciliationRequired)
         #expect(pending.attempts == 1)
         guard case .admission(.conflict) = pending.lastRejection else { throw Failure.unexpected }
-        #expect(owner.pendingCompletions().count == 1)
-        guard case .pending(let sameID, .reconciliationRequired) = owner.deliver(completion) else {
-            throw Failure.unexpected
-        }
-        #expect(sameID == pending.id)
+        let parked = owner.pendingCompletions()
+        #expect(parked.count == 1)
+        #expect(parked.first?.id == retained.id)
+        #expect(parked.first?.id == pending.id)
+        #expect(parked.first?.status == .reconciliationRequired)
         guard case .loading(let beforeReconciliation) = owner.snapshot() else { throw Failure.unexpected }
         #expect(beforeReconciliation.value.request == 7)
         #expect(beforeReconciliation.value.presentation == 9)
@@ -159,20 +161,56 @@ nonisolated private enum DeliveryFlow: Sendable {
         #expect(owner.snapshot().revision == 3)
         let terminalDuplicates = OSAllocatedUnfairLock(initialState: 0)
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
-            if case .stale = owner.deliver(completion) { terminalDuplicates.withLock { $0 += 1 } }
+            if case .notPending = owner.reconcile(id: pending.id) { terminalDuplicates.withLock { $0 += 1 } }
         }
         #expect(terminalDuplicates.withLock { $0 } == 16)
         guard case .loaded(let afterTerminalDuplicates) = owner.snapshot() else { throw Failure.unexpected }
         #expect(afterTerminalDuplicates.value.result == 7)
         #expect(afterTerminalDuplicates.value.presentation == 9)
         #expect(owner.snapshot().revision == 3)
-        guard case .notPending = owner.reconcile(id: pending.id) else { throw Failure.unexpected }
-        #expect(owner.snapshot().revision == 3)
         #expect(gate.counts.0 == 2)
         #expect(gate.counts.1 == 1)
         #expect(owner.pendingCompletions().isEmpty)
-        guard case .stale = owner.deliver(completion) else { throw Failure.unexpected }
+        guard case .notPending = owner.discardPending(id: pending.id) else { throw Failure.unexpected }
+        #expect(owner.snapshot().revision == 3)
         event.finish()
+        await owner.shutdown()
+        #expect(owner.isQuiescent)
+    }
+    @Test func generatedDefaultPolicyPreparesAConflictingCompletionAgain() async throws {
+        let gate = DeliveryFlow.gate
+        let entries = gate.configure(blocks: 1)
+        // No policy is named, so a conflicting completion is prepared again rather than parked.
+        let owner = DeliveryFlow.Shared(
+            .init(presentation: 0),
+            drivers: .init(fetch: { gate.execute($0) }, audit: { gate.execute($0) })
+        )
+        let (snapshots, events) = AsyncStream<DeliveryFlow.Snapshot>.makeStream()
+        let token = try owner.subscribe { events.yield($0) }
+        defer {
+            token.cancel()
+            events.finish()
+        }
+        guard case .idle(let idle) = owner.snapshot(), case .committed = owner.commit(idle.begin(7)) else {
+            throw Failure.unexpected
+        }
+        var starts = entries.makeAsyncIterator()
+        #expect(await starts.next() == 1)
+        guard case .loading(let loading) = owner.snapshot(), case .committed = owner.commit(loading.edit(9)) else {
+            throw Failure.unexpected
+        }
+        gate.release()
+        var values = snapshots.makeAsyncIterator()
+        while let snapshot = await values.next() {
+            if case .loaded(let loaded) = snapshot {
+                #expect(loaded.value.result == 7)
+                #expect(loaded.value.presentation == 9)
+                break
+            }
+        }
+        #expect(gate.counts.0 == 2)
+        #expect(gate.counts.1 == 1)
+        #expect(owner.pendingCompletions().isEmpty)
         await owner.shutdown()
         #expect(owner.isQuiescent)
     }
@@ -190,14 +228,14 @@ nonisolated private enum DeliveryFlow: Sendable {
             token.cancel()
             events.finish()
         }
-        guard case .idle(let idle) = owner.snapshot(), case .committed = owner.commit(try idle.begin(7)) else {
+        guard case .idle(let idle) = owner.snapshot(), case .committed = owner.commit(idle.begin(7)) else {
             throw Failure.unexpected
         }
         var starts = entries.makeAsyncIterator()
         for expected in 1 ... 6 {
             #expect(await starts.next() == expected)
             guard case .loading(let loading) = owner.snapshot(),
-                case .committed = owner.commit(try loading.edit(expected))
+                case .committed = owner.commit(loading.edit(expected))
             else { throw Failure.unexpected }
             gate.release()
         }

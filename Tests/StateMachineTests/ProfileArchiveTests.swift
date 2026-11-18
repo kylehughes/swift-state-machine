@@ -180,7 +180,7 @@ import Testing
             Issue.record("Missing issued work")
             return
         }
-        let candidate = try loading.received(completion)
+        let candidate = loading.received(completion)
         let archive = try Flow.Archive(model: .idle(.init(userID: id)))
         guard case .committed(let receipt) = local.reset(archive, expected: local.snapshot()) else {
             Issue.record("Reset rejected")

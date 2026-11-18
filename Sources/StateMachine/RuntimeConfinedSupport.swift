@@ -1,7 +1,9 @@
 /// A raw managed delivery disposition, without granting a domain facade's authority.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 @frozen nonisolated public enum RuntimeHostDelivery<Model, Descriptor> {
     case committed(RuntimeState<Model, Descriptor>.Snapshot)
-    case pending(RuntimePendingID, RuntimePendingStatus)
+    case pending(RuntimePendingID, PendingStatus)
     case inProgress
     case notPending
     case stale
@@ -12,8 +14,8 @@
 
 extension RuntimeHostDelivery: Sendable where Model: Sendable, Descriptor: Sendable {}
 
-/// Failure to register another live managed observer.
-nonisolated public enum RuntimeHostSubscriptionFailure: Error { case capacityExceeded }
+/// Failure to register another live observer with a managed owner.
+nonisolated public enum SubscriptionFailure: Error { case capacityExceeded }
 
 nonisolated struct RuntimeConfinedExecution: Sendable {
     let ticket: RuntimeTicket
@@ -23,7 +25,9 @@ nonisolated struct RuntimeConfinedExecution: Sendable {
 }
 
 /// Explicit MainActor ownership of one observer registration.
-@MainActor public final class RuntimeMainActorSubscription {
+///
+/// Cancelling or releasing it removes the registration.
+@MainActor public final class MainActorSnapshotSubscription {
     private let action: @MainActor @Sendable () -> Void
     private var cancelled = false
 

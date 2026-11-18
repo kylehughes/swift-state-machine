@@ -46,7 +46,6 @@ fileprivate static func _stateMachineWitnesses() {
     let _: _TransitionReturnsDeclaredResult<Loaded> = _TransitionReturnsDeclaredResult<Loaded>()
     let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
     let _ = _OperationFailureIsError<Fetch.Failure>()
-    let _ = _OperationFailureIsError<Audit.Failure>()
     let _: _RouterSourceIsPhasePayload<Loaded> = _RouterSourceIsPhasePayload<Loaded>()
     let _: _TriggerPayloadMatchesDeclaration<Bool> = _TriggerPayloadMatchesDeclaration<Bool>()
     let _ = _EffectIsCopyable<Effect>()
@@ -88,9 +87,15 @@ public struct Owned<Phase: ~Copyable & Sendable>: ~Copyable, Sendable {
     fileprivate init(_ phase: consuming Phase) {
         self.phase = phase
     }
-    /// Borrows the payload without copying a unique resource.
-    public borrowing func withValue<Result>(_ body: (borrowing Phase) -> Result) -> Result {
-        body(phase)
+    /// Borrows the payload without copying a unique resource, returning what `body` returns or throws.
+    public borrowing func withValue<Result: ~Copyable, Failure: Error>(
+        _ body: (borrowing Phase) throws(Failure) -> Result
+    ) throws(Failure) -> Result {
+        try body(phase)
+    }
+    /// Consumes this authority and returns its payload, so a unique resource can move on.
+    public consuming func takeValue() -> Phase {
+        phase
     }
     /// Advances through the authored edge or returns the original predecessor.
 public consuming func begin(_ input: Int) -> Advance<Self, Owned<Loading>, Effect.Begin, Problem> where Phase == Idle {
@@ -127,12 +132,27 @@ public consuming func begin(_ input: Int) -> Advance<Self, Owned<Loading>, Effec
         Owned<Loading>(Flow.audited(phase, input))
     }
     /// Advances through the authored edge, which starts no operation.
-    public consuming func restart(_ input: Bool) -> Owned<Idle> where Phase == Loaded {
+    fileprivate consuming func restart(_ input: Bool) -> Owned<Idle> where Phase == Loaded {
         Owned<Idle>(Flow.restart(phase, input))
     }
     /// Advances through the authored edge, which starts no operation.
-    public consuming func keep(_ input: Bool) -> Owned<Loaded> where Phase == Loaded {
+    fileprivate consuming func keep(_ input: Bool) -> Owned<Loaded> where Phase == Loaded {
         Owned<Loaded>(Flow.keep(phase, input))
+    }
+    /// Runs the router `choose`, then advances through the edge it selects.
+public consuming func choose(_ input: Bool) -> Route.ChooseResult where Phase == Loaded {
+    let selection: Route.Choose
+    do {
+        selection = try Flow.choose(phase, input)
+    } catch {
+        return .rejected(error, self)
+    }
+    switch selection {
+    case .restart:
+        return .restart(restart(input))
+    case .keep:
+        return .keep(keep(input))
+    }
     }
 }
 
@@ -144,31 +164,28 @@ public static func owned(_ initial: consuming Idle = Flow.makeIdle()) -> Owned<I
 fileprivate typealias _StateMachineEngine = RuntimeState<Flow, Effect>
 
 /// Validated bounds for managed admission and serial subscriptions.
-public typealias Configuration = RuntimeManagedConfiguration
+public typealias Configuration = StateMachine.ManagedConfiguration
 
 /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
-public typealias LocalConfiguration = RuntimeLimits
+public typealias LocalConfiguration = StateMachine.Limits
 
 /// A live observation registration; cancelling or releasing it stops delivery.
-public typealias Subscription = RuntimeSubscription
+public typealias Subscription = StateMachine.SnapshotSubscription
 
 /// A live MainActor observation registration; cancelling or releasing it stops delivery.
-public typealias MainActorSubscription = RuntimeMainActorSubscription
+public typealias MainActorSubscription = StateMachine.MainActorSnapshotSubscription
 
 /// Failure to register another live observer.
-public typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
+public typealias SubscriptionFailure = StateMachine.SubscriptionFailure
 
 /// A single-pass latest-value sequence of an owner's snapshots.
-public typealias Snapshots = RuntimeSnapshots<Snapshot>
-
-/// Whether a managed owner retries a conflicting completion or waits for reconciliation.
-public typealias CompletionPolicy = RuntimeCompletionPolicy
+public typealias Snapshots = StateMachine.SnapshotSequence<Snapshot>
 
 /// The disposition of a retained completion.
-public typealias PendingStatus = RuntimePendingStatus
+public typealias PendingStatus = StateMachine.PendingStatus
 
-/// Admission rejection reasons in exact evaluation precedence.
-public typealias CommitRejection = RuntimeState<Flow, Effect>.Rejection
+/// Why an owner refused a prepared candidate, in precedence order.
+public typealias CommitRejection = StateMachine.CommitRejection
 
 /// An immutable historical payload with sealed complete-root provenance.
 public struct Observed<Phase: Sendable>: Sendable, CustomStringConvertible {
@@ -187,134 +204,86 @@ public struct Observed<Phase: Sendable>: Sendable, CustomStringConvertible {
     public var description: String {
         "\(Phase.self), revision \(record.revision)\(record.isClosed ? ", closed" : "")"
     }
-    /// Prepares the declared edge with phase and operation authority preserved.
-public func begin(_ input: Int) throws(PreparationFailure<Problem>) -> Prepared where Phase == Idle {
-    let change: Change<Loading, Effect.Begin>
-    do {
-        change = try Flow.begin(payload, input)
-    } catch {
-        throw .domain(error)
+    /// Prepares the declared edge with phase authority preserved.
+public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle {
+    let change: Change<Loading, Effect.Begin> = try Flow.begin(payload, input)
+    return _stateMachinePrepare(on: record, next: .loading(change.next),
+        effects: change.effects.map(\.effect),
+        from: 0, to: 1, invalidates: [0],
+        requiring: nil, claim: claim)
     }
-    do {
-        let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next),
-            effects: change.effects.map(\.effect),
-            from: 0, to: 1, invalidates: [0],
+    /// Prepares the declared edge with phase authority preserved.
+    public func cancel() -> Prepared where Phase == Loading {
+        let next: Idle = Flow.cancel(payload)
+        return _stateMachinePrepare(on: record, next: .idle(next),
+            effects: [],
+            from: 1, to: 0, invalidates: [0],
             requiring: nil, claim: claim)
-        return Prepared(candidate)
-    } catch {
-        throw .plan(error)
     }
+    /// Prepares the declared edge with phase authority preserved.
+    public func sessionChanged() -> Prepared where Phase == Loading {
+        let next: Loading = Flow.sessionChanged(payload)
+        return _stateMachinePrepare(on: record, next: .loading(next),
+            effects: [],
+            from: 1, to: 1, invalidates: [1],
+            requiring: nil, claim: claim)
     }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func cancel() throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let next: Idle
-        next = Flow.cancel(payload)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .idle(next),
-                effects: [],
-                from: 1, to: 0, invalidates: [0],
-                requiring: nil, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
+    /// Prepares the declared edge with phase authority preserved.
+    public func note(_ input: String) -> Prepared where Phase == Loading {
+        let change: Change<Loading, Effect.Note> = Flow.note(payload, input)
+        return _stateMachinePrepare(on: record, next: .loading(change.next),
+            effects: change.effects.map(\.effect),
+            from: 1, to: 1, invalidates: [],
+            requiring: nil, claim: claim)
     }
+    /// Prepares the completion edge that delivery selects, with operation authority preserved.
+    fileprivate func received(_ value: Fetch.Output, authority: RuntimeTicket) -> Prepared where Phase == Loading {
+        let next: Loaded = Flow.received(payload, value)
+        return _stateMachinePrepare(on: record, next: .loaded(next),
+            effects: [],
+            from: 1, to: 2, invalidates: [],
+            requiring: authority, claim: claim)
     }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func sessionChanged() throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let next: Loading
-        next = Flow.sessionChanged(payload)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .loading(next),
-                effects: [],
-                from: 1, to: 1, invalidates: [1],
-                requiring: nil, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
+    /// Prepares the completion edge that delivery selects, with operation authority preserved.
+    fileprivate func failed(_ value: Fetch.Failure, authority: RuntimeTicket) -> Prepared where Phase == Loading {
+        let next: Failed = Flow.failed(payload, value)
+        return _stateMachinePrepare(on: record, next: .failed(next),
+            effects: [],
+            from: 1, to: 3, invalidates: [],
+            requiring: authority, claim: claim)
     }
+    /// Prepares the completion edge that delivery selects, with operation authority preserved.
+    fileprivate func audited(_ value: Audit.Output, authority: RuntimeTicket) -> Prepared where Phase == Loading {
+        let next: Loading = Flow.audited(payload, value)
+        return _stateMachinePrepare(on: record, next: .loading(next),
+            effects: [],
+            from: 1, to: 1, invalidates: [],
+            requiring: authority, claim: claim)
     }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func note(_ input: String) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let change: Change<Loading, Effect.Note>
-        change = Flow.note(payload, input)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .loading(change.next),
-                effects: change.effects.map(\.effect),
-                from: 1, to: 1, invalidates: [],
-                requiring: nil, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
+    /// Prepares the declared edge that the router `choose` selects.
+    fileprivate func restart(_ input: Bool) -> Prepared where Phase == Loaded {
+        let next: Idle = Flow.restart(payload, input)
+        return _stateMachinePrepare(on: record, next: .idle(next),
+            effects: [],
+            from: 2, to: 0, invalidates: [],
+            requiring: nil, claim: claim)
     }
+    /// Prepares the declared edge that the router `choose` selects.
+    fileprivate func keep(_ input: Bool) -> Prepared where Phase == Loaded {
+        let next: Loaded = Flow.keep(payload, input)
+        return _stateMachinePrepare(on: record, next: .loaded(next),
+            effects: [],
+            from: 2, to: 2, invalidates: [],
+            requiring: nil, claim: claim)
     }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func received(_ completion: FetchSuccessCompletion) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let next: Loaded
-        next = Flow.received(payload, completion.value)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .loaded(next),
-                effects: [],
-                from: 1, to: 2, invalidates: [],
-                requiring: completion.authority, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
-    }
-    }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func failed(_ completion: FetchFailureCompletion) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let next: Failed
-        next = Flow.failed(payload, completion.value)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .failed(next),
-                effects: [],
-                from: 1, to: 3, invalidates: [],
-                requiring: completion.authority, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
-    }
-    }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func audited(_ completion: AuditSuccessCompletion) throws(PreparationFailure<Never>) -> Prepared where Phase == Loading {
-        let next: Loading
-        next = Flow.audited(payload, completion.value)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .loading(next),
-                effects: [],
-                from: 1, to: 1, invalidates: [],
-                requiring: completion.authority, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
-    }
-    }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func restart(_ input: Bool) throws(PreparationFailure<Never>) -> Prepared where Phase == Loaded {
-        let next: Idle
-        next = Flow.restart(payload, input)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .idle(next),
-                effects: [],
-                from: 2, to: 0, invalidates: [],
-                requiring: nil, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
-    }
-    }
-    /// Prepares the declared edge with phase and operation authority preserved.
-    public func keep(_ input: Bool) throws(PreparationFailure<Never>) -> Prepared where Phase == Loaded {
-        let next: Loaded
-        next = Flow.keep(payload, input)
-        do {
-            let candidate = try _stateMachinePrepare(on: record, next: .loaded(next),
-                effects: [],
-                from: 2, to: 2, invalidates: [],
-                requiring: nil, claim: claim)
-            return Prepared(candidate)
-        } catch {
-        throw .plan(error)
+    /// Runs the router `choose`, then prepares the edge it selects.
+    public func choose(_ input: Bool) throws(Problem) -> Prepared where Phase == Loaded {
+        let selection: Route.Choose = try Flow.choose(payload, input)
+        switch selection {
+    case .restart:
+        return restart(input)
+    case .keep:
+        return keep(input)
     }
     }
 }
@@ -378,9 +347,13 @@ fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snap
 }
 
 /// A sealed inert candidate consumed by admission.
+///
+/// A plan defect found while preparing travels inside it with the snapshot it was prepared on,
+/// so admission installs nothing and reports `CommitRejection.plan` unless the snapshot is
+/// another owner's or the owner is closed, which it reports first.
 public struct Prepared: ~Copyable, Sendable {
-    fileprivate let candidate: _StateMachineEngine.Candidate
-    fileprivate init(_ candidate: _StateMachineEngine.Candidate) {
+    fileprivate let candidate: _StateMachineEngine.Proposal
+    fileprivate init(_ candidate: _StateMachineEngine.Proposal) {
         self.candidate = candidate
     }
 }
@@ -389,8 +362,6 @@ public struct Prepared: ~Copyable, Sendable {
 public enum PreparationRejection: Error {
     /// The input or outcome has no edge from the observed phase.
     case invalidPhase
-    /// Actual emitted effects violate metadata or immutable limits.
-    case plan(PlanRejection)
     case begin(Problem)
     case choose(Problem)
 }
@@ -401,12 +372,13 @@ public enum Route { /// The edges `choose` may choose.
         case restart
         case keep
     }
-}
-
-/// A prepared candidate or typed routing rejection.
-public enum PreparationResult: ~Copyable, Sendable {
-    case prepared(Prepared)
-    case rejected(PreparationRejection)
+    /// The result of `choose` on an owned `Loaded`: one case per edge it may select.
+    public enum ChooseResult: ~Copyable, Sendable {
+        case restart(Owned<Idle>)
+        case keep(Owned<Loaded>)
+        /// The router declined; the source is returned unchanged.
+        case rejected(Problem, Owned<Loaded>)
+    }
 }
 
 /// A historical receipt for an atomic acceptance.
@@ -430,7 +402,8 @@ public struct Receipt: Sendable, StateMachineReceipt, CustomStringConvertible {
 public enum SendRejection: Error {
     /// Routing or the authored transition declined the input before a candidate existed.
     case preparation(PreparationRejection)
-    /// The owner refused the prepared candidate; read `snapshot()` for the current root.
+    /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`);
+    /// read `snapshot()` for the current root.
     case commit(CommitRejection)
 }
 
@@ -460,41 +433,20 @@ public struct FetchWork: Sendable {
     }
     /// Seals a successful terminal result for this exact work.
     public func succeeded(_ value: Fetch.Output) -> FetchCompletion {
-        .success(FetchSuccessCompletion(value: value, authority: authority))
+        FetchCompletion(result: .success(value), authority: authority)
     }
 
     /// Seals a failed terminal result for this exact work.
-    public func failed(_ value: Fetch.Failure) -> FetchCompletion {
-        .failure(FetchFailureCompletion(value: value, authority: authority))
+public func failed(_ value: Fetch.Failure) -> FetchCompletion {
+        FetchCompletion(result: .failure(value), authority: authority)
     }
 }
 
-/// A sealed successful terminal result for one declared operation.
-public struct FetchSuccessCompletion: Sendable {
-    /// The typed successful value.
-    public let value: Fetch.Output
+/// The sealed terminal result of one execution, which only its owner's `deliver` admits.
+public struct FetchCompletion: Sendable {
+    /// The typed terminal value.
+    public let result: Result<Fetch.Output, Fetch.Failure>
     fileprivate let authority: RuntimeTicket
-}
-
-/// A sealed failed terminal result for one declared operation.
-public struct FetchFailureCompletion: Sendable {
-    /// The typed failure value.
-    public let value: Fetch.Failure
-    fileprivate let authority: RuntimeTicket
-}
-
-/// The closed terminal vocabulary for this operation.
-public enum FetchCompletion: Sendable {
-    case success(FetchSuccessCompletion)
-    case failure(FetchFailureCompletion)
-    fileprivate var authority: RuntimeTicket {
-        switch self {
-                case .success(let value):
-            return value.authority
-                case .failure(let value):
-            return value.authority
-            }
-    }
 }
 
 /// Work issued exclusively from an accepted command batch.
@@ -508,41 +460,17 @@ public struct AuditWork: Sendable {
     }
     /// Seals a successful terminal result for this exact work.
     public func succeeded(_ value: Audit.Output) -> AuditCompletion {
-        .success(AuditSuccessCompletion(value: value, authority: authority))
+        AuditCompletion(value: value, authority: authority)
     }
 
-    /// Seals a failed terminal result for this exact work.
-    public func failed(_ value: Audit.Failure) -> AuditCompletion {
 
-    }
 }
 
-/// A sealed successful terminal result for one declared operation.
-public struct AuditSuccessCompletion: Sendable {
-    /// The typed successful value.
+/// The sealed terminal result of one execution, which only its owner's `deliver` admits.
+public struct AuditCompletion: Sendable {
+    /// The value the operation produced; it cannot fail.
     public let value: Audit.Output
     fileprivate let authority: RuntimeTicket
-}
-
-/// A sealed failed terminal result for one declared operation.
-public struct AuditFailureCompletion: Sendable {
-    /// The typed failure value.
-    public let value: Audit.Failure
-    fileprivate let authority: RuntimeTicket
-}
-
-/// The closed terminal vocabulary for this operation.
-public enum AuditCompletion: Sendable {
-    case success(AuditSuccessCompletion)
-    case failure(AuditFailureCompletion)
-    fileprivate var authority: RuntimeTicket {
-        switch self {
-                case .success(let value):
-            return value.authority
-                case .failure(let value):
-            return value.authority
-            }
-    }
 }
 
 /// Closed typed terminal outcomes for this domain.
@@ -616,198 +544,115 @@ fileprivate static func _stateMachineBatch(_ batch: _StateMachineEngine.Batch) -
 }
 
 fileprivate static var _stateMachineEligibility: [[Int]] {
-    [[1], Array(0 ..< 4)]
+    [[1], Array(0 ..< 4), [1]]
 }
 
 fileprivate static func _stateMachinePrepare(
     on record: _StateMachineEngine.Snapshot, next: Flow, effects: [Effect], from: Int, to: Int,
     invalidates: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
-) throws(PlanRejection) -> _StateMachineEngine.Candidate {
-    var edits: [_StateMachineEngine.ScopeEdit] = []
-    for (scope, phases) in _stateMachineEligibility.enumerated() {
-        let before = phases.contains(from)
-        let after = phases.contains(to)
-        if after && (!before || invalidates.contains(scope)) {
-            edits.append(.activate(RuntimeScopeID(kind: UInt32(scope))))
-        }
-        else if before && !after {
-            edits.append(.remove(RuntimeScopeID(kind: UInt32(scope))))
-        }
-    }
-    var starts: [_StateMachineEngine.Start] = []
-    var counts = Array(repeating: 0, count: 2)
-    for effect in effects {
-        switch effect {
-        case .fetch(let input):
-            let _: Fetch.Input = input
-            counts[0] += 1
-            guard counts[0] <= 1 else {
-                throw .invalidPlan
+) -> Prepared {
+    do throws(PlanRejection) {
+        var edits: [_StateMachineEngine.ScopeEdit] = []
+        for (scope, phases) in _stateMachineEligibility.enumerated() {
+            let before = phases.contains(from)
+            let after = phases.contains(to)
+            if after && (!before || invalidates.contains(scope)) {
+                edits.append(.activate(RuntimeScopeID(kind: UInt32(scope))))
             }
-            starts.append(.init(RuntimeOperation(kind: 0, scope: RuntimeScopeID(kind: 0),
-                dependencies: [RuntimeScopeID(kind: 1)], policy: .latest), descriptor: effect))
-        case .audit(let input):
-            let _: Audit.Input = input
-            counts[1] += 1
-            guard counts[1] <= 2 else {
-                throw .invalidPlan
+            else if before && !after {
+                edits.append(.remove(RuntimeScopeID(kind: UInt32(scope))))
             }
-            starts.append(.init(RuntimeOperation(kind: 1, scope: RuntimeScopeID(kind: 0),
-                dependencies: [RuntimeScopeID(kind: 1)], policy: .parallel(2)), descriptor: effect))
         }
+        var starts: [_StateMachineEngine.Start] = []
+        var counts = Array(repeating: 0, count: 2)
+        for effect in effects {
+            switch effect {
+            case .fetch(let input):
+                let _: Fetch.Input = input
+                counts[0] += 1
+                guard counts[0] <= 1 else {
+                    throw .invalidPlan
+                }
+                starts.append(.init(RuntimeOperation(kind: 0, scope: RuntimeScopeID(kind: 0),
+                    dependencies: [RuntimeScopeID(kind: 1)], policy: .latest), descriptor: effect))
+            case .audit(let input):
+                let _: Audit.Input = input
+                counts[1] += 1
+                guard counts[1] <= 2 else {
+                    throw .invalidPlan
+                }
+                starts.append(.init(RuntimeOperation(kind: 1, scope: RuntimeScopeID(kind: 2),
+                    dependencies: [RuntimeScopeID(kind: 1)], policy: .parallel(2)), descriptor: effect))
+            }
+        }
+        return Prepared(.candidate(try _StateMachineEngine.prepare(on: record, next: next, requiring: ticket.map {
+                        [$0]
+                    } ?? [],
+            plan: .init(scopes: edits, retire: ticket.map {
+                            [$0]
+                        } ?? [], starts: starts,
+                controlCount: invalidates.count, finishingClaims: claim.map {
+                            [$0]
+                        } ?? []))))
+    } catch {
+        return Prepared(.defective(.init(error, preparedOn: record)))
     }
-    return try _StateMachineEngine.prepare(on: record, next: next, requiring: ticket.map {
-            [$0]
-        } ?? [],
-        plan: .init(scopes: edits, retire: ticket.map {
-                [$0]
-            } ?? [], starts: starts,
-            controlCount: invalidates.count, finishingClaims: claim.map {
-                [$0]
-            } ?? []))
 }
 
 /// Routes an input against a historical snapshot, rejecting a missing phase edge explicitly.
-public static func prepare(_ input: Input, on snapshot: Snapshot) -> PreparationResult {
+///
+/// A plan defect is not a routing rejection: it travels inside the result, and admission reports it.
+public static func prepare(_ input: Input, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
     switch (input, snapshot) {
     case (.load(let input), .idle(let source)):
         do {
-            return .prepared(try source.begin(input))
-        }
-        catch {
-            switch error {
-            case .plan(let reason):
-                return .rejected(.plan(reason))
-            case .domain(let error):
-                return .rejected(.begin(error))
-            }
+            return try source.begin(input)
+        } catch {
+            throw .begin(error)
         }
     case (.cancel, .loading(let source)):
-        do {
-            return .prepared(try source.cancel())
-        }
-        catch {
-            switch error {
-            case .plan(let reason):
-                return .rejected(.plan(reason))
-            case .domain(let never):
-                switch never {
-                }
-            }
-        }
+        return source.cancel()
     case (.sessionChanged, .loading(let source)):
-        do {
-            return .prepared(try source.sessionChanged())
-        }
-        catch {
-            switch error {
-            case .plan(let reason):
-                return .rejected(.plan(reason))
-            case .domain(let never):
-                switch never {
-                }
-            }
-        }
+        return source.sessionChanged()
     case (.note(let input), .loading(let source)):
-        do {
-            return .prepared(try source.note(input))
-        }
-        catch {
-            switch error {
-            case .plan(let reason):
-                return .rejected(.plan(reason))
-            case .domain(let never):
-                switch never {
-                }
-            }
-        }
+        return source.note(input)
     case (.tick(let input), .loaded(let source)):
         let selection: Route.Choose
         do {
             selection = try Flow.choose(source.value, input)
         } catch {
-            return .rejected(.choose(error))
+            throw .choose(error)
         }
         switch selection {
         case .restart:
-            do {
-                return .prepared(try source.restart(input))
-            }
-            catch {
-                switch error {
-                case .plan(let reason):
-                    return .rejected(.plan(reason))
-                case .domain(let never):
-                    switch never {
-                    }
-                }
-            }
+            return source.restart(input)
         case .keep:
-            do {
-                return .prepared(try source.keep(input))
-            }
-            catch {
-                switch error {
-                case .plan(let reason):
-                    return .rejected(.plan(reason))
-                case .domain(let never):
-                    switch never {
-                    }
-                }
-            }
+            return source.keep(input)
         }
     default:
-        return .rejected(.invalidPhase)
+        throw .invalidPhase
     }
 }
 
-fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) -> PreparationResult {
+fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
     switch (completion, snapshot) {
-    case (.fetch(.success(let completion)), .loading(let source)):
-        do {
-            return .prepared(try source.received(completion))
+    case (.fetch(let completion), .loading(let source)):
+        switch completion.result {
+        case .success(let value):
+        return source.received(value, authority: completion.authority)
+        case .failure(let value):
+        return source.failed(value, authority: completion.authority)
         }
-        catch {
-            switch error {
-            case .plan(let reason):
-                return .rejected(.plan(reason))
-            case .domain(let never):
-                switch never {
-                }
-            }
-        }
-    case (.fetch(.failure(let completion)), .loading(let source)):
-        do {
-            return .prepared(try source.failed(completion))
-        }
-        catch {
-            switch error {
-            case .plan(let reason):
-                return .rejected(.plan(reason))
-            case .domain(let never):
-                switch never {
-                }
-            }
-        }
-    case (.audit(.success(let completion)), .loading(let source)):
-        do {
-            return .prepared(try source.audited(completion))
-        }
-        catch {
-            switch error {
-            case .plan(let reason):
-                return .rejected(.plan(reason))
-            case .domain(let never):
-                switch never {
-                }
-            }
-        }
+    case (.audit(let completion), .loading(let source)):
+        let value: Audit.Output = completion.value
+        return source.audited(value, authority: completion.authority)
     default:
-        return .rejected(.invalidPhase)
+        throw .invalidPhase
     }
 }
 
-/// A phase saved data can restore: one in which no operation is active, so no work resumes.
+/// A phase saved data can restore: one in which no operation is active, or one the
+/// `@Restoration` function lists in `allows:`. A restored owner has no outstanding work.
 public enum Restoration: Sendable {
     case idle(Idle)
     case loaded(Loaded)
@@ -827,58 +672,178 @@ fileprivate static func _stateMachineRestored(_ saved: Int) throws(Problem) -> (
 
 fileprivate typealias _StateMachineLedger = RuntimeDeliveryLedger<Flow, Effect, Completion, PreparationRejection>
 
-/// The opaque identity of a first retained terminal envelope.
-public typealias PendingCompletionID = RuntimePendingID
-
-/// Typed historical diagnostics for a retained completion.
-public typealias PendingCompletion = RuntimeDeliveryLedger<Flow, Effect, Completion, PreparationRejection>.Pending
-
-/// The obligations a managed owner still tracked when its shutdown deadline expired.
-public typealias ShutdownDiagnostics = RuntimeShutdownDiagnostics
-
-/// Whether shutdown joined every obligation or stopped waiting at its deadline.
-///
-/// A timeout leaves the owner closed and its outstanding work tracked.
-public enum ShutdownResult: Sendable {
-    case quiescent
-    case timedOut(ShutdownDiagnostics)
+/// The opaque identity of one retained terminal outcome of this schema's owners.
+public struct PendingCompletionID: Hashable, Sendable {
+    fileprivate let raw: RuntimePendingID
 }
 
-/// A closed completion delivery decision.
+/// A retained terminal outcome and its delivery diagnostics.
+///
+/// The outcome is an inert value: only `reconcile(id:)`, `retryAdmission(id:)`, or
+/// `discardPending(id:)` can settle the retained completion it describes.
+public struct PendingCompletion: Sendable {
+    /// The retained terminal value of one operation.
+    public enum Outcome: Sendable {
+        case fetch(Result<Fetch.Output, Fetch.Failure>)
+        case audit(Audit.Output)
+    }
+    /// Why the last preparation or admission of a retained outcome did not commit.
+    public enum Rejection: Sendable {
+        /// The router or completion edge rejected the outcome.
+        case preparation(PreparationRejection)
+        /// The owner refused the prepared candidate, or its effect plan is defective.
+        case admission(CommitRejection)
+    }
+    /// The opaque identity of this retained outcome.
+    public let id: PendingCompletionID
+    /// The first retained terminal outcome.
+    public let outcome: Outcome
+    /// The delivery state when this record was captured.
+    public let status: PendingStatus
+    /// The last failed preparation or admission, when present.
+    public let lastRejection: Rejection?
+    /// The saturating count of claimed preparations; capacity retries do not increment it.
+    public let attempts: UInt64
+    /// Whether the preparation count has reached its representable limit.
+    public var attemptsSaturated: Bool {
+        attempts == UInt64.max
+    }
+    fileprivate init(_ pending: _StateMachineLedger.Pending) {
+        id = PendingCompletionID(raw: pending.id)
+        switch pending.outcome {
+        case .fetch(let completion):
+            outcome = .fetch(completion.result)
+        case .audit(let completion):
+            outcome = .audit(completion.value)
+        }
+        status = pending.status
+        lastRejection = pending.lastRejection.map { reason in
+            switch reason {
+            case .preparation(let rejection):
+                .preparation(rejection)
+            case .admission(let rejection):
+                .admission(rejection)
+            }
+        }
+        attempts = pending.attempts
+    }
+}
+
+/// The decision `deliver` made about one terminal outcome.
 public enum DeliveryResult: Sendable {
+    /// The outcome committed.
     case committed(Receipt)
+    /// The outcome is retained; its status says what admission is waiting for.
     case pending(PendingCompletionID, PendingStatus)
-    case inProgress
-    case notPending
     /// The operation's authority is inactive or its outcome was already settled.
     case stale
     /// The completion was issued by a different owner.
     case foreignOwner
-    case discarded(Receipt)
-    case rejected(CommitRejection)
 }
 
-fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> DeliveryResult {
+/// The result of one more attempt to admit a retained outcome.
+public enum ReconcileResult: Sendable {
+    /// The retained outcome committed.
+    case committed(Receipt)
+    /// The outcome is still retained; its status says what admission is waiting for.
+    case pending(PendingCompletionID, PendingStatus)
+    /// Another attempt holds the only preparation claim.
+    case inProgress
+    /// No outcome with this identity is retained.
+    case notPending
+}
+
+/// The result of revoking a retained outcome's operation.
+public enum DiscardResult: Sendable {
+    /// The authority-only commit revoked the operation and disposed of its outcome.
+    case discarded(Receipt)
+    /// The owner refused the authority-only commit; the outcome stays retained.
+    case rejected(CommitRejection)
+    /// No outcome with this identity is retained.
+    case notPending
+}
+
+fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> ReconcileResult {
     switch result {
     case .committed(let record):
         return .committed(Receipt(record))
     case .pending(let id, let status):
-        return .pending(id, status)
+        return .pending(PendingCompletionID(raw: id), status)
     case .notPending:
         return .notPending
     }
 }
 
 fileprivate static func _stateMachineDeliveryPreparation(_ attempt: _StateMachineLedger.Attempt) -> _StateMachineLedger.Preparation {
-    switch _stateMachineCompletion(attempt.outcome, on: _stateMachineSnapshot(attempt.snapshot, claim: attempt.claim)) {
-    case .prepared(let prepared):
-        return .success(prepared.candidate)
-    case .rejected(let reason):
-        if case .plan(let plan) = reason {
-        return .failure(.plan(plan))
+    let prepared: Prepared
+    do {
+        prepared = try _stateMachineCompletion(attempt.outcome, on: _stateMachineSnapshot(attempt.snapshot, claim: attempt.claim))
+    } catch {
+        return .failure(.preparation(error))
     }
-        return .failure(.domain(reason))
+    switch prepared.candidate {
+    case .candidate(let candidate):
+        return .success(candidate)
+    case .defective(let defect):
+        return .failure(.admission(defect.rejection(against: attempt.snapshot)))
     }
+}
+
+/// The obligations a managed owner still tracked when its shutdown deadline expired.
+///
+/// It is captured in the same observation that found the deadline expired, so it always names
+/// at least one unsettled obligation. It holds no model data and no authority over the owner.
+public struct ShutdownDiagnostics: Equatable, Sendable {
+    /// An execution and delivery obligation that remained tracked.
+public typealias OutstandingExecution = StateMachine.ShutdownDiagnostics.OutstandingExecution
+    /// The owner's last accepted revision at the observation.
+    public let acceptedRevision: UInt64
+    /// The revision of the last fully processed FIFO batch.
+    public let processedThrough: UInt64
+    /// Whether accepted ordinary or terminal batches still await processing.
+    public let hasQueuedBatches: Bool
+    /// Whether a FIFO processing turn still owns responsibility.
+    public let isDraining: Bool
+    /// Whether an automatic retry of a retained completion is still scheduled.
+public let isRetrying: Bool
+    /// The identities of the retained terminal outcomes.
+    public let pendingCompletions: [PendingCompletionID]
+    /// The executions, deliveries, and preparations that remain tracked.
+    public let outstandingExecutions: [OutstandingExecution]
+    fileprivate init(_ raw: StateMachine.ShutdownDiagnostics) {
+        acceptedRevision = raw.acceptedRevision
+        processedThrough = raw.processedThrough
+        hasQueuedBatches = raw.hasQueuedBatches
+        isDraining = raw.isDraining
+        isRetrying = raw.isRetrying
+        pendingCompletions = raw.pendingCompletions.map {
+            PendingCompletionID(raw: $0)
+        }
+        outstandingExecutions = raw.outstandingExecutions
+    }
+}
+
+/// Whether shutdown joined every obligation or stopped waiting at its deadline.
+///
+/// A timeout leaves the owner closed and its outstanding work tracked.
+public enum ShutdownResult: Equatable, Sendable {
+    /// Every execution, delivery, and preparation obligation settled.
+    case quiescent
+    /// The deadline passed first; the diagnostics describe what was still outstanding.
+    case timedOut(ShutdownDiagnostics)
+    fileprivate init(_ raw: StateMachine.ShutdownDiagnostics?) {
+        self = raw.map {
+            .timedOut(ShutdownDiagnostics($0))
+        } ?? .quiescent
+    }
+}
+
+/// Whether `flush(through:)` waited for a receipt's batch to be processed.
+public enum FlushResult: Equatable, Sendable {
+    /// Cancellation and launch decisions through the receipt have been processed.
+    case processed
+    /// The receipt was issued by a different owner, so there was nothing to wait for.
+    case foreignOwner
 }
 
 /// A noncopyable manually driven owner with an embedded value engine.
@@ -887,12 +852,12 @@ public struct Local: ~Copyable {
     fileprivate var ledger = _StateMachineLedger()
     /// Creates fresh authority only in the declared initial phase.
     public init(_ initial: Idle = Flow.makeIdle(), configuration: LocalConfiguration = .default) {
-        engine = _StateMachineEngine(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration)
+        engine = _StateMachineEngine(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration, recording: .commands)
     }
     /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
     public init(restoring saved: Int, configuration: LocalConfiguration = .default) throws(Problem) {
         let restored = try _stateMachineRestored(saved)
-        engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration)
+        engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration, recording: .commands)
     }
     /// Returns an immutable historical observation.
     public borrowing func snapshot() -> Snapshot {
@@ -900,75 +865,94 @@ public struct Local: ~Copyable {
     }
     /// Consumes and atomically accepts or rejects a complete candidate.
     public mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
-        let result = engine.commit(prepared.candidate)
-        ledger.prune(in: engine)
-        return _stateMachineAdmission(result)
+        switch prepared.candidate {
+        case .defective(let defect):
+            return _stateMachineAdmission(engine.reject(defect))
+        case .candidate(let candidate):
+            let result = engine.commit(candidate)
+            ledger.prune(in: engine)
+            return _stateMachineAdmission(result)
+        }
     }
     /// Routes, prepares and admits one input against the current root.
     @discardableResult
     public mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
-        switch Flow.prepare(input, on: snapshot()) {
-        case .prepared(let prepared):
-            switch commit(prepared) {
-            case .committed(let receipt):
-                return receipt
-            case .rejected(let reason, _):
-                throw .commit(reason)
-            }
-        case .rejected(let reason):
-            throw .preparation(reason)
+        let prepared: Prepared
+        do {
+            prepared = try Flow.prepare(input, on: snapshot())
+        } catch {
+            throw .preparation(error)
+        }
+        switch commit(prepared) {
+        case .committed(let receipt):
+            return receipt
+        case .rejected(let reason, _):
+            throw .commit(reason)
         }
     }
     /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
-    public mutating func drainCommands(limit: Int) -> [CommandBatch] {
-        engine.drain(limit: limit).map {
-            _stateMachineBatch($0)
-        }
+public mutating func drainCommands(limit: Int) -> [CommandBatch] {
+    engine.drain(limit: limit).map {
+        _stateMachineBatch($0)
+    }
     }
     /// Records actual termination independently of cancellation and completion delivery.
     public mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
         switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
         case .recorded:
-            return .recorded
+        return .recorded
         case .duplicate:
-            return .duplicate
+        return .duplicate
         case .foreignOwner:
-            return .foreignOwner
+        return .foreignOwner
         }
     }
     /// Retains the first outcome and attempts one typed preparation against the current root.
+    ///
+    /// This is the only way to submit a terminal outcome. A later outcome for the same work never
+    /// replaces the retained one; it reports that outcome's status instead.
     public mutating func deliver(_ completion: Completion) -> DeliveryResult {
         switch ledger.retain(completion, for: completion.authority, in: &engine) {
         case .stale:
-            return .stale
+        return .stale
         case .foreignOwner:
-            return .foreignOwner
-        case .pending(let id):
-            guard let pending = ledger.pending.first(where: { $0.id == id
-        }) else {
-        return .notPending
-    }
+        return .foreignOwner
+        case .pending(let raw):
+            let id = PendingCompletionID(raw: raw)
+            guard let pending = ledger.pending.first(where: { $0.id == raw
+            }) else {
+            return .stale
+        }
             if pending.status != .awaitingAdmission {
-        return .pending(id, pending.status)
-    }
-            return reconcile(id: id)
+            return .pending(id, pending.status)
+        }
+            switch reconcile(id: id) {
+            case .committed(let receipt):
+            return .committed(receipt)
+            case .pending(let id, let status):
+            return .pending(id, status)
+            case .inProgress:
+            return .pending(id, .preparing)
+            case .notPending:
+            return .stale
+            }
         }
     }
     /// Delivers the sealed terminal result of one `Fetch` execution.
-public mutating func deliver(_ completion: FetchCompletion) -> DeliveryResult {
-    deliver(.fetch(completion))
+    public mutating func deliver(_ completion: FetchCompletion) -> DeliveryResult {
+        deliver(.fetch(completion))
     }
     /// Delivers the sealed terminal result of one `Audit` execution.
     public mutating func deliver(_ completion: AuditCompletion) -> DeliveryResult {
         deliver(.audit(completion))
     }
     /// Claims one retained outcome before evaluating domain code.
-    public mutating func reconcile(id: PendingCompletionID) -> DeliveryResult {
-        switch ledger.claim(id, in: &engine) {
+    public mutating func reconcile(id: PendingCompletionID) -> ReconcileResult {
+        switch ledger.claim(id.raw, in: &engine) {
         case .inProgress:
-            return .inProgress
+        return .inProgress
         case .notPending:
-            return .notPending
+        return .notPending
         case .claimed(let attempt):
             let preparation = _stateMachineDeliveryPreparation(attempt)
             return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
@@ -977,33 +961,34 @@ public mutating func deliver(_ completion: FetchCompletion) -> DeliveryResult {
     /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
     ///
     /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
-    public mutating func retryAdmission(id: PendingCompletionID) -> DeliveryResult {
-        _stateMachineFinish(ledger.retryAdmission(id, in: &engine))
+    public mutating func retryAdmission(id: PendingCompletionID) -> ReconcileResult {
+        _stateMachineFinish(ledger.retryAdmission(id.raw, in: &engine))
     }
     /// Queries immutable first-outcome records without claiming preparation.
     public borrowing func pendingCompletions() -> [PendingCompletion] {
-        ledger.pending
+        ledger.pending.map(PendingCompletion.init)
     }
     /// Revokes one retained operation using an atomic authority-only commit.
-    public mutating func discardPending(id: PendingCompletionID) -> DeliveryResult {
-        guard let result = ledger.discard(id, in: &engine) else {
-            return .notPending
-        }
+    public mutating func discardPending(id: PendingCompletionID) -> DiscardResult {
+        guard let result = ledger.discard(id.raw, in: &engine) else {
+        return .notPending
+    }
         switch result {
         case .committed(let record):
-            return .discarded(Receipt(record))
+        return .discarded(Receipt(record))
         case .rejected(let reason, _):
-            return .rejected(reason)
+        return .rejected(reason)
         }
     }
     /// Ends admission while retaining historical read access.
+    @discardableResult
     public mutating func close() -> Receipt {
         let result = engine.close()
         ledger.prune(in: engine)
         return Receipt(result)
     }
     /// Closure, FIFO transfer, and all actual execution and delivery obligations have settled.
-    public var isQuiescent: Bool {
+public var isQuiescent: Bool {
         engine.isQuiescent
     }
 }
@@ -1013,9 +998,9 @@ public mutating func deliver(_ completion: FetchCompletion) -> DeliveryResult {
     /// Executes this operation within the selected isolation.
 public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>
     /// Executes this operation within the selected isolation.
-    public let audit: @MainActor (Audit.Input) async -> Result<Audit.Output, Audit.Failure>
+    public let audit: @MainActor (Audit.Input) async -> Audit.Output
     /// Selects every driver for this owner's lifetime.
-    public init(fetch: @escaping @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>, audit: @escaping @MainActor (Audit.Input) async -> Result<Audit.Output, Audit.Failure>) {
+    public init(fetch: @escaping @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>, audit: @escaping @MainActor (Audit.Input) async -> Audit.Output) {
         self.fetch = fetch
         self.audit = audit
     }
@@ -1025,96 +1010,100 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
 @MainActor public final class MainActorHost: MainActorStateMachineHost {
     private typealias Host = RuntimeMainActorHost<Flow, Effect, Completion, PreparationRejection>
     private let host: Host
+    /// How this owner settles a retained completion that cannot commit when it is delivered.
+    ///
+    /// The default, `.retryPure`, evaluates a completion's router and edge again after another
+    /// commit wins the race, so it assumes those functions are pure. Choose
+    /// `.manual(onReconciliationRequired:)` when they are not.
+    ///
+    /// A handler, when given, runs outside the owner's critical section each time a retained
+    /// completion's status becomes `reconciliationRequired`: its completion edge or router threw,
+    /// its effect plan is defective, the owner refused its admission, or an explicit
+    /// `reconcile(id:)` did not commit. Settle it with `reconcile(id:)` or `discardPending(id:)`.
+    public struct CompletionPolicy {
+        fileprivate let runtime: RuntimeCompletionPolicy
+        fileprivate let reconciliationRequired: @MainActor (_StateMachineLedger.Pending) -> Void
+        private init(_ runtime: RuntimeCompletionPolicy, handler: @escaping @MainActor (PendingCompletion) -> Void) {
+            self.runtime = runtime
+            reconciliationRequired = {
+            handler(PendingCompletion($0))
+        }
+        }
+        /// Prepares a completion again against the current state when another commit wins the race,
+        /// at most four times per turn before yielding to other work, and notifies no one.
+        ///
+        /// Choose it only when every completion edge and router is deterministic and free of side
+        /// effects; the compiler does not check that. A completion retained for any other reason
+        /// stays visible only through `pendingCompletions()`.
+        public static var retryPure: CompletionPolicy {
+        CompletionPolicy(.retryPure, handler: { _ in
+            })
+    }
+        /// Retries lost races as `retryPure` does, and passes every completion that still needs
+        /// reconciliation to `handler`.
+        public static func retryPure(onReconciliationRequired handler: @escaping @MainActor (PendingCompletion) -> Void) -> CompletionPolicy {
+            CompletionPolicy(.retryPure, handler: handler)
+        }
+        /// Never prepares a completion again on its own: every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        public static func manual(onReconciliationRequired handler: @escaping @MainActor (PendingCompletion) -> Void) -> CompletionPolicy {
+            CompletionPolicy(.manualOnConflict, handler: handler)
+        }
+    }
     /// Creates fresh authority and immutable execution selections.
-    public init(_ initial: Idle = Flow.makeIdle(), drivers: MainActorDrivers, configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
-        }) {
+    public init(_ initial: Idle = Flow.makeIdle(), drivers: MainActorDrivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) {
         host = Host(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], configuration: configuration,
-            policy: completionPolicy, driver: { raw in
-                switch raw.descriptor {
-                            case .fetch(let input):
-                                let work = FetchWork(input: input, authority: raw.ticket)
-                                switch await drivers.fetch(input) {
-                                case .success(let value):
-                    return .fetch(work.succeeded(value))
-                                case .failure(let value):
-                    return .fetch(work.failed(value))
-                                }
-                            case .audit(let input):
-                                let work = AuditWork(input: input, authority: raw.ticket)
-                                switch await drivers.audit(input) {
-                                case .success(let value):
-                    return .audit(work.succeeded(value))
-                                case .failure(let value):
-                    switch value {
-                    }
-                                }
-                            }
+            policy: completionPolicy.runtime, driver: { raw in
+    switch raw.descriptor {
+                case .fetch(let input):
+                    return .fetch(FetchCompletion(result: await drivers.fetch(input), authority: raw.ticket))
+                case .audit(let input):
+                    return .audit(AuditCompletion(value: await drivers.audit(input), authority: raw.ticket))
+                }
             }, ticket: { (outcome: Completion) -> RuntimeTicket in
-                return outcome.authority
+                outcome.authority
             },
             prepare: {
                 _stateMachineDeliveryPreparation($0)
-            }, reconciliationRequired: onReconciliationRequired)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
     }
     /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
-    public init(restoring saved: Int, drivers: MainActorDrivers, configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
-        }) throws(Problem) {
+    public init(restoring saved: Int, drivers: MainActorDrivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) throws(Problem) {
         let restored = try _stateMachineRestored(saved)
         host = Host(restored.model, scopes: restored.scopes, configuration: configuration,
-            policy: completionPolicy, driver: { raw in
-                switch raw.descriptor {
-                            case .fetch(let input):
-                                let work = FetchWork(input: input, authority: raw.ticket)
-                                switch await drivers.fetch(input) {
-                                case .success(let value):
-                    return .fetch(work.succeeded(value))
-                                case .failure(let value):
-                    return .fetch(work.failed(value))
-                                }
-                            case .audit(let input):
-                                let work = AuditWork(input: input, authority: raw.ticket)
-                                switch await drivers.audit(input) {
-                                case .success(let value):
-                    return .audit(work.succeeded(value))
-                                case .failure(let value):
-                    switch value {
-                    }
-                                }
-                            }
+            policy: completionPolicy.runtime, driver: { raw in
+    switch raw.descriptor {
+                case .fetch(let input):
+                    return .fetch(FetchCompletion(result: await drivers.fetch(input), authority: raw.ticket))
+                case .audit(let input):
+                    return .audit(AuditCompletion(value: await drivers.audit(input), authority: raw.ticket))
+                }
             }, ticket: { (outcome: Completion) -> RuntimeTicket in
-                return outcome.authority
+                outcome.authority
             },
             prepare: {
                 _stateMachineDeliveryPreparation($0)
-            }, reconciliationRequired: onReconciliationRequired)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
     }
     /// Creates fresh initial authority, selecting one driver closure per operation.
     public convenience init(_ initial: Idle = Flow.makeIdle(),
         fetchDriver: @escaping @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
-        auditDriver: @escaping @MainActor (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        auditDriver: @escaping @MainActor (Audit.Input) async -> Audit.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
-        }) {
+        completionPolicy: CompletionPolicy = .retryPure) {
         self.init(initial, drivers: MainActorDrivers(fetch: fetchDriver, audit: auditDriver),
-            configuration: configuration, completionPolicy: completionPolicy,
-            onReconciliationRequired: onReconciliationRequired)
+            configuration: configuration, completionPolicy: completionPolicy)
     }
     /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
     public convenience init(restoring saved: Int,
         fetchDriver: @escaping @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
-        auditDriver: @escaping @MainActor (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        auditDriver: @escaping @MainActor (Audit.Input) async -> Audit.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @MainActor (PendingCompletion) -> Void = { _ in
-        }) throws(Problem) {
+        completionPolicy: CompletionPolicy = .retryPure) throws(Problem) {
         try self.init(restoring: saved, drivers: MainActorDrivers(fetch: fetchDriver, audit: auditDriver),
-            configuration: configuration, completionPolicy: completionPolicy,
-            onReconciliationRequired: onReconciliationRequired)
+            configuration: configuration, completionPolicy: completionPolicy)
     }
     /// Captures a complete historical observation.
     public func snapshot() -> Snapshot {
@@ -1123,12 +1112,18 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
     @discardableResult
     public func send(_ input: Input) throws(SendRejection) -> Receipt {
-        let result = host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
-            switch Flow.prepare(input, on: _stateMachineSnapshot(raw)) {
-            case .prepared(let prepared):
-                return .success(prepared.candidate)
-            case .rejected(let reason):
-                return .failure(reason)
+        let result = host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, SendRejection> in
+            let prepared: Prepared
+            do throws(PreparationRejection) {
+                prepared = try Flow.prepare(input, on: _stateMachineSnapshot(raw))
+            } catch {
+                return .failure(.preparation(error))
+            }
+            switch prepared.candidate {
+            case .candidate(let candidate):
+                return .success(candidate)
+            case .defective(let defect):
+                return .failure(.commit(defect.rejection(against: raw)))
             }
         }
         switch result {
@@ -1137,13 +1132,17 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
         case .success(.rejected(let reason, _)):
             throw .commit(reason)
         case .failure(let reason):
-            throw .preparation(reason)
+            throw reason
         }
     }
     /// Consumes an explicitly prepared historical candidate, rechecking freshness.
     public func commit(_ prepared: consuming Prepared) -> CommitResult {
-        let candidate = prepared.candidate
-        return _stateMachineAdmission(host.commit(candidate))
+        switch prepared.candidate {
+        case .candidate(let candidate):
+            return _stateMachineAdmission(host.commit(candidate))
+        case .defective(let defect):
+            return _stateMachineAdmission(host.reject(defect))
+        }
     }
     /// Subscribes to initial, accepted and terminal complete snapshots.
     public func subscribe(_ receive: @escaping @MainActor (Snapshot) -> Void,
@@ -1167,53 +1166,63 @@ public let fetch: @MainActor (Fetch.Input) async -> Result<Fetch.Output, Fetch.F
     /// `AsyncSequence` operator on every supported OS version.
     public func snapshots<Projection: Sendable>(
         _ transform: @escaping @MainActor (Snapshot) -> Projection
-    ) throws(SubscriptionFailure) -> RuntimeSnapshots<Projection> {
+    ) throws(SubscriptionFailure) -> StateMachine.SnapshotSequence<Projection> {
         try host.sendableSnapshots {
         transform(_stateMachineSnapshot($0))
     }
     }
-    /// Retains the first terminal outcome and validates current authority.
-    public func deliver(_ completion: Completion) -> DeliveryResult {
-        return Self.project(host.deliver(completion))
-    }
-    /// Delivers the sealed terminal result of one `Fetch` execution.
-public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
-    deliver(.fetch(completion))
-    }
-    /// Delivers the sealed terminal result of one `Audit` execution.
-    public func deliver(_ completion: AuditCompletion) -> DeliveryResult {
-        deliver(.audit(completion))
-    }
     /// Reads immutable retained first-outcome diagnostics.
-    public func pendingCompletions() -> [PendingCompletion] {
-        host.pendingCompletions()
+public func pendingCompletions() -> [PendingCompletion] {
+        host.pendingCompletions().map(PendingCompletion.init)
     }
     /// Explicitly claims a fresh preparation attempt for a retained outcome.
-    public func reconcile(id: PendingCompletionID) -> DeliveryResult {
-        Self.project(host.reconcile(id: id))
+    public func reconcile(id: PendingCompletionID) -> ReconcileResult {
+        Self.reconciled(host.reconcile(id: id.raw))
     }
     /// Revokes retained delivery with an authority-only admission.
-    public func discardPending(id: PendingCompletionID) -> DeliveryResult {
-        Self.project(host.discardPending(id: id))
+    public func discardPending(id: PendingCompletionID) -> DiscardResult {
+        Self.discarded(host.discardPending(id: id.raw))
+    }
+    // The raw host reports only the cases each operation can produce; the rest cannot occur.
+    private static func reconciled(_ result: RuntimeHostDelivery<Flow, Effect>) -> ReconcileResult {
+        switch result {
+        case .committed(let record):
+        return .committed(Receipt(record))
+        case .pending(let id, let status):
+        return .pending(PendingCompletionID(raw: id), status)
+        case .inProgress:
+        return .inProgress
+        default:
+        return .notPending
+        }
+    }
+    private static func discarded(_ result: RuntimeHostDelivery<Flow, Effect>) -> DiscardResult {
+        switch result {
+        case .discarded(let record):
+        return .discarded(Receipt(record))
+        case .rejected(let reason):
+        return .rejected(reason)
+        default:
+        return .notPending
+        }
     }
     /// Closes admission while preserving historical model data.
+    @discardableResult
     public func close() -> Receipt {
         Receipt(host.close())
     }
-    /// Waits for cancellation and launch decisions through this owner-bound receipt.
-    public func flush(through receipt: Receipt) async -> Bool {
-        await host.flush(through: receipt.snapshot.record)
+    /// Waits until cancellation and launch decisions through this owner's receipt have been processed.
+public func flush(through receipt: Receipt) async -> FlushResult {
+    await host.flush(through: receipt.snapshot.record) ? .processed : .foreignOwner
     }
-    /// Closes and joins actual execution and retained delivery obligations.
-    public func shutdown() async {
-        await host.shutdown()
-    }
-    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
-    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
-        if await host.shutdownAndWait(deadline: deadline) {
-            return .quiescent
-        }
-        return .timedOut(host.diagnostics())
+    /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
+    ///
+    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
+    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
+    /// it always returns `.quiescent`.
+    @discardableResult
+    public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        ShutdownResult(await host.shutdown(deadline: deadline))
     }
     /// Actual workers whose joined termination has not yet been processed.
     public var runningCount: Int {
@@ -1227,26 +1236,6 @@ public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
     public var isQuiescent: Bool {
         host.isQuiescent
     }
-    private static func project(_ result: RuntimeHostDelivery<Flow, Effect>) -> DeliveryResult {
-        switch result {
-        case .committed(let record):
-            return .committed(Receipt(record))
-        case .pending(let id, let status):
-            return .pending(id, status)
-        case .inProgress:
-            return .inProgress
-        case .notPending:
-            return .notPending
-        case .stale:
-            return .stale
-        case .foreignOwner:
-            return .foreignOwner
-        case .discarded(let record):
-            return .discarded(Receipt(record))
-        case .rejected(let reason):
-            return .rejected(reason)
-        }
-    }
 }
 
 /// Immutable typed execution selection for one managed owner's lifetime.
@@ -1254,9 +1243,9 @@ public struct Drivers: Sendable {
     /// Executes one typed operation outside admission locks.
 public let fetch: @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>
     /// Executes one typed operation outside admission locks.
-    public let audit: @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>
+    public let audit: @Sendable (Audit.Input) async -> Audit.Output
     /// Selects all drivers for this owner.
-    public init(fetch: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>, audit: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>) {
+    public init(fetch: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>, audit: @escaping @Sendable (Audit.Input) async -> Audit.Output) {
         self.fetch = fetch
         self.audit = audit
     }
@@ -1265,94 +1254,100 @@ public let fetch: @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Fa
 /// A synchronous shared owner with managed physical execution and terminal delivery.
 public final class Shared: Sendable {
     private let host: RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>
+    /// How this owner settles a retained completion that cannot commit when it is delivered.
+    ///
+    /// The default, `.retryPure`, evaluates a completion's router and edge again after another
+    /// commit wins the race, so it assumes those functions are pure. Choose
+    /// `.manual(onReconciliationRequired:)` when they are not.
+    ///
+    /// A handler, when given, runs outside the owner's critical section each time a retained
+    /// completion's status becomes `reconciliationRequired`: its completion edge or router threw,
+    /// its effect plan is defective, the owner refused its admission, or an explicit
+    /// `reconcile(id:)` did not commit. Settle it with `reconcile(id:)` or `discardPending(id:)`.
+    public struct CompletionPolicy: Sendable {
+        fileprivate let runtime: RuntimeCompletionPolicy
+        fileprivate let reconciliationRequired: @Sendable (_StateMachineLedger.Pending) -> Void
+        private init(_ runtime: RuntimeCompletionPolicy, handler: @escaping @Sendable (PendingCompletion) -> Void) {
+            self.runtime = runtime
+            reconciliationRequired = {
+            handler(PendingCompletion($0))
+        }
+        }
+        /// Prepares a completion again against the current state when another commit wins the race,
+        /// at most four times per turn before yielding to other work, and notifies no one.
+        ///
+        /// Choose it only when every completion edge and router is deterministic and free of side
+        /// effects; the compiler does not check that. A completion retained for any other reason
+        /// stays visible only through `pendingCompletions()`.
+        public static var retryPure: CompletionPolicy {
+        CompletionPolicy(.retryPure, handler: { _ in
+            })
+    }
+        /// Retries lost races as `retryPure` does, and passes every completion that still needs
+        /// reconciliation to `handler`.
+        public static func retryPure(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Void) -> CompletionPolicy {
+            CompletionPolicy(.retryPure, handler: handler)
+        }
+        /// Never prepares a completion again on its own: every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        public static func manual(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Void) -> CompletionPolicy {
+            CompletionPolicy(.manualOnConflict, handler: handler)
+        }
+    }
     /// Creates fresh initial authority and retains the driver selection immutably.
-    public init(_ initial: Idle = Flow.makeIdle(), drivers: Drivers, configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) {
+    public init(_ initial: Idle = Flow.makeIdle(), drivers: Drivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) {
         host = RuntimeSharedHost(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
-            policy: completionPolicy, driver: { raw in
-                switch raw.descriptor {
-                            case .fetch(let input):
-                                let work = FetchWork(input: input, authority: raw.ticket)
-                                switch await drivers.fetch(input) {
-                                case .success(let value):
-                    return .fetch(work.succeeded(value))
-                                case .failure(let value):
-                    return .fetch(work.failed(value))
-                                }
-                            case .audit(let input):
-                                let work = AuditWork(input: input, authority: raw.ticket)
-                                switch await drivers.audit(input) {
-                                case .success(let value):
-                    return .audit(work.succeeded(value))
-                                case .failure(let value):
-                    switch value {
-                    }
-                                }
-                            }
+            policy: completionPolicy.runtime, driver: { raw in
+    switch raw.descriptor {
+                case .fetch(let input):
+                    return .fetch(FetchCompletion(result: await drivers.fetch(input), authority: raw.ticket))
+                case .audit(let input):
+                    return .audit(AuditCompletion(value: await drivers.audit(input), authority: raw.ticket))
+                }
             }, ticket: { (outcome: Completion) -> RuntimeTicket in
-                return outcome.authority
-            }, prepare: {
+                outcome.authority
+            },
+            prepare: {
                 _stateMachineDeliveryPreparation($0)
-            }, reconciliationRequired: onReconciliationRequired)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
     }
     /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
-    public init(restoring saved: Int, drivers: Drivers, configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) throws(Problem) {
+    public init(restoring saved: Int, drivers: Drivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) throws(Problem) {
         let restored = try _stateMachineRestored(saved)
         host = RuntimeSharedHost(restored.model, scopes: restored.scopes, limits: configuration.limits, subscriberCapacity: configuration.subscriberCapacity,
-            policy: completionPolicy, driver: { raw in
-                switch raw.descriptor {
-                            case .fetch(let input):
-                                let work = FetchWork(input: input, authority: raw.ticket)
-                                switch await drivers.fetch(input) {
-                                case .success(let value):
-                    return .fetch(work.succeeded(value))
-                                case .failure(let value):
-                    return .fetch(work.failed(value))
-                                }
-                            case .audit(let input):
-                                let work = AuditWork(input: input, authority: raw.ticket)
-                                switch await drivers.audit(input) {
-                                case .success(let value):
-                    return .audit(work.succeeded(value))
-                                case .failure(let value):
-                    switch value {
-                    }
-                                }
-                            }
+            policy: completionPolicy.runtime, driver: { raw in
+    switch raw.descriptor {
+                case .fetch(let input):
+                    return .fetch(FetchCompletion(result: await drivers.fetch(input), authority: raw.ticket))
+                case .audit(let input):
+                    return .audit(AuditCompletion(value: await drivers.audit(input), authority: raw.ticket))
+                }
             }, ticket: { (outcome: Completion) -> RuntimeTicket in
-                return outcome.authority
-            }, prepare: {
+                outcome.authority
+            },
+            prepare: {
                 _stateMachineDeliveryPreparation($0)
-            }, reconciliationRequired: onReconciliationRequired)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
     }
     /// Creates fresh initial authority, selecting one driver closure per operation.
     public convenience init(_ initial: Idle = Flow.makeIdle(),
         fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
-        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Audit.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) {
+        completionPolicy: CompletionPolicy = .retryPure) {
         self.init(initial, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
-            configuration: configuration, completionPolicy: completionPolicy,
-            onReconciliationRequired: onReconciliationRequired)
+            configuration: configuration, completionPolicy: completionPolicy)
     }
     /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
     public convenience init(restoring saved: Int,
         fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
-        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Audit.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) throws(Problem) {
+        completionPolicy: CompletionPolicy = .retryPure) throws(Problem) {
         try self.init(restoring: saved, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
-            configuration: configuration, completionPolicy: completionPolicy,
-            onReconciliationRequired: onReconciliationRequired)
+            configuration: configuration, completionPolicy: completionPolicy)
     }
     /// Captures a coherent historical observation.
     public func snapshot() -> Snapshot {
@@ -1380,88 +1375,94 @@ public final class Shared: Sendable {
     /// a concurrent commit surfaces as `.commit(.conflict)` for the caller to resolve.
     @discardableResult
     public func send(_ input: Input) throws(SendRejection) -> Receipt {
-        switch Flow.prepare(input, on: snapshot()) {
-        case .prepared(let prepared):
-            switch commit(prepared) {
-            case .committed(let receipt):
-                return receipt
-            case .rejected(let reason, _):
-                throw .commit(reason)
-            }
-        case .rejected(let reason):
-            throw .preparation(reason)
+        let prepared: Prepared
+        do {
+            prepared = try Flow.prepare(input, on: snapshot())
+        } catch {
+            throw .preparation(error)
+        }
+        switch commit(prepared) {
+        case .committed(let receipt):
+            return receipt
+        case .rejected(let reason, _):
+            throw .commit(reason)
         }
     }
     /// Consumes one candidate into an atomic admission attempt.
     public func commit(_ prepared: consuming Prepared) -> CommitResult {
-        _stateMachineAdmission(host.commit(prepared.candidate))
+        switch prepared.candidate {
+        case .candidate(let candidate):
+            return _stateMachineAdmission(host.commit(candidate))
+        case .defective(let defect):
+            return _stateMachineAdmission(host.reject(defect))
+        }
     }
-    /// Retains and attempts delivery of the first typed terminal outcome.
-    public func deliver(_ completion: Completion) -> DeliveryResult {
-        return Self.project(host.deliver(completion))
+    /// Reads immutable retained first-outcome diagnostics.
+public func pendingCompletions() -> [PendingCompletion] {
+        host.pendingCompletions().map(PendingCompletion.init)
     }
-    /// Delivers the sealed terminal result of one `Fetch` execution.
-public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
-    deliver(.fetch(completion))
+    /// Explicitly claims a fresh preparation attempt for a retained outcome.
+    public func reconcile(id: PendingCompletionID) -> ReconcileResult {
+        Self.reconciled(host.reconcile(id: id.raw))
     }
-    /// Delivers the sealed terminal result of one `Audit` execution.
-    public func deliver(_ completion: AuditCompletion) -> DeliveryResult {
-        deliver(.audit(completion))
+    /// Revokes retained delivery with an authority-only admission.
+    public func discardPending(id: PendingCompletionID) -> DiscardResult {
+        Self.discarded(host.discardPending(id: id.raw))
     }
-    /// Returns immutable first-outcome diagnostics.
-    public func pendingCompletions() -> [PendingCompletion] {
-        host.pendingCompletions()
+    // The raw host reports only the cases each operation can produce; the rest cannot occur.
+    private static func reconciled(_ result: RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>.Delivery) -> ReconcileResult {
+        switch result {
+        case .committed(let record):
+        return .committed(Receipt(record))
+        case .pending(let id, let status):
+        return .pending(PendingCompletionID(raw: id), status)
+        case .inProgress:
+        return .inProgress
+        default:
+        return .notPending
+        }
     }
-    /// Claims one fresh preparation for a retained outcome.
-    public func reconcile(id: PendingCompletionID) -> DeliveryResult {
-        Self.project(host.reconcile(id: id))
-    }
-    /// Revokes one retained operation by an authority-only commit.
-    public func discardPending(id: PendingCompletionID) -> DeliveryResult {
-        Self.project(host.discardPending(id: id))
+    private static func discarded(_ result: RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>.Delivery) -> DiscardResult {
+        switch result {
+        case .discarded(let record):
+        return .discarded(Receipt(record))
+        case .rejected(let reason):
+        return .rejected(reason)
+        default:
+        return .notPending
+        }
     }
     /// Ends admission and schedules cancellation in FIFO order.
+    @discardableResult
     public func close() -> Receipt {
         Receipt(host.close())
     }
-    /// Waits until cancellation and launch decisions through this receipt have been processed.
-    public func flush(through receipt: Receipt) async -> Bool {
-        await host.flush(through: receipt.snapshot.record)
+    /// Waits until cancellation and launch decisions through this owner's receipt have been processed.
+public func flush(through receipt: Receipt) async -> FlushResult {
+    await host.flush(through: receipt.snapshot.record) ? .processed : .foreignOwner
     }
-    /// Closes and waits for actual execution termination and retained obligation settlement.
-    public func shutdown() async {
-        await host.shutdown()
+    /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
+    ///
+    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
+    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
+    /// it always returns `.quiescent`.
+    @discardableResult
+    public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        ShutdownResult(await host.shutdown(deadline: deadline))
     }
-    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked.
-    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
-        if await host.shutdownAndWait(deadline: deadline) {
-            return .quiescent
+    /// Actual workers whose joined termination has not yet been processed.
+    public var runningCount: Int {
+        get async {
+            await host.runningCount
         }
-        return .timedOut(host.diagnostics())
+    }
+    /// Live observer registrations.
+    public var subscriberCount: Int {
+        host.subscriberCount
     }
     /// Whether closure and all managed obligations have settled.
     public var isQuiescent: Bool {
         host.isQuiescent
-    }
-    private static func project(_ result: RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>.Delivery) -> DeliveryResult {
-        switch result {
-        case .committed(let record):
-            return .committed(Receipt(record))
-        case .pending(let id, let status):
-            return .pending(id, status)
-        case .inProgress:
-            return .inProgress
-        case .notPending:
-            return .notPending
-        case .stale:
-            return .stale
-        case .foreignOwner:
-            return .foreignOwner
-        case .discarded(let record):
-            return .discarded(Receipt(record))
-        case .rejected(let reason):
-            return .rejected(reason)
-        }
     }
 }
 
@@ -1469,96 +1470,100 @@ public func deliver(_ completion: FetchCompletion) -> DeliveryResult {
 public final class ActorHost: Sendable {
     private typealias Host = RuntimeActorHost<Flow, Effect, Completion, PreparationRejection>
     private let host: Host
+    /// How this owner settles a retained completion that cannot commit when it is delivered.
+    ///
+    /// The default, `.retryPure`, evaluates a completion's router and edge again after another
+    /// commit wins the race, so it assumes those functions are pure. Choose
+    /// `.manual(onReconciliationRequired:)` when they are not.
+    ///
+    /// A handler, when given, runs outside the owner's critical section each time a retained
+    /// completion's status becomes `reconciliationRequired`: its completion edge or router threw,
+    /// its effect plan is defective, the owner refused its admission, or an explicit
+    /// `reconcile(id:)` did not commit. Settle it with `reconcile(id:)` or `discardPending(id:)`.
+    public struct CompletionPolicy: Sendable {
+        fileprivate let runtime: RuntimeCompletionPolicy
+        fileprivate let reconciliationRequired: @Sendable (_StateMachineLedger.Pending) -> Void
+        private init(_ runtime: RuntimeCompletionPolicy, handler: @escaping @Sendable (PendingCompletion) -> Void) {
+            self.runtime = runtime
+            reconciliationRequired = {
+            handler(PendingCompletion($0))
+        }
+        }
+        /// Prepares a completion again against the current state when another commit wins the race,
+        /// at most four times per turn before yielding to other work, and notifies no one.
+        ///
+        /// Choose it only when every completion edge and router is deterministic and free of side
+        /// effects; the compiler does not check that. A completion retained for any other reason
+        /// stays visible only through `pendingCompletions()`.
+        public static var retryPure: CompletionPolicy {
+        CompletionPolicy(.retryPure, handler: { _ in
+            })
+    }
+        /// Retries lost races as `retryPure` does, and passes every completion that still needs
+        /// reconciliation to `handler`.
+        public static func retryPure(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Void) -> CompletionPolicy {
+            CompletionPolicy(.retryPure, handler: handler)
+        }
+        /// Never prepares a completion again on its own: every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        public static func manual(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Void) -> CompletionPolicy {
+            CompletionPolicy(.manualOnConflict, handler: handler)
+        }
+    }
     /// Creates fresh authority and immutable execution selections.
-    public init(_ initial: Idle = Flow.makeIdle(), drivers: Drivers, configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) {
+    public init(_ initial: Idle = Flow.makeIdle(), drivers: Drivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) {
         host = Host(.idle(initial), scopes: [RuntimeScopeID(kind: 1)], configuration: configuration,
-            policy: completionPolicy, driver: { raw in
-                switch raw.descriptor {
-                            case .fetch(let input):
-                                let work = FetchWork(input: input, authority: raw.ticket)
-                                switch await drivers.fetch(input) {
-                                case .success(let value):
-                    return .fetch(work.succeeded(value))
-                                case .failure(let value):
-                    return .fetch(work.failed(value))
-                                }
-                            case .audit(let input):
-                                let work = AuditWork(input: input, authority: raw.ticket)
-                                switch await drivers.audit(input) {
-                                case .success(let value):
-                    return .audit(work.succeeded(value))
-                                case .failure(let value):
-                    switch value {
-                    }
-                                }
-                            }
+            policy: completionPolicy.runtime, driver: { raw in
+    switch raw.descriptor {
+                case .fetch(let input):
+                    return .fetch(FetchCompletion(result: await drivers.fetch(input), authority: raw.ticket))
+                case .audit(let input):
+                    return .audit(AuditCompletion(value: await drivers.audit(input), authority: raw.ticket))
+                }
             }, ticket: { (outcome: Completion) -> RuntimeTicket in
-                return outcome.authority
+                outcome.authority
             },
             prepare: {
                 _stateMachineDeliveryPreparation($0)
-            }, reconciliationRequired: onReconciliationRequired)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
     }
     /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
-    public init(restoring saved: Int, drivers: Drivers, configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) throws(Problem) {
+    public init(restoring saved: Int, drivers: Drivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) throws(Problem) {
         let restored = try _stateMachineRestored(saved)
         host = Host(restored.model, scopes: restored.scopes, configuration: configuration,
-            policy: completionPolicy, driver: { raw in
-                switch raw.descriptor {
-                            case .fetch(let input):
-                                let work = FetchWork(input: input, authority: raw.ticket)
-                                switch await drivers.fetch(input) {
-                                case .success(let value):
-                    return .fetch(work.succeeded(value))
-                                case .failure(let value):
-                    return .fetch(work.failed(value))
-                                }
-                            case .audit(let input):
-                                let work = AuditWork(input: input, authority: raw.ticket)
-                                switch await drivers.audit(input) {
-                                case .success(let value):
-                    return .audit(work.succeeded(value))
-                                case .failure(let value):
-                    switch value {
-                    }
-                                }
-                            }
+            policy: completionPolicy.runtime, driver: { raw in
+    switch raw.descriptor {
+                case .fetch(let input):
+                    return .fetch(FetchCompletion(result: await drivers.fetch(input), authority: raw.ticket))
+                case .audit(let input):
+                    return .audit(AuditCompletion(value: await drivers.audit(input), authority: raw.ticket))
+                }
             }, ticket: { (outcome: Completion) -> RuntimeTicket in
-                return outcome.authority
+                outcome.authority
             },
             prepare: {
                 _stateMachineDeliveryPreparation($0)
-            }, reconciliationRequired: onReconciliationRequired)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
     }
     /// Creates fresh initial authority, selecting one driver closure per operation.
     public convenience init(_ initial: Idle = Flow.makeIdle(),
         fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
-        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Audit.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) {
+        completionPolicy: CompletionPolicy = .retryPure) {
         self.init(initial, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
-            configuration: configuration, completionPolicy: completionPolicy,
-            onReconciliationRequired: onReconciliationRequired)
+            configuration: configuration, completionPolicy: completionPolicy)
     }
     /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
     public convenience init(restoring saved: Int,
         fetchDriver: @escaping @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>,
-        auditDriver: @escaping @Sendable (Audit.Input) async -> Result<Audit.Output, Audit.Failure>,
+        auditDriver: @escaping @Sendable (Audit.Input) async -> Audit.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .manualOnConflict,
-        onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in
-        }) throws(Problem) {
+        completionPolicy: CompletionPolicy = .retryPure) throws(Problem) {
         try self.init(restoring: saved, drivers: Drivers(fetch: fetchDriver, audit: auditDriver),
-            configuration: configuration, completionPolicy: completionPolicy,
-            onReconciliationRequired: onReconciliationRequired)
+            configuration: configuration, completionPolicy: completionPolicy)
     }
     /// Captures a complete historical observation.
     public func snapshot() async -> Snapshot {
@@ -1567,12 +1572,18 @@ public final class ActorHost: Sendable {
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
     @discardableResult
     public func send(_ input: Input) async throws(SendRejection) -> Receipt {
-        let result = await host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, PreparationRejection> in
-            switch Flow.prepare(input, on: _stateMachineSnapshot(raw)) {
-            case .prepared(let prepared):
-                return .success(prepared.candidate)
-            case .rejected(let reason):
-                return .failure(reason)
+        let result = await host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, SendRejection> in
+            let prepared: Prepared
+            do throws(PreparationRejection) {
+                prepared = try Flow.prepare(input, on: _stateMachineSnapshot(raw))
+            } catch {
+                return .failure(.preparation(error))
+            }
+            switch prepared.candidate {
+            case .candidate(let candidate):
+                return .success(candidate)
+            case .defective(let defect):
+                return .failure(.commit(defect.rejection(against: raw)))
             }
         }
         switch result {
@@ -1581,13 +1592,17 @@ public final class ActorHost: Sendable {
         case .success(.rejected(let reason, _)):
             throw .commit(reason)
         case .failure(let reason):
-            throw .preparation(reason)
+            throw reason
         }
     }
     /// Consumes an explicitly prepared historical candidate, rechecking freshness.
     public func commit(_ prepared: consuming Prepared) async -> CommitResult {
-        let candidate = prepared.candidate
-        return _stateMachineAdmission(await host.commit(candidate))
+        switch prepared.candidate {
+        case .candidate(let candidate):
+            return _stateMachineAdmission(await host.commit(candidate))
+        case .defective(let defect):
+            return _stateMachineAdmission(await host.reject(defect))
+        }
     }
     /// Subscribes to initial, accepted and terminal complete snapshots.
     public func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Void,
@@ -1606,48 +1621,58 @@ public final class ActorHost: Sendable {
         }
     }
 
-    /// Retains the first terminal outcome and validates current authority.
-    public func deliver(_ completion: Completion) async -> DeliveryResult {
-        return Self.project(await host.deliver(completion))
-    }
-    /// Delivers the sealed terminal result of one `Fetch` execution.
-public func deliver(_ completion: FetchCompletion) async -> DeliveryResult {
-    await deliver(.fetch(completion))
-    }
-    /// Delivers the sealed terminal result of one `Audit` execution.
-    public func deliver(_ completion: AuditCompletion) async -> DeliveryResult {
-        await deliver(.audit(completion))
-    }
     /// Reads immutable retained first-outcome diagnostics.
-    public func pendingCompletions() async -> [PendingCompletion] {
-        await host.pendingCompletions()
+public func pendingCompletions() async -> [PendingCompletion] {
+        await host.pendingCompletions().map(PendingCompletion.init)
     }
     /// Explicitly claims a fresh preparation attempt for a retained outcome.
-    public func reconcile(id: PendingCompletionID) async -> DeliveryResult {
-        Self.project(await host.reconcile(id: id))
+    public func reconcile(id: PendingCompletionID) async -> ReconcileResult {
+        Self.reconciled(await host.reconcile(id: id.raw))
     }
     /// Revokes retained delivery with an authority-only admission.
-    public func discardPending(id: PendingCompletionID) async -> DeliveryResult {
-        Self.project(await host.discardPending(id: id))
+    public func discardPending(id: PendingCompletionID) async -> DiscardResult {
+        Self.discarded(await host.discardPending(id: id.raw))
+    }
+    // The raw host reports only the cases each operation can produce; the rest cannot occur.
+    private static func reconciled(_ result: RuntimeHostDelivery<Flow, Effect>) -> ReconcileResult {
+        switch result {
+        case .committed(let record):
+        return .committed(Receipt(record))
+        case .pending(let id, let status):
+        return .pending(PendingCompletionID(raw: id), status)
+        case .inProgress:
+        return .inProgress
+        default:
+        return .notPending
+        }
+    }
+    private static func discarded(_ result: RuntimeHostDelivery<Flow, Effect>) -> DiscardResult {
+        switch result {
+        case .discarded(let record):
+        return .discarded(Receipt(record))
+        case .rejected(let reason):
+        return .rejected(reason)
+        default:
+        return .notPending
+        }
     }
     /// Closes admission while preserving historical model data.
+    @discardableResult
     public func close() async -> Receipt {
         Receipt(await host.close())
     }
-    /// Waits for cancellation and launch decisions through this owner-bound receipt.
-    public func flush(through receipt: Receipt) async -> Bool {
-        await host.flush(through: receipt.snapshot.record)
+    /// Waits until cancellation and launch decisions through this owner's receipt have been processed.
+public func flush(through receipt: Receipt) async -> FlushResult {
+    await host.flush(through: receipt.snapshot.record) ? .processed : .foreignOwner
     }
-    /// Closes and joins actual execution and retained delivery obligations.
-    public func shutdown() async {
-        await host.shutdown()
-    }
-    /// Closes and waits for settlement through an optional deadline; outstanding work stays tracked after a timeout.
-    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
-        if await host.shutdownAndWait(deadline: deadline) {
-            return .quiescent
-        }
-        return .timedOut(await host.diagnostics())
+    /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
+    ///
+    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
+    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
+    /// it always returns `.quiescent`.
+    @discardableResult
+    public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+        ShutdownResult(await host.shutdown(deadline: deadline))
     }
     /// Actual workers whose joined termination has not yet been processed.
     public var runningCount: Int {
@@ -1665,26 +1690,6 @@ public func deliver(_ completion: FetchCompletion) async -> DeliveryResult {
     public var isQuiescent: Bool {
         get async {
             await host.isQuiescent
-        }
-    }
-    private static func project(_ result: RuntimeHostDelivery<Flow, Effect>) -> DeliveryResult {
-        switch result {
-        case .committed(let record):
-            return .committed(Receipt(record))
-        case .pending(let id, let status):
-            return .pending(id, status)
-        case .inProgress:
-            return .inProgress
-        case .notPending:
-            return .notPending
-        case .stale:
-            return .stale
-        case .foreignOwner:
-            return .foreignOwner
-        case .discarded(let record):
-            return .discarded(Receipt(record))
-        case .rejected(let reason):
-            return .rejected(reason)
         }
     }
 }

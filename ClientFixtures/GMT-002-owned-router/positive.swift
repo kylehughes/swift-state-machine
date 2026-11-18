@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 
 @StateMachine(mode: .ownedOnly)
 nonisolated enum UniqueCounter: ~Copyable {

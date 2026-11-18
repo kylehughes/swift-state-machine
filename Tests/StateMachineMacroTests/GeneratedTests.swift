@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 import Testing
 
 @StateMachine(mode: .shared)
@@ -16,12 +15,12 @@ nonisolated enum Counter: Sendable {
 }
 
 @Test func generatedLocalAcceptsOneHistoricalCandidate() throws {
-    var owner = Counter.Local(Counter.Idle(value: [:]), configuration: try RuntimeLimits())
+    var owner = Counter.Local(Counter.Idle(value: [:]), configuration: try Limits())
     guard case .idle(let idle) = owner.snapshot() else {
         Issue.record("wrong initial phase")
         return
     }
-    let candidate = try idle.finish(3)
+    let candidate = idle.finish(3)
     guard case .committed(let receipt) = owner.commit(candidate) else {
         Issue.record("rejected candidate")
         return
@@ -32,10 +31,14 @@ nonisolated enum Counter: Sendable {
         return
     }
     #expect(done.value.value == 3)
-    #expect(owner.drainCommands(limit: 1).count == 1)
-    guard case .rejected(.invalidPhase) = Counter.prepare(.finish(4), on: owner.snapshot()) else {
+    do {
+        _ = try Counter.prepare(.finish(4), on: owner.snapshot())
         Issue.record("dynamic route accepted wrong phase")
-        return
+    } catch {
+        guard case .invalidPhase = error else {
+            Issue.record("dynamic route rejected the wrong phase for another reason")
+            return
+        }
     }
 }
 
@@ -83,7 +86,7 @@ nonisolated enum UniqueCounter: ~Copyable {
         Issue.record("wrong phase")
         return
     }
-    guard case .committed(let receipt) = owner.commit(try idle.finish()), case .done(let done) = receipt.snapshot else {
+    guard case .committed(let receipt) = owner.commit(idle.finish()), case .done(let done) = receipt.snapshot else {
         Issue.record("isolated candidate rejected")
         return
     }

@@ -58,21 +58,22 @@ import Testing
             oracle.acknowledge(ticket)
         }
         if invalidate {
-            guard case .committed = generated.commit(try gLoading.authenticationChanged()),
+            guard case .committed = generated.commit(gLoading.authenticationChanged()),
                 case .committed = handwritten.commit(handwritten.snapshot().authenticationChanged()),
                 case .committed = oracle.commit(try oracle.prepare(.authentication))
             else { throw Failure.unexpected }
         }
-        guard case .success(let gOutcome) = gWork.succeeded(Profile(userID: user, name: "2")),
-            case .success(let hOutcome) = hWork.succeeded(Profile(userID: user, name: "2")),
-            case .loading(let gCurrent) = generated.snapshot(), case .loading(let hCurrent) = handwritten.snapshot()
+        let gOutcome = gWork.succeeded(Profile(userID: user, name: "2"))
+        guard case .success(let hOutcome) = hWork.succeeded(Profile(userID: user, name: "2")),
+            case .loading(let hCurrent) = handwritten.snapshot()
         else { throw Failure.unexpected }
         let expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .success(2)))
-        let gResult = generated.commit(try gCurrent.received(gOutcome))
-        let hResult = handwritten.commit(try hCurrent.received(hOutcome))
+        // The generated owner admits a completion only through delivery; revoked authority makes it stale.
+        let gResult = generated.deliver(gOutcome)
+        let hResult = handwritten.commit(hCurrent.received(hOutcome))
         if invalidate {
-            guard case .rejected(.inactiveAuthority) = expected,
-                case .rejected(.inactiveAuthority, _) = gResult, case .rejected(.inactiveAuthority, _) = hResult
+            guard case .rejected(.inactiveAuthority) = expected, case .stale = gResult,
+                case .rejected(.inactiveAuthority, _) = hResult
             else { throw Failure.unexpected }
         } else {
             guard case .committed = expected, case .committed = gResult, case .committed = hResult else {
@@ -81,8 +82,8 @@ import Testing
         }
         compare(generated.snapshot(), handwritten.snapshot(), oracle.snapshot)
         // A copied outcome cannot authorize a second admission, even with its original phase observation.
-        guard case .rejected(.inactiveAuthority, _) = generated.commit(try gLoading.received(gOutcome)),
-            case .rejected(.inactiveAuthority, _) = handwritten.commit(try hLoading.received(hOutcome)),
+        guard case .stale = generated.deliver(gOutcome),
+            case .rejected(.inactiveAuthority, _) = handwritten.commit(hLoading.received(hOutcome)),
             case .rejected(.inactiveAuthority) = oracle.commit(
                 try oracle.prepareCompletion(ticket, outcome: .success(2), on: prior)
             )

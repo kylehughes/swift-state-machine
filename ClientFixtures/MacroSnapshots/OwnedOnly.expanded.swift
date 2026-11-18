@@ -41,9 +41,15 @@ internal struct Owned<Phase: ~Copyable>: ~Copyable {
     fileprivate init(_ phase: consuming Phase) {
         self.phase = phase
     }
-    /// Borrows the payload without copying a unique resource.
-    internal borrowing func withValue<Result>(_ body: (borrowing Phase) -> Result) -> Result {
-        body(phase)
+    /// Borrows the payload without copying a unique resource, returning what `body` returns or throws.
+    internal borrowing func withValue<Result: ~Copyable, Failure: Error>(
+        _ body: (borrowing Phase) throws(Failure) -> Result
+    ) throws(Failure) -> Result {
+        try body(phase)
+    }
+    /// Consumes this authority and returns its payload, so a unique resource can move on.
+    internal consuming func takeValue() -> Phase {
+        phase
     }
     /// Consumes the predecessor and preserves it on authored rejection.
 internal consuming func finish(_ input: Bool) -> Advance<Self, Owned<Done>, Never, Rejection> where Phase == Idle {
@@ -54,6 +60,7 @@ internal consuming func finish(_ input: Bool) -> Advance<Self, Owned<Done>, Neve
         return .rejected(failure, Owned<Idle>(original))
     }
     }
+
 }
 
 /// Creates ownership only in the declared initial phase.

@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 
 /// A generated profile workflow with typed operations and sealed host authority.
 @StateMachine(mode: .shared)

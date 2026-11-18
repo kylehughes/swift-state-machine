@@ -22,12 +22,17 @@ nonisolated public enum StateMachineAdmission: Sendable {
 ///
 /// Phases are the enum's cases, each carrying a distinct nested payload type; `@Initial` marks the
 /// starting phase. Inputs are the cases of a nested `Input` enum, and invalidation scopes are the
-/// cases of an optional nested `Scope` enum. Other metadata is a reference the compiler resolves:
+/// cases of an optional nested `Scope` enum, which a schema needs only when an operation names a
+/// scope or an edge invalidates one. Other metadata is a reference the compiler resolves:
 /// `Input.load`, `Scope.load`, `Loading.self`.
 ///
 /// Every mode generates `Effect`, with one case per `@Operation` namespace, and the owners that
 /// mode supports. The `.shared` and `.isolated` modes also generate typed work and completion
-/// values for each operation and a `Restoration` enum for the phases a validator may restore.
+/// values for each operation and a `Restoration` enum for the phases a validator may restore. A
+/// schema without operations generates no work, completion, command, or delivery surface.
+///
+/// A `Local` owner queues a command batch only for an acceptance that starts or cancels work, and
+/// for closure, so it admits any number of other inputs without draining.
 ///
 /// Schema, case, operation, and edge names use unescaped Swift identifiers.
 /// Generated facade names and required support-type spellings are reserved in the schema.
@@ -52,12 +57,19 @@ public macro Initial() = #externalMacro(module: "StateMachineMacros", type: "Met
 ///
 /// Apply it to at most one static function directly inside a `.shared` or `.isolated` schema. The
 /// function takes the saved data as its one unlabeled parameter and returns the generated `Restoration`, which
-/// has one case per phase in which no operation is active, so saved data can never resume work. It
+/// has one case per phase in which no operation is active, plus one per phase listed in `allows`. It
 /// may use typed throws to reject the data. Each generated owner except `Owned` then gains an
 /// initializer labeled `restoring:` that calls it and creates fresh authority at revision zero in
-/// the returned phase.
+/// the returned phase, with no outstanding work, exactly as a fresh owner starting in that phase.
+/// Saved data never resumes work.
+///
+/// - Parameter allows: Phases that saved data may restore even when an operation may be active in
+///   them, written `<Phase payload>.self`. A phase in which no operation is active is restorable
+///   without being listed; listing it pins it, so it stays restorable if an operation later becomes
+///   active there.
 @attached(peer)
-public macro Restoration() = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
+public macro Restoration(allows: [any (~Copyable).Type] = []) =
+    #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
 /// Describes one synchronous authored transition taken when an input arrives.
 ///
@@ -84,6 +96,11 @@ public macro Transition(on: Any, invalidates: [Any] = [], starts: [Any.Type] = [
 
 /// Describes one synchronous authored transition taken when an operation succeeds.
 ///
+/// Delivery is the only way to prepare this edge for an owner, so the first outcome an owner
+/// retains is the only one that can commit. An observed phase has no method for it; an `Owned`
+/// phase has one that takes the operation's `Output`, unless a router chooses among this edge and
+/// others, in which case the `Owned` phase has the router's method instead.
+///
 /// - Parameters:
 ///   - onSuccess: The completing operation, written `<Operation>.self`.
 ///   - invalidates: Scopes whose authority the edge revokes, written `Scope.<case>`.
@@ -93,6 +110,10 @@ public macro Transition(onSuccess: Any.Type, invalidates: [Any] = [], starts: [A
     #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
 /// Describes one synchronous authored transition taken when an operation fails.
+///
+/// Delivery is the only way to prepare this edge for an owner. An observed phase has no method
+/// for it; an `Owned` phase has one that takes the operation's `Failure`, unless a router chooses
+/// among this edge and others, in which case the `Owned` phase has the router's method instead.
 ///
 /// - Parameters:
 ///   - onFailure: The completing operation, written `<Operation>.self`.
@@ -104,21 +125,27 @@ public macro Transition(onFailure: Any.Type, invalidates: [Any] = [], starts: [A
 
 /// Declares one operation's typed aliases and its lifetime metadata.
 ///
-/// The namespace is the operation's identity and declares `Input`, `Output`, and `Failure`
-/// aliases. The generated `Effect` gains one case for it, named by lower-casing the namespace's
-/// leading capitals: `Fetch` is requested with `.fetch(input)`.
+/// The namespace is the operation's identity and declares `Input` and `Output` aliases, and a
+/// `Failure` alias unless the operation cannot fail. Without one, `Failure` is `Never`, the
+/// operation's driver returns its `Output` directly, and its completion and pending outcome carry
+/// that output as a plain value instead of a `Result`. The generated `Effect` gains one case for it,
+/// named by lower-casing the namespace's leading capitals: `Fetch` is requested with `.fetch(input)`.
 ///
 /// - Parameters:
 ///   - scope: The primary scope whose authority the operation holds, written `Scope.<case>`.
+///     Operations that share a primary scope declare the same `activeIn` phases, and an edge that
+///     invalidates the scope revokes all of them. Without one, the operation holds a private scope
+///     that is active exactly in its `activeIn` phases and that no edge can name.
 ///   - requires: Additional scopes the operation depends on, written `Scope.<case>`.
-///   - activeIn: Phases in which the operation may run, written `<Phase payload>.self`.
+///   - activeIn: Phases in which the operation may run, written `<Phase payload>.self`. Leaving them
+///     revokes the operation's work.
 ///   - admission: The policy for admitting concurrent work.
 @attached(peer)
 public macro Operation(
-    scope: Any,
+    scope: Any? = nil,
     requires: [Any] = [],
     activeIn: [any (~Copyable).Type],
-    admission: StateMachineAdmission
+    admission: StateMachineAdmission = .latest
 ) = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
 /// Chooses among the edges that share a source phase and an input.
@@ -128,6 +155,14 @@ public macro Operation(
 /// one case per candidate edge. It may use typed throws to decline. A router with no candidate
 /// edge returns `Never` and throws.
 ///
+/// The router's name becomes the method of the observed and owned source phase for that input,
+/// and its candidate edges have no methods of their own, so a typed call obeys the router exactly
+/// as `send` does. The observed method returns `Prepared` and throws the failure type that the
+/// router and its candidates share, or `PreparationRejection` when their failure types differ. The
+/// owned method returns the candidates' shared result when the router cannot throw and they all
+/// return one type, and otherwise `Route.<Router>Result`, with a case per candidate and, when the
+/// router throws, `rejected(_:_:)` holding the failure and the unchanged source.
+///
 /// - Parameter on: The triggering case, written `Input.<case>`.
 @attached(peer)
 public macro Route(on: Any) = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
@@ -135,7 +170,8 @@ public macro Route(on: Any) = #externalMacro(module: "StateMachineMacros", type:
 /// Chooses among the edges that share a source phase and an operation's success.
 ///
 /// The router takes the source phase payload and the operation's `Output` value, the same
-/// parameters as the edge it selects.
+/// parameters as the edge it selects. Delivery runs it, and an owned source phase has a method
+/// named after it in place of its candidate edges, which returns as an input router's owned method does.
 ///
 /// - Parameter onSuccess: The completing operation, written `<Operation>.self`.
 @attached(peer)
@@ -144,7 +180,8 @@ public macro Route(onSuccess: Any.Type) = #externalMacro(module: "StateMachineMa
 /// Chooses among the edges that share a source phase and an operation's failure.
 ///
 /// The router takes the source phase payload and the operation's `Failure` value, the same
-/// parameters as the edge it selects.
+/// parameters as the edge it selects. Delivery runs it, and an owned source phase has a method
+/// named after it in place of its candidate edges, which returns as an input router's owned method does.
 ///
 /// - Parameter onFailure: The completing operation, written `<Operation>.self`.
 @attached(peer)

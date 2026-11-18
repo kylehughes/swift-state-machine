@@ -113,7 +113,7 @@
   {
     "id": "GCT-003",
     "pattern": "requires the types|no member",
-    "scope": "generated production facade separate-module authority boundary"
+    "scope": "generated production facade separate-module authority boundary: an edge from another phase"
   },
   {
     "id": "GCT-006",
@@ -132,8 +132,8 @@
   },
   {
     "id": "GCT-009",
-    "pattern": "cannot convert value.*AuditSuccessCompletion.*FetchSuccessCompletion",
-    "scope": "generated production facade separate-module authority boundary"
+    "pattern": "cannot convert value.*FetchCompletion.*AuditCompletion",
+    "scope": "generated delivery distinguishes each operation's sealed completion"
   },
   {
     "id": "GCT-010",
@@ -147,13 +147,13 @@
   },
   {
     "id": "GCT-019",
-    "pattern": "cannot convert value.*FetchSuccessCompletion",
-    "scope": "generated production facade separate-module authority boundary"
+    "pattern": "no exact matches in call to instance method 'deliver'|cannot convert value.*Profile",
+    "scope": "generated delivery admits only a sealed success, never a bare Output"
   },
   {
     "id": "GCT-020",
-    "pattern": "cannot convert value.*FetchFailureCompletion",
-    "scope": "generated production facade separate-module authority boundary"
+    "pattern": "no exact matches in call to instance method 'deliver'|cannot convert value.*ProfileFailure",
+    "scope": "generated delivery admits only a sealed failure, never a bare Failure"
   },
   {
     "id": "CT-009-work",
@@ -166,14 +166,59 @@
     "scope": "distinct operation work boundary"
   },
   {
+    "id": "GCT-completion-edge",
+    "pattern": "inaccessible",
+    "scope": "a generated observation's completion edge is reached only through delivery, so client code cannot commit a second outcome"
+  },
+  {
+    "id": "GCT-routed-branch",
+    "pattern": "inaccessible",
+    "scope": "a routed edge is reached only through its router's method, so a typed call cannot skip the router"
+  },
+  {
+    "id": "GCT-routed-completion",
+    "pattern": "inaccessible",
+    "scope": "an owned phase reaches a routed completion edge only through its router's method, so a typed call cannot skip the router"
+  },
+  {
+    "id": "GCT-presentation-names",
+    "pattern": "cannot find",
+    "scope": "the Observation presentations are StateMachinePresentation and SnapshotPresentation, and the Combine ones are StateMachineObservableObject and SnapshotObservableObject"
+  },
+  {
+    "id": "GCT-pending-id",
+    "pattern": "cannot convert value.*PendingCompletionID",
+    "scope": "each generated schema has a nominal pending identity, so another graph's ID does not type-check"
+  },
+  {
+    "id": "GCT-managed-deliver",
+    "pattern": "no member 'deliver'",
+    "scope": "a generated managed owner runs its own work and offers no deliver"
+  },
+  {
     "id": "GCT-restoration",
     "pattern": "no member 'loading'",
-    "scope": "generated restoration names only phases in which no operation is active"
+    "scope": "generated restoration names only phases in which no operation is active, and those listed in allows"
   },
   {
     "id": "GCT-restoration-undeclared",
     "pattern": "incorrect argument label|extraneous argument label",
     "scope": "a schema without a restoration function generates no restoring initializer"
+  },
+  {
+    "id": "GCT-restoration-allows",
+    "pattern": "no member 'publishing'",
+    "scope": "a phase in which an operation can be active is restorable only when the @Restoration function lists it in allows"
+  },
+  {
+    "id": "GCT-driver-bare",
+    "pattern": "cannot convert value.*Result<.*Saved.*Never>|Result<.*Saved.*Never>.*to closure result type",
+    "scope": "a driver for an operation that cannot fail returns its output, not a Result"
+  },
+  {
+    "id": "GCT-driver-result",
+    "pattern": "cannot convert value of type 'Profile' to closure result type 'Result<",
+    "scope": "a driver for an operation that can fail returns a Result, not a bare output"
   },
   {
     "id": "GMT-002",
@@ -304,5 +349,25 @@
     "id": "GHOST-ActorSealing",
     "pattern": "inaccessible",
     "scope": "G5 normal-import generated confined host boundary"
+  },
+  {
+    "id": "GCT-shutdown-verb",
+    "pattern": "no member 'shutdownAndWait'",
+    "scope": "a managed owner has one shutdown verb, whose optional deadline reports what is outstanding"
+  },
+  {
+    "id": "GCT-package-runtime",
+    "pattern": "cannot find type 'RuntimeCoordinator' in scope|inaccessible",
+    "scope": "the runtime's execution coordinator is package machinery that a client cannot name"
+  },
+  {
+    "id": "GCT-package-host-entry",
+    "pattern": "inaccessible|no member 'drainCommands'",
+    "scope": "draining and acknowledging a raw manually driven shared host are package entry points"
+  },
+  {
+    "id": "GCT-infallible-failed",
+    "pattern": "no member 'failed'",
+    "scope": "the work of an operation that cannot fail seals no failure"
   }
 ]

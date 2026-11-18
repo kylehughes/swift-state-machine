@@ -1,6 +1,5 @@
 import StateMachine
 import StateMachineExamples
-import StateMachineSchema
 import StateMachineUI
 import Combine
 import Foundation
@@ -85,7 +84,7 @@ nonisolated private struct ResultFile: Encodable {
         let request = try ProfileRequest(userID: user)
         let network = ControlledProfileNetwork()
         let drivers = network.drivers
-        let editor = try ProfileEditor(
+        let editor = ProfileEditor(
             request: request,
             drivers: GeneratedProfile.MainActorDrivers(fetch: drivers.fetch, audit: drivers.audit)
         )
@@ -193,11 +192,9 @@ nonisolated private struct ResultFile: Encodable {
     }
     private func openAccountInvalidation(_ request: ProfileRequest, user: UserID) throws -> UInt64 {
         var local = GeneratedProfile.Local(GeneratedProfile.Idle(userID: user))
-        guard case .prepared(let start) = GeneratedProfile.prepare(.load(request), on: local.snapshot()),
-            case .committed = local.commit(start),
+        guard case .committed = local.commit(try GeneratedProfile.prepare(.load(request), on: local.snapshot())),
             case .fetch(let work) = local.drainCommands(limit: 1).first?.commands.first,
-            case .prepared(let invalidation) = GeneratedProfile.prepare(.authenticationChanged, on: local.snapshot()),
-            case .committed = local.commit(invalidation)
+            case .committed = local.commit(try GeneratedProfile.prepare(.authenticationChanged, on: local.snapshot()))
         else { throw SmokeFailure(message: "Open-owner account invalidation setup failed") }
         let revision = local.snapshot().revision
         guard case .stale = local.deliver(.fetch(work.succeeded(Profile(userID: user, name: "Unauthorized late value"))))
@@ -246,8 +243,7 @@ nonisolated private struct ResultFile: Encodable {
         let user = try UserID("actor-user")
         let request = try ProfileRequest(userID: user)
         var local = GeneratedProfile.Local(GeneratedProfile.Idle(userID: user))
-        guard case .prepared(let preparation) = GeneratedProfile.prepare(.load(request), on: local.snapshot()),
-            case .committed = local.commit(preparation),
+        guard case .committed = local.commit(try GeneratedProfile.prepare(.load(request), on: local.snapshot())),
             case .fetch(let work) = local.drainCommands(limit: 1).first?.commands.first
         else { throw SmokeFailure(message: "Local did not issue typed work") }
         guard case .committed = local.deliver(.fetch(work.succeeded(Profile(userID: user, name: "Actor value")))) else {
@@ -337,8 +333,8 @@ nonisolated private struct ResultFile: Encodable {
         guard case .rejected(.foreignOwner, _) = restored.commit(old) else {
             throw SmokeFailure(message: "Restoration adopted old owner authority")
         }
-        _ = await source.shutdownAndWait()
-        _ = await restored.shutdownAndWait()
+        await source.shutdown()
+        await restored.shutdown()
         passed(
             "PERSISTENCE",
             [
@@ -350,7 +346,7 @@ nonisolated private struct ResultFile: Encodable {
     private func terminalSubscription() async throws {
         let owner = GeneratedNote.MainActorHost(
             GeneratedNote.Draft(text: "terminal"),
-            saveDriver: { .success(GeneratedNote.Saved(text: $0.text)) }
+            saveDriver: { GeneratedNote.Saved(text: $0.text) }
         )
         var revisions: [UInt64] = []
         var finishes = 0
@@ -358,7 +354,7 @@ nonisolated private struct ResultFile: Encodable {
         let receipt = owner.close()
         let processed = await owner.flush(through: receipt)
         try require(
-            processed && revisions == [0, 1] && finishes == 1 && owner.subscriberCount == 0,
+            processed == .processed && revisions == [0, 1] && finishes == 1 && owner.subscriberCount == 0,
             "Initial and terminal subscription contract failed"
         )
         token.cancel()
@@ -374,7 +370,7 @@ nonisolated private struct ResultFile: Encodable {
     private func snapshotSequence() async throws {
         let owner = GeneratedNote.MainActorHost(
             GeneratedNote.Draft(text: "sequence"),
-            saveDriver: { .success(GeneratedNote.Saved(text: $0.text)) }
+            saveDriver: { GeneratedNote.Saved(text: $0.text) }
         )
         let label = UILabel()
         var revisions: [UInt64] = []

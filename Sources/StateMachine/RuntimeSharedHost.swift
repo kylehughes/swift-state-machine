@@ -3,6 +3,8 @@
 /// This lower-guarantee runtime accepts raw tickets and candidates. A facade keeps
 /// its host private and supplies compiler-checked typed projections. User preparation
 /// and drivers execute outside immutable-version installation locks.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendable, Outcome: Sendable, Failure: Error>:
     Sendable
 {
@@ -13,7 +15,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     /// A closed retained-outcome decision.
     @frozen public enum Delivery: Sendable {
         case committed(Engine.Snapshot)
-        case pending(RuntimePendingID, RuntimePendingStatus)
+        case pending(RuntimePendingID, PendingStatus)
         case inProgress
         case notPending
         case stale
@@ -21,7 +23,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         case discarded(Engine.Snapshot)
         case rejected(Engine.Rejection)
     }
-    private struct Subscriber: Sendable {
+    fileprivate struct Subscriber: Sendable {
         let identity: RuntimeIdentity
         let mailbox: LatestMailbox<Engine.Snapshot>
     }
@@ -30,13 +32,14 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         let start: @Sendable ([RuntimeWork<Descriptor>]) async -> Void
         let processed: @Sendable (Engine.Batch) async -> Void
     }
-    private struct State: Sendable {
+    fileprivate struct State: Sendable {
         var subscribers: [Subscriber] = []
         var engine: Engine
         var ledger = Ledger()
         var drainerScheduled = false
         var ready = RuntimeDeliveryReadyQueue()
         var processedRevision: UInt64 = 0
+        var isQuiescent: Bool { engine.isQuiescent && !drainerScheduled && ready.isIdle }
         mutating func prune() {
             ledger.prune(in: engine)
             ready.prune(keeping: ledger.pending.map(\.id))
@@ -97,7 +100,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     public init(
         _ initial: Model,
         scopes: [RuntimeScopeID],
-        limits: RuntimeLimits,
+        limits: Limits,
         subscriberCapacity: Int = 128,
         policy: RuntimeCompletionPolicy = .manualOnConflict,
         driver: @escaping @Sendable (RuntimeWork<Descriptor>) async -> Outcome,
@@ -176,10 +179,10 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         self.reconciliationRequired = reconciliationRequired
     }
     /// Creates a manually driven raw host or a host with explicit FIFO processing hooks.
-    public init(
+    package init(
         manual initial: Model,
         scopes: [RuntimeScopeID],
-        limits: RuntimeLimits,
+        limits: Limits,
         subscriberCapacity: Int = 128,
         cancel: (@Sendable ([RuntimeTicket]) async -> Void)? = nil,
         start: (@Sendable ([RuntimeWork<Descriptor>]) async -> Void)? = nil,
@@ -205,13 +208,11 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         self.prepare = prepare
         reconciliationRequired = { _ in }
     }
-    /// Capacity failure when registering a serial latest-value callback.
-    public typealias SubscriptionFailure = RuntimeHostSubscriptionFailure
     /// Registers a capacity-one latest-value callback; client execution occurs outside host locks.
     public func subscribe(
         _ receive: @escaping @Sendable (Engine.Snapshot) -> Void,
         onFinish: @escaping @Sendable () -> Void = {}
-    ) throws(SubscriptionFailure) -> RuntimeSubscription {
+    ) throws(SubscriptionFailure) -> SnapshotSubscription {
         let identity = RuntimeIdentity()
         while true {
             let before = storage.load()
@@ -232,7 +233,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                 snapshot.isClosed ? storage.isCurrent(before) : storage.install(.init(after), replacing: before)
             guard installed else { continue }
             mailbox.activate()
-            return RuntimeSubscription { [weak storage, weak mailbox] in
+            return SnapshotSubscription { [weak storage, weak mailbox] in
                 mailbox?.cancel()
                 guard let storage else { return }
                 while true {
@@ -271,6 +272,10 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                 return result
             }
         }
+    }
+    /// Reports a defective plan with ordinary admission precedence against the current root.
+    public func reject(_ defect: Engine.DefectivePlan) -> Engine.Admission {
+        storage.load().value.engine.reject(defect)
     }
     /// Ends admission and schedules the reserved terminal batch.
     public func close() -> Engine.Snapshot {
@@ -327,11 +332,16 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             id,
             policy: policy,
             automatic: automatic,
-            claim: {
+            claim: { decision in
                 while true {
                     let before = storage.load()
                     var after = before.value
-                    let result = after.ledger.claim(id, in: &after.engine, scheduledRetry: scheduledClaim)
+                    let result = after.ledger.claim(
+                        id,
+                        in: &after.engine,
+                        continuing: decision,
+                        scheduledRetry: scheduledClaim
+                    )
                     if case .claimed = result {
                         if storage.install(.init(after), replacing: before) {
                             scheduledClaim = false
@@ -371,7 +381,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                         {
                             reconciliationRequired(pending)
                         }
-                        return (result, reason)
+                        return (result, pending)
                     }
                 }
             },
@@ -411,7 +421,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         }
     }
     /// Records actual execution termination, or a skip before the execution started.
-    public func acknowledge(_ ticket: RuntimeTicket, skipped: Bool) -> Engine.Acknowledgment {
+    package func acknowledge(_ ticket: RuntimeTicket, skipped: Bool) -> Engine.Acknowledgment {
         while true {
             let before = storage.load()
             var after = before.value
@@ -432,9 +442,9 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         }
     }
     /// Checks live raw authority without granting a facade ticket.
-    public func isActive(_ ticket: RuntimeTicket) -> Bool { storage.load().value.engine.isActive(ticket) }
+    package func isActive(_ ticket: RuntimeTicket) -> Bool { storage.load().value.engine.isActive(ticket) }
     /// Transfers complete batches only from a manually driven host.
-    public func drainCommands(limit: Int) -> [Engine.Batch] {
+    package func drainCommands(limit: Int) -> [Engine.Batch] {
         guard processor == nil else { return [] }
         while true {
             let before = storage.load()
@@ -498,16 +508,20 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     private func handleCapacityConflicts(_ conflicts: [Ledger.Pending]) {
         for pending in conflicts {
             switch policy {
-            case .retryPure: scheduleRetry(pending.id)
+            case .retryPure: _ = scheduleRetry(pending.id, after: pending.decision)
             case .manualOnConflict: reconciliationRequired(pending)
             }
         }
     }
-    private func scheduleRetry(_ id: RuntimePendingID) {
+    // Scheduling is bound to the decision that lost the conflict, so a newer attempt keeps its own.
+    private func scheduleRetry(_ id: RuntimePendingID, after decision: RuntimeDeliveryDecision) -> Bool {
         while true {
             let before = storage.load()
             var after = before.value
-            after.ledger.scheduleRetry(id)
+            guard after.ledger.scheduleRetry(id, after: decision) else {
+                if storage.isCurrent(before) { return false }
+                continue
+            }
             let wake = after.ready.enqueue(id)
             if storage.install(.init(after), replacing: before) {
                 if wake {
@@ -516,7 +530,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                         await retryTurn()
                     }
                 }
-                return
+                return true
             }
         }
     }
@@ -551,7 +565,8 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     }
     /// Waits until managed FIFO cancellation and launch decisions through this receipt have been processed.
     ///
-    /// For a raw manually driven host, this checks owner identity only; its caller owns execution.
+    /// Returns `false` without waiting when the receipt belongs to another owner. For a raw manually
+    /// driven host, this checks owner identity only; its caller owns execution.
     public func flush(through snapshot: Engine.Snapshot) async -> Bool {
         guard storage.load().value.engine.owns(snapshot) else { return false }
         guard processor != nil else { return true }
@@ -561,10 +576,11 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         return true
     }
     /// Whether closure, batches, retained outcomes, preparations, and physical executions have settled.
-    public var isQuiescent: Bool {
-        let state = storage.load().value
-        return state.engine.isQuiescent && !state.drainerScheduled && state.ready.isIdle
-    }
+    public var isQuiescent: Bool { storage.load().value.isQuiescent }
+    /// The number of physical workers whose joined termination has not yet been processed.
+    public var runningCount: Int { get async { await coordinator?.runningCount ?? 0 } }
+    /// The number of live observer registrations.
+    public var subscriberCount: Int { storage.load().value.subscribers.count }
     /// Outstanding raw obligations at a coherent historical observation, with execution authority.
     package struct Diagnostics: Sendable {
         /// The last accepted revision.
@@ -575,55 +591,84 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         package let hasQueuedBatches: Bool
         /// Whether a drainer still owns responsibility.
         package let isDraining: Bool
+        /// Whether an automatic retry of a retained completion is still scheduled.
+        package let isRetrying: Bool
         /// First retained envelopes.
         package let pending: [RuntimePendingID]
         /// Physical execution, delivery, and preparation obligations.
         package let outstanding: [Engine.ReservationSnapshot]
+
+        fileprivate init(_ state: State) {
+            acceptedRevision = state.engine.snapshot.revision
+            processedThrough = state.processedRevision
+            hasQueuedBatches = state.engine.hasQueuedBatches
+            isDraining = state.drainerScheduled
+            isRetrying = !state.ready.isIdle
+            pending = state.ledger.pending.map(\.id)
+            outstanding = state.engine.executionReservations
+        }
     }
-    /// Captures raw diagnostics that carry execution authority, for facades that project them.
-    package func authorityDiagnostics() -> Diagnostics {
-        let state = storage.load().value
-        return Diagnostics(
-            acceptedRevision: state.engine.snapshot.revision,
-            processedThrough: state.processedRevision,
-            hasQueuedBatches: state.engine.hasQueuedBatches,
-            isDraining: state.drainerScheduled,
-            pending: state.ledger.pending.map(\.id),
-            outstanding: state.engine.executionReservations
-        )
-    }
-    /// Captures the obligations still tracked, without exposing a ticket or other authority.
-    public func diagnostics() -> RuntimeShutdownDiagnostics {
-        let state = storage.load().value
-        return RuntimeShutdownDiagnostics(
+    private static func diagnostics(of state: State) -> ShutdownDiagnostics {
+        ShutdownDiagnostics(
             engine: state.engine,
             processedThrough: state.processedRevision,
             isDraining: state.drainerScheduled,
+            isRetrying: !state.ready.isIdle,
             pendingCompletions: state.ledger.pending.map(\.id)
         )
     }
-    /// Closes, then waits until all obligations settle or the supplied deadline expires.
+    /// Captures the obligations still tracked, without exposing a ticket or other authority.
+    package func diagnostics() -> ShutdownDiagnostics { Self.diagnostics(of: storage.load().value) }
+    /// Closes admission, then waits until every obligation settles or `deadline` passes.
     ///
-    /// A manually driven host does not wait: it closes and reports whether it is already quiescent.
-    public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
+    /// Returns `nil` once the owner is quiescent. Otherwise it returns the obligations observed in one
+    /// atomic load taken after the deadline passed, which also decided that they were unsettled; that
+    /// work stays tracked and can still settle.
+    /// A manually driven host does not wait: it closes and reports what it observes at once.
+    @discardableResult
+    public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownDiagnostics? {
+        await shutdown(deadline: deadline, now: { ContinuousClock.now })
+    }
+    /// Closes and waits exactly as ``shutdown(deadline:)``, reading the time from `now`.
+    package func shutdown(
+        deadline: ContinuousClock.Instant?,
+        now: () -> ContinuousClock.Instant
+    ) async -> ShutdownDiagnostics? {
+        await settle(deadline: deadline, now: now).map(Self.diagnostics(of:))
+    }
+    /// Closes and waits exactly as ``shutdown(deadline:)``, reporting a timeout with execution authority.
+    package func shutdownWithAuthority(deadline: ContinuousClock.Instant? = nil) async -> Diagnostics? {
+        await settle(deadline: deadline, now: { ContinuousClock.now }).map(Diagnostics.init)
+    }
+    private func settle(deadline: ContinuousClock.Instant?, now: () -> ContinuousClock.Instant) async -> State? {
         let receipt = close()
-        guard processor != nil else { return isQuiescent }
+        let managed = processor != nil
+        let settled: @Sendable (State) -> Bool = { state in
+            state.isQuiescent && (!managed || state.processedRevision >= receipt.revision)
+        }
         while true {
-            if isQuiescent, storage.load().value.processedRevision >= receipt.revision,
-                await coordinator?.runningCount ?? 0 == 0, isQuiescent
-            {
-                return true
+            var state = storage.load().value
+            if !settled(state), managed, let deadline, now() >= deadline {
+                // Work can settle between that load and observing expiry, so the decision and its
+                // diagnostics come from one load taken after the deadline passed.
+                state = storage.load().value
+                if !settled(state) { return state }
             }
-            if let deadline, ContinuousClock.now >= deadline { return false }
-            await progress.wait(until: { isQuiescent }, deadline: deadline)
+            if settled(state) {
+                // Termination is acknowledged after a worker leaves the coordinator, so this returns at once.
+                await coordinator?.join()
+                return nil
+            }
+            if !managed { return state }
+            await progress.wait(until: { settled(storage.load().value) }, deadline: deadline)
         }
     }
-    /// Closes admission and waits for actual execution and retained obligation settlement.
-    public func shutdown() async { _ = await shutdownAndWait() }
 }
 
-/// Explicit cancellation ownership of a raw serial callback registration.
-nonisolated public final class RuntimeSubscription: Sendable {
+/// Explicit cancellation ownership of one observer registration.
+///
+/// Cancelling or releasing it removes the registration.
+nonisolated public final class SnapshotSubscription: Sendable {
     private let action: AtomicRecordStorage<(@Sendable () -> Void)?>
     package init(_ action: @escaping @Sendable () -> Void) { self.action = AtomicRecordStorage(action) }
     /// Removes the registration; a callback already claimed may finish.

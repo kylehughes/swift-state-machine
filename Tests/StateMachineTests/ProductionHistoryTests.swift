@@ -41,6 +41,8 @@ import os
 
     private static func rejection(_ reason: Flow.CommitRejection) -> ReferenceRejection {
         switch reason {
+        case .plan(.invalidPlan): .invalidPlan
+        case .plan(.planTooLarge): .planTooLarge
         case .foreignOwner: .foreignOwner
         case .closed: .closed
         case .obsoleteIncarnation: .obsoleteIncarnation
@@ -190,7 +192,7 @@ import os
                         _ = try idle.load(wrong)
                         Issue.record("Wrong-user domain preparation accepted")
                     } catch {
-                        if case .domain(.wrongUser) = error {
+                        if case .wrongUser = error {
                         } else {
                             Issue.record("Wrong domain preparation rejection")
                         }
@@ -237,11 +239,11 @@ import os
                     guard case .success(let completion) = work.succeeded(Profile(userID: id, name: String(value)))
                     else { return }
                     expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .success(value)))
-                    actual = flow.commit(try observed.received(completion))
+                    actual = flow.commit(observed.received(completion))
                 } else {
                     guard case .failure(let completion) = work.failed(.unavailable) else { return }
                     expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .failure(1)))
-                    actual = flow.commit(try observed.failed(completion))
+                    actual = flow.commit(observed.failed(completion))
                 }
                 Self.compare(actual, expected, current: oracle.snapshot, context: context)
             case 9, 18:
@@ -253,7 +255,7 @@ import os
                     try oracle.prepareCompletion(ticket, outcome: .success(2), on: loadingOracle)
                 )
                 Self.compare(
-                    flow.commit(try observed.received(completion)),
+                    flow.commit(observed.received(completion)),
                     expected,
                     current: oracle.snapshot,
                     context: context
@@ -519,7 +521,7 @@ extension ProductionHistoryTests {
             }
             let calls = recorder.calls
             _ = flow.close()
-            #expect(await flow.shutdownAndWait(deadline: ContinuousClock.now.advanced(by: .seconds(10))) == .quiescent)
+            #expect(await flow.shutdown(deadline: ContinuousClock.now.advanced(by: .seconds(10))) == .quiescent)
             let overlap = calls.indices.contains { first in
                 calls.indices.contains { second in
                     first < second && calls[first].client != calls[second].client

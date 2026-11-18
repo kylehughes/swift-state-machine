@@ -8,10 +8,7 @@ let package = Package(
     targets: [
         .target(
             name: "GeneratedDomain",
-            dependencies: [
-                .product(name: "StateMachine", package: "swift-state-machine"),
-                .product(name: "StateMachineSchema", package: "swift-state-machine"),
-            ],
+            dependencies: [.product(name: "StateMachine", package: "swift-state-machine")],
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
         .executableTarget(

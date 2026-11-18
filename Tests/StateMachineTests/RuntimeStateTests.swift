@@ -6,8 +6,8 @@ import Testing
     private let a = RuntimeScopeID(kind: 1)
     private let b = RuntimeScopeID(kind: 2)
 
-    private func engine(limits: RuntimeLimits? = nil) throws -> Core {
-        Core(0, scopes: [a, b], limits: try limits ?? RuntimeLimits())
+    private func engine(limits: Limits? = nil) throws -> Core {
+        Core(0, scopes: [a, b], limits: try limits ?? Limits())
     }
 
     @discardableResult

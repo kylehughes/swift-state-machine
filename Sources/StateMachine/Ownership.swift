@@ -13,7 +13,7 @@
 }
 
 extension Change: Copyable where Next: Copyable {}
-extension Change: Sendable where Next: Sendable, Effect: Sendable {}
+extension Change: Sendable where Next: Sendable & ~Copyable, Effect: Sendable {}
 
 /// A consuming transition that preserves its predecessor on recoverable rejection.
 @frozen nonisolated public enum Advance<Before: ~Copyable, After: ~Copyable, Effect, Failure: Error>: ~Copyable {
@@ -23,6 +23,8 @@ extension Change: Sendable where Next: Sendable, Effect: Sendable {}
     case rejected(Failure, Before)
 }
 
+extension Advance: Sendable where Before: Sendable & ~Copyable, After: Sendable & ~Copyable, Effect: Sendable {}
+
 /// A defect in an inert effect plan, found while preparing it.
 nonisolated public enum PlanRejection: Error, Equatable, Sendable {
     /// The plan is malformed, or starts an operation whose scope or dependency it leaves inactive.
@@ -30,13 +32,3 @@ nonisolated public enum PlanRejection: Error, Equatable, Sendable {
     /// The plan alone exceeds a configured maximum.
     case planTooLarge
 }
-
-/// Separates authored validation failure from permanent plan failure.
-@frozen nonisolated public enum PreparationFailure<DomainFailure: Error>: Error {
-    /// Authored domain validation failed.
-    case domain(DomainFailure)
-    /// The effect plan cannot be admitted, even after capacity becomes available.
-    case plan(PlanRejection)
-}
-
-extension PreparationFailure: Equatable where DomainFailure: Equatable {}

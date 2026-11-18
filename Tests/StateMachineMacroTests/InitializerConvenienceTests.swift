@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 import Testing
 import os
 
@@ -60,7 +59,8 @@ nonisolated private enum ClosureLookup: Sendable {
         typealias Output = String
         typealias Failure = Never
     }
-    /// Its effect case, `onReconciliationRequired`, is also the name of a parameter every managed owner takes.
+    /// Its effect case is spelled like a callback parameter; the `Driver` suffix keeps its label distinct from
+    /// every parameter a managed owner takes.
     @Operation(scope: Scope.hook, activeIn: [Loading.self], admission: .latest)
     enum OnReconciliationRequired {
         typealias Input = String
@@ -163,19 +163,19 @@ nonisolated private enum ClosureLookup: Sendable {
     @MainActor @Test func theDefaultAlsoReachesOwnersThatTakeOneClosurePerOperation() async {
         let local = ClosureLookup.Local()
         let shared = ClosureLookup.Shared(
-            fetchDriver: { _ in .success("") },
-            auditDriver: { _ in .success("") },
-            onReconciliationRequiredDriver: { _ in .success("") }
+            fetchDriver: { _ in "" },
+            auditDriver: { _ in "" },
+            onReconciliationRequiredDriver: { _ in "" }
         )
         let actor = ClosureLookup.ActorHost(
-            fetchDriver: { _ in .success("") },
-            auditDriver: { _ in .success("") },
-            onReconciliationRequiredDriver: { _ in .success("") }
+            fetchDriver: { _ in "" },
+            auditDriver: { _ in "" },
+            onReconciliationRequiredDriver: { _ in "" }
         )
         let main = ClosureLookup.MainActorHost(
-            fetchDriver: { _ in .success("") },
-            auditDriver: { _ in .success("") },
-            onReconciliationRequiredDriver: { _ in .success("") }
+            fetchDriver: { _ in "" },
+            auditDriver: { _ in "" },
+            onReconciliationRequiredDriver: { _ in "" }
         )
         #expect(origin(local.snapshot()) == "default")
         #expect(origin(shared.snapshot()) == "default")
@@ -184,9 +184,9 @@ nonisolated private enum ClosureLookup: Sendable {
         #expect(ClosureLookup.owned().withValue { $0.origin } == "default")
         let explicit = ClosureLookup.Shared(
             ClosureLookup.Idle(origin: "explicit"),
-            fetchDriver: { _ in .success("") },
-            auditDriver: { _ in .success("") },
-            onReconciliationRequiredDriver: { _ in .success("") }
+            fetchDriver: { _ in "" },
+            auditDriver: { _ in "" },
+            onReconciliationRequiredDriver: { _ in "" }
         )
         #expect(origin(explicit.snapshot()) == "explicit")
         await shared.shutdown()
@@ -222,15 +222,15 @@ nonisolated private enum ClosureLookup: Sendable {
         let owner = ClosureLookup.Shared(
             fetchDriver: { input in
                 inputs.record(input)
-                return .success("F")
+                return "F"
             },
             auditDriver: { input in
                 inputs.record(input)
-                return .success("A")
+                return "A"
             },
             onReconciliationRequiredDriver: { input in
                 inputs.record(input)
-                return .success("O")
+                return "O"
             }
         )
         let snapshots = try owner.snapshots()
@@ -250,15 +250,15 @@ nonisolated private enum ClosureLookup: Sendable {
         let owner = ClosureLookup.ActorHost(
             fetchDriver: { input in
                 inputs.record(input)
-                return .success("F")
+                return "F"
             },
             auditDriver: { input in
                 inputs.record(input)
-                return .success("A")
+                return "A"
             },
             onReconciliationRequiredDriver: { input in
                 inputs.record(input)
-                return .success("O")
+                return "O"
             }
         )
         let snapshots = try await owner.snapshots()
@@ -279,17 +279,17 @@ nonisolated private enum ClosureLookup: Sendable {
             fetchDriver: { input in
                 MainActor.assertIsolated()
                 inputs.record(input)
-                return .success("F")
+                return "F"
             },
             auditDriver: { input in
                 MainActor.assertIsolated()
                 inputs.record(input)
-                return .success("A")
+                return "A"
             },
             onReconciliationRequiredDriver: { input in
                 MainActor.assertIsolated()
                 inputs.record(input)
-                return .success("O")
+                return "O"
             }
         )
         let snapshots = try owner.snapshots()
@@ -307,9 +307,9 @@ nonisolated private enum ClosureLookup: Sendable {
     @Test func aRestoredSharedOwnerRunsTheSuppliedClosures() async throws {
         let owner = try ClosureLookup.Shared(
             restoring: 0,
-            fetchDriver: { _ in .success("F") },
-            auditDriver: { _ in .success("A") },
-            onReconciliationRequiredDriver: { _ in .success("O") }
+            fetchDriver: { _ in "F" },
+            auditDriver: { _ in "A" },
+            onReconciliationRequiredDriver: { _ in "O" }
         )
         #expect(origin(owner.snapshot()) == "restored 0")
         let snapshots = try owner.snapshots()
@@ -326,9 +326,9 @@ nonisolated private enum ClosureLookup: Sendable {
     @Test func aRestoredActorOwnerRunsTheSuppliedClosures() async throws {
         let owner = try ClosureLookup.ActorHost(
             restoring: 0,
-            fetchDriver: { _ in .success("F") },
-            auditDriver: { _ in .success("A") },
-            onReconciliationRequiredDriver: { _ in .success("O") }
+            fetchDriver: { _ in "F" },
+            auditDriver: { _ in "A" },
+            onReconciliationRequiredDriver: { _ in "O" }
         )
         #expect(origin(await owner.snapshot()) == "restored 0")
         let snapshots = try await owner.snapshots()
@@ -345,9 +345,9 @@ nonisolated private enum ClosureLookup: Sendable {
     @MainActor @Test func aRestoredMainActorOwnerRunsTheSuppliedClosures() async throws {
         let owner = try ClosureLookup.MainActorHost(
             restoring: 0,
-            fetchDriver: { _ in .success("F") },
-            auditDriver: { _ in .success("A") },
-            onReconciliationRequiredDriver: { _ in .success("O") }
+            fetchDriver: { _ in "F" },
+            auditDriver: { _ in "A" },
+            onReconciliationRequiredDriver: { _ in "O" }
         )
         #expect(origin(owner.snapshot()) == "restored 0")
         let snapshots = try owner.snapshots()
@@ -368,10 +368,10 @@ nonisolated private enum ClosureLookup: Sendable {
                 restoring: -1,
                 fetchDriver: { _ in
                     started.withLock { $0 = true }
-                    return .success("F")
+                    return "F"
                 },
-                auditDriver: { _ in .success("A") },
-                onReconciliationRequiredDriver: { _ in .success("O") }
+                auditDriver: { _ in "A" },
+                onReconciliationRequiredDriver: { _ in "O" }
             )
             Issue.record("A negative archive was restored")
         } catch {
@@ -380,9 +380,9 @@ nonisolated private enum ClosureLookup: Sendable {
         do {
             _ = try ClosureLookup.ActorHost(
                 restoring: -1,
-                fetchDriver: { _ in .success("F") },
-                auditDriver: { _ in .success("A") },
-                onReconciliationRequiredDriver: { _ in .success("O") }
+                fetchDriver: { _ in "F" },
+                auditDriver: { _ in "A" },
+                onReconciliationRequiredDriver: { _ in "O" }
             )
             Issue.record("A negative archive was restored")
         } catch {
@@ -395,9 +395,9 @@ nonisolated private enum ClosureLookup: Sendable {
         do {
             _ = try ClosureLookup.MainActorHost(
                 restoring: -1,
-                fetchDriver: { _ in .success("F") },
-                auditDriver: { _ in .success("A") },
-                onReconciliationRequiredDriver: { _ in .success("O") }
+                fetchDriver: { _ in "F" },
+                auditDriver: { _ in "A" },
+                onReconciliationRequiredDriver: { _ in "O" }
             )
             Issue.record("A negative archive was restored")
         } catch {

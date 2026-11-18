@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 struct Outer<Element> {
 
 @StateMachine(mode: .shared)

@@ -86,7 +86,7 @@ import Testing
             scopes: [],
             driver: { $0.ticket },
             ticket: { $0 },
-            prepare: { _ in .failure(.plan(.invalidPlan)) }
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
         )
         for value in 1 ... 2 { _ = owner.commit(try Engine.prepare(on: owner.snapshot(), next: value)) }
         var revisions: [UInt64] = []
@@ -122,7 +122,7 @@ import Testing
             scopes: [],
             driver: { $0.ticket },
             ticket: { $0 },
-            prepare: { _ in .failure(.plan(.invalidPlan)) }
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
         )
         let result: Result<Engine.Admission, PlanRejection> = owner.prepareAndCommit { old in
             _ = owner.commit(try! Engine.prepare(on: owner.snapshot(), next: 10))
@@ -186,7 +186,7 @@ import Testing
         let request = try ProfileRequest(userID: user)
         let network = ControlledProfileNetwork()
         let drivers = network.drivers
-        let first = try ProfileEditor(request: request, drivers: .init(fetch: drivers.fetch, audit: drivers.audit))
+        let first = ProfileEditor(request: request, drivers: .init(fetch: drivers.fetch, audit: drivers.audit))
         _ = try first.load()
         let oldRequest = await network.nextRequest()
         first.dispose()
@@ -194,7 +194,7 @@ import Testing
         await first.shutdown()
         #expect(first.presentation.snapshot.isClosed && first.isQuiescent)
 
-        let returned = try ProfileEditor(request: request, drivers: .init(fetch: drivers.fetch, audit: drivers.audit))
+        let returned = ProfileEditor(request: request, drivers: .init(fetch: drivers.fetch, audit: drivers.audit))
         guard case .idle = returned.presentation.snapshot else { throw Failure.unexpected }
         #expect(returned.presentation.snapshot.revision == 0 && returned.presentation.isObserving)
         let trace = SnapshotTrace<GeneratedProfile.Snapshot>()
@@ -252,9 +252,12 @@ import Testing
         let first = await store.nextRequest()
         _ = try owner.send(.edit(.init(text: "Second", tags: ["replacement"])))
         let receipt = owner.close()
-        #expect(await owner.flush(through: receipt))
+        #expect(await owner.flush(through: receipt) == .processed)
         #expect(owner.runningCount == 1 && !owner.isQuiescent)
-        #expect(!(await owner.shutdownAndWait(deadline: .now)))
+        guard case .timedOut(let diagnostics) = await owner.shutdown(deadline: .now) else {
+            throw Failure.unexpected
+        }
+        #expect(diagnostics.outstandingExecutions.count == 1)
         #expect(store.complete(first, .success("Obsolete")))
         #expect(!store.complete(first, .success("Duplicate")))
         await owner.shutdown()
@@ -277,9 +280,9 @@ import Testing
         let first = await network.nextRequest()
         _ = try await owner.send(.authenticationChanged)
         let closed = await owner.close()
-        #expect(await owner.flush(through: closed))
+        #expect(await owner.flush(through: closed) == .processed)
         #expect(await owner.runningCount == 1)
-        if case .quiescent = await owner.shutdownAndWait(deadline: .now) {
+        if case .quiescent = await owner.shutdown(deadline: .now) {
             Issue.record("Shutdown reported quiescence while a driver was still running")
         }
         #expect(await network.complete(first.id, with: .success(Profile(userID: user, name: "Revoked"))))
@@ -321,7 +324,7 @@ import Testing
         let owner = GeneratedNote.MainActorHost(
             .init(text: "generated value"),
             drivers: .init(save: { input in
-                .success(.init(text: input.text))
+                .init(text: input.text)
             })
         )
         let trace = SnapshotTrace<GeneratedNote.Snapshot>()
@@ -342,7 +345,7 @@ import Testing
             scopes: [],
             driver: { $0.ticket },
             ticket: { $0 },
-            prepare: { _ in .failure(.plan(.invalidPlan)) }
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
         )
         for value in 1 ... 64 {
             let result: Result<Engine.Admission, PlanRejection> = await owner.prepareAndCommit { observation in
@@ -389,8 +392,8 @@ import Testing
         }
 
         var local = GeneratedProfile.Local(.init(userID: user))
-        guard case .prepared(let preparation) = GeneratedProfile.prepare(.load(request), on: local.snapshot()),
-            case .committed(let loadingReceipt) = local.commit(preparation),
+        let loading = try GeneratedProfile.prepare(.load(request), on: local.snapshot())
+        guard case .committed(let loadingReceipt) = local.commit(loading),
             case .fetch(let work) = local.drainCommands(limit: 1).first?.commands.first,
             case .committed(let loadedReceipt) = local.deliver(.fetch(work.succeeded(profile))),
             case .loaded(let localLoaded) = local.snapshot()

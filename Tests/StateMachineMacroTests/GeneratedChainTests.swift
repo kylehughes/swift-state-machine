@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 import Testing
 import os
 
@@ -55,11 +54,11 @@ nonisolated private enum ChainFlow: Sendable {
         drivers: .init(
             firstOperation: { value in
                 calls.withLock { $0.append(value) }
-                return .success(value + 1)
+                return value + 1
             },
             secondOperation: { value in
                 calls.withLock { $0.append(value) }
-                return .success(value + 1)
+                return value + 1
             }
         ),
         configuration: try .init(commits: 1, descriptors: 1, executions: 1)
@@ -70,10 +69,10 @@ nonisolated private enum ChainFlow: Sendable {
         token.cancel()
         events.finish()
     }
-    guard case .idle(let idle) = owner.snapshot(), case .committed(let receipt) = owner.commit(try idle.begin()) else {
+    guard case .idle(let idle) = owner.snapshot(), case .committed(let receipt) = owner.commit(idle.begin()) else {
         throw Failure.unexpected
     }
-    #expect(await owner.flush(through: receipt))
+    #expect(await owner.flush(through: receipt) == .processed)
     var iterator = snapshots.makeAsyncIterator()
     var finalRevision: UInt64?
     while let snapshot = await iterator.next() {
@@ -98,11 +97,11 @@ func mainActorTerminalCandidateRetriesAfterActualWorkerJoin_RT032() async throws
         drivers: .init(
             firstOperation: { value in
                 calls.withLock { $0.append(value) }
-                return .success(value + 1)
+                return value + 1
             },
             secondOperation: { value in
                 calls.withLock { $0.append(value) }
-                return .success(value + 1)
+                return value + 1
             }
         ),
         configuration: try .init(commits: 1, descriptors: 1, executions: 1)
@@ -134,8 +133,8 @@ func nativeActorTerminalCandidateRetriesAfterActualWorkerJoin_RT032() async thro
     let owner = ChainFlow.ActorHost(
         .init(value: 1),
         drivers: .init(
-            firstOperation: { .success($0 + 1) },
-            secondOperation: { .success($0 + 1) }
+            firstOperation: { $0 + 1 },
+            secondOperation: { $0 + 1 }
         ),
         configuration: try .init(commits: 1, descriptors: 1, executions: 1)
     )

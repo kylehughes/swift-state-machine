@@ -330,7 +330,7 @@ private final class SharedCallbackLifetime: Sendable {
         #expect(revisions == Array(UInt64(1) ... UInt64(41)))
         #expect(shared.snapshot().isClosed)
         // The stream is finished inside the callback; join the drainer before querying cleanup.
-        #expect(await shared.shutdownAndWait(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
+        #expect(await shared.shutdown(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
         #expect(shared.isQuiescent)
         #expect(shared.drainCommands(limit: 100).isEmpty)
     }
@@ -397,7 +397,7 @@ private final class SharedCallbackLifetime: Sendable {
         #expect(callbacks.withLock { $0.maximum } == 1)
         #expect(callbacks.withLock { $0.active } == 0)
         // The stream is finished inside the callback; join the drainer before querying cleanup.
-        #expect(await shared.shutdownAndWait(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
+        #expect(await shared.shutdown(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
         #expect(shared.isQuiescent)
     }
 
@@ -424,7 +424,7 @@ private final class SharedCallbackLifetime: Sendable {
         #expect(await delivered.next() == terminal.revision)
         #expect(await delivered.next() == nil)
         // The stream is finished inside the callback; join the drainer before querying cleanup.
-        #expect(await shared.shutdownAndWait(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
+        #expect(await shared.shutdown(deadline: .now.advanced(by: .seconds(10))) == .quiescent)
         #expect(shared.isQuiescent)
     }
 

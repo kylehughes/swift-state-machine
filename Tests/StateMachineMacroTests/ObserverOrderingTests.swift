@@ -40,7 +40,7 @@ import os
             observed.withLock { $0 = result }
         }
         let receipt = try await owner.send(.load(ProfileRequest(userID: user)))
-        #expect(await owner.flush(through: receipt))
+        #expect(await owner.flush(through: receipt) == .processed)
         #expect(observed.withLock { $0 } == .success)
         subscription.cancel()
         await owner.shutdown()
@@ -105,10 +105,10 @@ import os
         )
         try owner.send(.load(ProfileRequest(userID: user)))
         await started.wait()
-        expectOneOutstandingExecution(await owner.shutdownAndWait(deadline: .now))
+        expectOneOutstandingExecution(await owner.shutdown(deadline: .now))
         #expect(!owner.isQuiescent)
         release.open()
-        guard case .quiescent = await owner.shutdownAndWait() else {
+        guard case .quiescent = await owner.shutdown() else {
             Issue.record("Shutdown did not join the released driver")
             return
         }
@@ -132,10 +132,10 @@ import os
         )
         _ = try await owner.send(.load(ProfileRequest(userID: user)))
         await started.wait()
-        expectOneOutstandingExecution(await owner.shutdownAndWait(deadline: .now))
+        expectOneOutstandingExecution(await owner.shutdown(deadline: .now))
         #expect(await !owner.isQuiescent)
         release.open()
-        guard case .quiescent = await owner.shutdownAndWait() else {
+        guard case .quiescent = await owner.shutdown() else {
             Issue.record("Shutdown did not join the released driver")
             return
         }
@@ -159,14 +159,159 @@ import os
         )
         _ = try owner.send(.load(ProfileRequest(userID: user)))
         await started.wait()
-        expectOneOutstandingExecution(await owner.shutdownAndWait(deadline: .now))
+        expectOneOutstandingExecution(await owner.shutdown(deadline: .now))
         #expect(!owner.isQuiescent)
         release.open()
-        guard case .quiescent = await owner.shutdownAndWait() else {
+        guard case .quiescent = await owner.shutdown() else {
             Issue.record("Shutdown did not join the released driver")
             return
         }
         #expect(owner.isQuiescent)
+    }
+
+    /// A timed-out result always names something still unsettled.
+    private func expectSettledOrOutstanding(_ result: GeneratedProfile.ShutdownResult) {
+        guard case .timedOut(let diagnostics) = result else { return }
+        let outstanding =
+            !diagnostics.outstandingExecutions.isEmpty || !diagnostics.pendingCompletions.isEmpty
+            || diagnostics.hasQueuedBatches || diagnostics.isDraining || diagnostics.isRetrying
+            || diagnostics.processedThrough < diagnostics.acceptedRevision
+        #expect(outstanding, "A timed-out shutdown reported nothing outstanding: \(diagnostics)")
+    }
+
+    /// A driver that returns once the test opens its gate.
+    private static func gatedDrivers(started: Signal, release: Gate) -> GeneratedProfile.Drivers {
+        .init(
+            fetch: { _ in
+                started.raise()
+                await release.wait()
+                return .failure(.unavailable)
+            },
+            audit: { _ in .failure(.unavailable) }
+        )
+    }
+
+    // Each iteration opens the gate and asks for a deadline that has already passed while the
+    // released driver settles; whichever way the observation falls, it is never empty.
+    @Test func aDeadlineThatPassesAsSharedWorkSettlesNeverReportsNothingOutstanding() async throws {
+        let user = try UserID("kyle")
+        for _ in 0 ..< 16 {
+            let started = Signal()
+            let release = Gate()
+            let owner = GeneratedProfile.Shared(
+                .init(userID: user),
+                drivers: Self.gatedDrivers(started: started, release: release)
+            )
+            try owner.send(.load(ProfileRequest(userID: user)))
+            await started.wait()
+            release.open()
+            expectSettledOrOutstanding(await owner.shutdown(deadline: .now))
+            #expect(await owner.shutdown() == .quiescent)
+        }
+    }
+
+    @Test func aDeadlineThatPassesAsActorWorkSettlesNeverReportsNothingOutstanding() async throws {
+        let user = try UserID("kyle")
+        for _ in 0 ..< 16 {
+            let started = Signal()
+            let release = Gate()
+            let owner = GeneratedProfile.ActorHost(
+                .init(userID: user),
+                drivers: Self.gatedDrivers(started: started, release: release)
+            )
+            try await owner.send(.load(ProfileRequest(userID: user)))
+            await started.wait()
+            release.open()
+            expectSettledOrOutstanding(await owner.shutdown(deadline: .now))
+            #expect(await owner.shutdown() == .quiescent)
+        }
+    }
+
+    @MainActor @Test func aDeadlineThatPassesAsMainActorWorkSettlesNeverReportsNothingOutstanding() async throws {
+        let user = try UserID("kyle")
+        for _ in 0 ..< 16 {
+            let started = Signal()
+            let release = Gate()
+            let owner = GeneratedProfile.MainActorHost(
+                .init(userID: user),
+                fetchDriver: { _ in
+                    started.raise()
+                    await release.wait()
+                    return .failure(.unavailable)
+                },
+                auditDriver: { _ in .failure(.unavailable) }
+            )
+            try owner.send(.load(ProfileRequest(userID: user)))
+            await started.wait()
+            release.open()
+            expectSettledOrOutstanding(await owner.shutdown(deadline: .now))
+            #expect(await owner.shutdown() == .quiescent)
+        }
+    }
+
+    @Test func aSharedOwnerCountsItsRunningWorkAndRegistrations() async throws {
+        let user = try UserID("kyle")
+        let started = Signal()
+        let release = Gate()
+        let owner = GeneratedProfile.Shared(
+            .init(userID: user),
+            drivers: Self.gatedDrivers(started: started, release: release)
+        )
+        #expect(owner.subscriberCount == 0)
+        let subscription = try owner.subscribe { _ in }
+        let snapshots = try owner.snapshots()
+        #expect(owner.subscriberCount == 2)
+        subscription.cancel()
+        #expect(owner.subscriberCount == 1)
+        try owner.send(.load(ProfileRequest(userID: user)))
+        await started.wait()
+        #expect(await owner.runningCount == 1)
+        release.open()
+        #expect(await owner.shutdown() == .quiescent)
+        #expect(await owner.runningCount == 0)
+        // Closing released the remaining registration.
+        #expect(owner.subscriberCount == 0)
+        withExtendedLifetime(snapshots) {}
+    }
+
+    @Test func flushingAnotherOwnersReceiptReportsAForeignOwner() async throws {
+        let user = try UserID("kyle")
+        let drivers = GeneratedProfile.Drivers(
+            fetch: { _ in .failure(.unavailable) },
+            audit: { _ in .failure(.unavailable) }
+        )
+        let shared = GeneratedProfile.Shared(.init(userID: user), drivers: drivers)
+        let other = GeneratedProfile.Shared(.init(userID: user), drivers: drivers)
+        let receipt = other.close()
+        #expect(await shared.flush(through: receipt) == .foreignOwner)
+        #expect(await other.flush(through: receipt) == .processed)
+        let actor = GeneratedProfile.ActorHost(.init(userID: user), drivers: drivers)
+        #expect(await actor.flush(through: receipt) == .foreignOwner)
+        let actorReceipt = await actor.close()
+        #expect(await actor.flush(through: actorReceipt) == .processed)
+        await shared.shutdown()
+        await other.shutdown()
+        await actor.shutdown()
+    }
+
+    @MainActor @Test func flushingAnotherOwnersReceiptOnTheMainActorReportsAForeignOwner() async throws {
+        let user = try UserID("kyle")
+        let first = GeneratedProfile.MainActorHost(
+            .init(userID: user),
+            fetchDriver: { _ in .failure(.unavailable) },
+            auditDriver: { _ in .failure(.unavailable) }
+        )
+        let second = GeneratedProfile.MainActorHost(
+            .init(userID: user),
+            fetchDriver: { _ in .failure(.unavailable) },
+            auditDriver: { _ in .failure(.unavailable) }
+        )
+        let receipt = first.close()
+        #expect(await second.flush(through: receipt) == .foreignOwner)
+        #expect(await first.flush(through: receipt) == .processed)
+        second.close()
+        await first.shutdown()
+        await second.shutdown()
     }
 
     @Test func releasingAnActorOwnerFinishesItsRetainedRegistration() async throws {

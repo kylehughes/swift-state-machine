@@ -5,7 +5,7 @@ import Foundation
 func legal(_ note: IsolatedNote.Draft) {
     let owner = IsolatedNote.owned(note)
     _ = owner.save()
-    let isolated = RuntimeState<IsolatedNote.Draft, IsolatedNote.Draft>(note, limits: try! RuntimeLimits())
+    let isolated = RuntimeState<IsolatedNote.Draft, IsolatedNote.Draft>(note, limits: try! Limits())
     _ = isolated.snapshot.model
     _ = AtomicRecordStorage(1)
     _ = ReferenceProfile.Shared(
@@ -16,7 +16,7 @@ func legal(_ note: IsolatedNote.Draft) {
 actor ConfinedKernelControl {
     private var state = RuntimeState<IsolatedNote.Draft, IsolatedNote.Draft>(
         .init(text: "before"),
-        limits: try! RuntimeLimits()
+        limits: try! Limits()
     )
     func replace() throws -> String {
         let candidate = try RuntimeState<IsolatedNote.Draft, IsolatedNote.Draft>

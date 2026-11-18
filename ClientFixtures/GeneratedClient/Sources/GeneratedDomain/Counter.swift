@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 
 /// A domain compiled in an independent package using only distributed runtime APIs.
 @StateMachine(mode: .shared)
@@ -21,7 +20,17 @@ nonisolated public enum Counter: Sendable {
     @Initial case idle(Idle)
     case done(Done)
     /// Closed dynamic inputs.
-    public enum Input: Sendable { case finish(Int) }
+    public enum Input: Sendable {
+        case add(Int)
+        case finish(Int)
+    }
+    /// Records one more value without leaving the initial phase.
+    @Transition(on: Input.add)
+    fileprivate static func add(_ source: Idle, _ value: Int) -> Idle {
+        var values = source.value
+        values["added", default: []].append(value)
+        return Idle(values)
+    }
     /// Computes the declared successor synchronously from a borrowed predecessor.
     @Transition(on: Input.finish)
     fileprivate static func finish(_ source: Idle, _ value: Int) -> Done {

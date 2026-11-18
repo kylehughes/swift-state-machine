@@ -41,11 +41,10 @@ nonisolated public enum IsolatedNote {
     }
     /// A typed external storage failure.
     public enum SaveFailure: Error { case unavailable }
-    /// Synchronous domain or plan rejection.
+    /// Synchronous domain or routing rejection; a plan defect travels inside `Prepared` to admission.
     public enum PreparationRejection: Error {
         case emptyText
         case invalidPhase
-        case plan(PlanRejection)
     }
     /// Closed dynamic editor inputs, confined to their caller's isolation.
     public enum Input: ~Sendable {
@@ -103,9 +102,9 @@ nonisolated public enum IsolatedNote {
             }
         }
     }
-    /// A sealed inert candidate that admission consumes.
+    /// A sealed inert candidate that admission consumes, or the plan defect admission reports.
     public struct Prepared: ~Copyable {
-        fileprivate let candidate: Engine.Candidate
+        fileprivate let candidate: Engine.Proposal
     }
     /// A historical accepted observation.
     public struct Receipt {
@@ -175,8 +174,8 @@ nonisolated public enum IsolatedNote {
         private var engine: Engine
         private var ledger = Ledger()
         /// Creates fresh authority in the draft phase.
-        public init(_ initial: Draft, configuration: RuntimeLimits = .default) {
-            engine = Engine(.draft(initial), limits: configuration)
+        public init(_ initial: Draft, configuration: Limits = .default) {
+            engine = Engine(.draft(initial), limits: configuration, recording: .commands)
         }
         /// Copies a complete independent historical observation.
         public borrowing func snapshot() -> Snapshot { project(engine.snapshot) }
@@ -191,9 +190,13 @@ nonisolated public enum IsolatedNote {
         }
         /// Consumes a sealed proposal and rechecks its whole-root provenance.
         public mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
-            let admission = engine.commit(prepared.candidate)
-            ledger.prune(in: engine)
-            return project(admission)
+            switch prepared.candidate {
+            case .defective(let defect): return project(engine.reject(defect))
+            case .candidate(let candidate):
+                let admission = engine.commit(candidate)
+                ledger.prune(in: engine)
+                return project(admission)
+            }
         }
         /// Transfers whole batches; the caller releases mutable access before executing their work.
         public mutating func drainCommands(limit: Int) -> [CommandBatch] {
@@ -205,13 +208,18 @@ nonisolated public enum IsolatedNote {
             case .stale: return .stale
             case .foreignOwner: return .foreignOwner
             case .pending(let id):
-                guard let pending = ledger.pending.first(where: { $0.id == id }) else { return .notPending }
+                guard let pending = ledger.pending.first(where: { $0.id == id }) else { return .stale }
                 guard pending.status == .awaitingAdmission else { return .pending(id, pending.status) }
-                return reconcile(id: id)
+                switch reconcile(id: id) {
+                case .committed(let receipt): return .committed(receipt)
+                case .pending(let id, let status): return .pending(id, status)
+                case .inProgress: return .pending(id, .preparing)
+                case .notPending: return .stale
+                }
             }
         }
         /// Explicitly claims a new preparation attempt for a retained result.
-        public mutating func reconcile(id: RuntimePendingID) -> DeliveryResult {
+        public mutating func reconcile(id: RuntimePendingID) -> ReconcileResult {
             switch ledger.claim(id, in: &engine) {
             case .inProgress: return .inProgress
             case .notPending: return .notPending
@@ -221,13 +229,13 @@ nonisolated public enum IsolatedNote {
             }
         }
         /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
-        public mutating func retryAdmission(id: RuntimePendingID) -> DeliveryResult {
+        public mutating func retryAdmission(id: RuntimePendingID) -> ReconcileResult {
             project(ledger.retryAdmission(id, in: &engine))
         }
         /// Historical first-outcome diagnostics.
         public borrowing func pendingCompletions() -> [Ledger.Pending] { ledger.pending }
         /// Settles retained delivery through an authority-only admission.
-        public mutating func discardPending(id: RuntimePendingID) -> DeliveryResult {
+        public mutating func discardPending(id: RuntimePendingID) -> DiscardResult {
             guard let result = ledger.discard(id, in: &engine) else { return .notPending }
             switch result {
             case .committed(let stamp): return .discarded(Receipt(snapshot: project(stamp)))
@@ -242,6 +250,7 @@ nonisolated public enum IsolatedNote {
             engine.acknowledge(handle.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
         }
         /// Closes authority while keeping historical model data readable.
+        @discardableResult
         public mutating func close() -> Receipt {
             let snapshot = engine.close()
             ledger.prune(in: engine)
@@ -254,8 +263,7 @@ nonisolated public enum IsolatedNote {
     @MainActor public final class MainActorHost {
         private let host: RuntimeMainActorHost<Model, Draft, Completion, PreparationRejection>
         /// Creates a managed editor with fresh authority and immutable confined drivers.
-        public init(_ initial: Draft, drivers: MainActorDrivers, configuration: RuntimeManagedConfiguration = .default)
-        {
+        public init(_ initial: Draft, drivers: MainActorDrivers, configuration: ManagedConfiguration = .default) {
             host = RuntimeMainActorHost(
                 .draft(initial),
                 scopes: [],
@@ -280,41 +288,49 @@ nonisolated public enum IsolatedNote {
             return commit(prepared)
         }
         /// Consumes a historical proposal and rechecks its provenance.
-        public func commit(_ prepared: consuming Prepared) -> CommitResult { project(host.commit(prepared.candidate)) }
+        public func commit(_ prepared: consuming Prepared) -> CommitResult {
+            switch prepared.candidate {
+            case .candidate(let candidate): return project(host.commit(candidate))
+            case .defective(let defect): return project(host.reject(defect))
+            }
+        }
         /// Registers an observer of complete initial, accepted, and terminal observations.
         public func subscribe(
             _ receive: @escaping @MainActor (Snapshot) -> Void,
             onFinish: @escaping @MainActor () -> Void = {}
-        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription {
+        ) throws(SubscriptionFailure) -> MainActorSnapshotSubscription {
             try host.subscribe({ receive(project($0)) }, onFinish: onFinish)
         }
         /// Registers a single-pass sequence of the latest complete observations.
-        public func snapshots() throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSnapshots<Snapshot> {
+        public func snapshots() throws(SubscriptionFailure) -> MainActorSnapshotSequence<Snapshot> {
             try host.snapshots { project($0) }
         }
         /// Registers a single-pass sequence of the latest `Sendable` projections of complete observations.
         public func snapshots<Projection: Sendable>(
             _ transform: @escaping @MainActor (Snapshot) -> Projection
-        ) throws(RuntimeHostSubscriptionFailure) -> RuntimeSnapshots<Projection> {
+        ) throws(SubscriptionFailure) -> SnapshotSequence<Projection> {
             try host.sendableSnapshots { transform(project($0)) }
         }
-        /// Retains a terminal outcome with its existing operation authority.
-        public func deliver(_ completion: Completion) -> DeliveryResult { project(host.deliver(completion)) }
-        /// Reads immutable first-outcome records.
+        /// Reads immutable first-outcome records; the owner delivers its own work's outcomes.
         public func pendingCompletions() -> [Ledger.Pending] { host.pendingCompletions() }
         /// Explicitly claims a fresh attempt for a retained result.
-        public func reconcile(id: RuntimePendingID) -> DeliveryResult { project(host.reconcile(id: id)) }
+        public func reconcile(id: RuntimePendingID) -> ReconcileResult { reconciled(host.reconcile(id: id)) }
         /// Settles retained delivery through an authority-only admission.
-        public func discardPending(id: RuntimePendingID) -> DeliveryResult { project(host.discardPending(id: id)) }
+        public func discardPending(id: RuntimePendingID) -> DiscardResult { discarded(host.discardPending(id: id)) }
         /// Closes admission without claiming that work has terminated.
+        @discardableResult
         public func close() -> Receipt { Receipt(snapshot: project(host.close())) }
         /// Waits for FIFO processing, independently of driver termination.
-        public func flush(through receipt: Receipt) async -> Bool { await host.flush(through: receipt.snapshot.stamp) }
-        /// Closes and joins all physical and retained obligations.
-        public func shutdown() async { await host.shutdown() }
-        /// Closes and waits through an optional deadline.
-        public func shutdownAndWait(deadline: ContinuousClock.Instant? = nil) async -> Bool {
-            await host.shutdownAndWait(deadline: deadline)
+        public func flush(through receipt: Receipt) async -> FlushResult {
+            await host.flush(through: receipt.snapshot.stamp) ? .processed : .foreignOwner
+        }
+        /// Closes, then joins all physical and retained obligations or stops waiting at `deadline`.
+        ///
+        /// A timeout reports the obligations observed in the main-actor turn that found the deadline
+        /// expired; the owner stays closed and that work stays tracked.
+        @discardableResult
+        public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+            await host.shutdown(deadline: deadline).map { .timedOut($0) } ?? .quiescent
         }
         /// Physical workers still awaiting joined termination.
         public var runningCount: Int { host.runningCount }
@@ -323,16 +339,40 @@ nonisolated public enum IsolatedNote {
         /// Whether all managed obligations have settled.
         public var isQuiescent: Bool { host.isQuiescent }
     }
-    /// Typed terminal delivery dispositions, without raw facade storage access.
+    /// Whether `flush(through:)` waited for a receipt's batch to be processed.
+    public enum FlushResult: Equatable, Sendable {
+        /// Launch and cancellation decisions through the receipt have been processed.
+        case processed
+        /// The receipt was issued by a different owner.
+        case foreignOwner
+    }
+    /// Whether shutdown joined every obligation or stopped waiting at its deadline.
+    public enum ShutdownResult: Equatable, Sendable {
+        /// Every execution, delivery, and preparation obligation settled.
+        case quiescent
+        /// The deadline passed first; the diagnostics describe what was still outstanding.
+        case timedOut(ShutdownDiagnostics)
+    }
+    /// The decision `deliver` made about one terminal result.
     public enum DeliveryResult {
         case committed(Receipt)
-        case pending(RuntimePendingID, RuntimePendingStatus)
-        case inProgress
-        case notPending
+        case pending(RuntimePendingID, PendingStatus)
+        /// The operation's authority is inactive or its outcome was already settled.
         case stale
         case foreignOwner
+    }
+    /// The result of one more attempt to admit a retained result.
+    public enum ReconcileResult {
+        case committed(Receipt)
+        case pending(RuntimePendingID, PendingStatus)
+        case inProgress
+        case notPending
+    }
+    /// The result of revoking a retained result's operation.
+    public enum DiscardResult {
         case discarded(Receipt)
         case rejected(Engine.Rejection)
+        case notPending
     }
     /// Creates owned authority only in the declared draft phase.
     public static func owned(_ initial: Draft) -> Owned<Draft> { Owned(initial) }
@@ -360,9 +400,7 @@ nonisolated public enum IsolatedNote {
             next = .draft(saving.draft)
             plan = .init(scopes: [.remove(scope)], controlCount: 1)
         }
-        do { return Prepared(candidate: try Engine.prepare(on: observation.stamp, next: next, plan: plan)) } catch {
-            throw .plan(error)
-        }
+        return Prepared(candidate: Engine.propose(on: observation.stamp, next: next, plan: plan))
     }
     /// The lower-guarantee engine type; live facade instances remain private.
     public typealias Engine = RuntimeState<Model, Draft>
@@ -396,27 +434,31 @@ nonisolated public enum IsolatedNote {
             terminal: batch.terminal
         )
     }
-    private static func project(_ finish: Ledger.Finish) -> DeliveryResult {
+    private static func project(_ finish: Ledger.Finish) -> ReconcileResult {
         switch finish {
         case .committed(let stamp): .committed(Receipt(snapshot: project(stamp)))
         case .pending(let id, let status): .pending(id, status)
         case .notPending: .notPending
         }
     }
-    private static func project(_ delivery: RuntimeHostDelivery<Model, Draft>) -> DeliveryResult {
+    // The raw host reports only the cases each operation can produce; the rest cannot occur.
+    private static func reconciled(_ delivery: RuntimeHostDelivery<Model, Draft>) -> ReconcileResult {
         switch delivery {
         case .committed(let stamp): .committed(Receipt(snapshot: project(stamp)))
         case .pending(let id, let status): .pending(id, status)
         case .inProgress: .inProgress
-        case .notPending: .notPending
-        case .stale: .stale
-        case .foreignOwner: .foreignOwner
+        default: .notPending
+        }
+    }
+    private static func discarded(_ delivery: RuntimeHostDelivery<Model, Draft>) -> DiscardResult {
+        switch delivery {
         case .discarded(let stamp): .discarded(Receipt(snapshot: project(stamp)))
         case .rejected(let reason): .rejected(reason)
+        default: .notPending
         }
     }
     private static func prepareDelivery(_ attempt: Ledger.Attempt) -> Ledger.Preparation {
-        guard case .saving(let saving) = attempt.snapshot.model else { return .failure(.domain(.invalidPhase)) }
+        guard case .saving(let saving) = attempt.snapshot.model else { return .failure(.preparation(.invalidPhase)) }
         let next: Model
         switch attempt.outcome.result {
         case .success(let saved): next = .saved(saved)
@@ -436,7 +478,7 @@ nonisolated public enum IsolatedNote {
                     )
                 )
             )
-        } catch { return .failure(.plan(error)) }
+        } catch { return .failure(.admission(.plan(error))) }
     }
 }
 

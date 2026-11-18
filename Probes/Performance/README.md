@@ -10,7 +10,7 @@ python3 Scripts/check-performance.py \
   --build-root "$PWD/.build/arm64-apple-macosx/release"
 ```
 
-Run this after the candidate is frozen. The harness observes a native Release build of `StateMachineSchema`, selects its shipping runtime dependency closure from the native plan, and freezes those exact modules, objects and macro executable into the external output. It never adds a benchmark target or unsafe flags to the shipping manifest. Omitting `--build-root` uses a new independent SwiftPM scratch directory inside the evidence output; that can require a cold SwiftSyntax build. Existing-build and consumer compile costs are separate command receipts, not latency samples.
+Run this after the candidate is frozen. The harness observes a native Release build of `StateMachine`, selects its shipping runtime dependency closure from the native plan, and freezes those exact modules, objects and macro executable into the external output. It never adds a benchmark target or unsafe flags to the shipping manifest. Omitting `--build-root` uses a new independent SwiftPM scratch directory inside the evidence output; that can require a cold SwiftSyntax build. Existing-build and consumer compile costs are separate command receipts, not latency samples.
 
 For fixture development, the small control runs 100 operations with one warmup and one measured repetition:
 

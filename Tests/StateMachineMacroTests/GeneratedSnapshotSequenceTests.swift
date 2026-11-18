@@ -1,6 +1,5 @@
 import StateMachine
 import StateMachineExamples
-import StateMachineSchema
 import Testing
 
 @StateMachine(mode: .shared)
@@ -16,7 +15,7 @@ nonisolated private enum SequenceFlow: Sendable {
 
 @Suite(.timeLimit(.minutes(1))) struct GeneratedSnapshotSequenceTests {
     @MainActor @Test func mainActorHostSequenceFollowsTheOwnerToItsClosedSnapshot() async throws {
-        let owner = SequenceFlow.MainActorHost(.init(), drivers: .init())
+        let owner = SequenceFlow.MainActorHost(.init())
         var revisions: [UInt64] = []
         var values: [Int] = []
         var closed = false
@@ -35,7 +34,7 @@ nonisolated private enum SequenceFlow: Sendable {
     }
 
     @MainActor @Test func mainActorHostSequenceComposesWithSequenceOperators() async throws {
-        let owner = SequenceFlow.MainActorHost(.init(), drivers: .init())
+        let owner = SequenceFlow.MainActorHost(.init())
         let snapshots: SequenceFlow.Snapshots = try owner.snapshots()
         var revisions: [UInt64] = []
         for await revision in snapshots.map({ $0.revision }).prefix(2) {
@@ -47,7 +46,7 @@ nonisolated private enum SequenceFlow: Sendable {
     }
 
     @Test func actorHostSequenceFollowsTheOwnerToItsClosedSnapshot() async throws {
-        let owner = SequenceFlow.ActorHost(.init(), drivers: .init())
+        let owner = SequenceFlow.ActorHost(.init())
         var revisions: [UInt64] = []
         var closed = false
         for await snapshot in try await owner.snapshots() {
@@ -63,7 +62,7 @@ nonisolated private enum SequenceFlow: Sendable {
     }
 
     @Test func sharedSequenceFollowsTheOwnerToItsClosedSnapshot() async throws {
-        let owner = SequenceFlow.Shared(.init(), drivers: .init())
+        let owner = SequenceFlow.Shared(.init())
         var revisions: [UInt64] = []
         var closed = false
         for await snapshot in try owner.snapshots() {
@@ -79,7 +78,7 @@ nonisolated private enum SequenceFlow: Sendable {
     }
 
     @Test func creationReportsExhaustedSubscriberCapacity() async throws {
-        let owner = SequenceFlow.Shared(.init(), drivers: .init(), configuration: try .init(subscribers: 1))
+        let owner = SequenceFlow.Shared(.init(), configuration: try .init(subscribers: 1))
         let held: SequenceFlow.Snapshots = try owner.snapshots()
         #expect(throws: SequenceFlow.SubscriptionFailure.capacityExceeded) { try owner.snapshots() }
         _ = held
@@ -89,7 +88,7 @@ nonisolated private enum SequenceFlow: Sendable {
     @MainActor @Test func isolatedSchemaSequenceCarriesConfinedSnapshots() async throws {
         let owner = GeneratedNote.MainActorHost(
             .init(text: "confined"),
-            drivers: .init(save: { input in .success(.init(text: input.text)) })
+            drivers: .init(save: { input in .init(text: input.text) })
         )
         let snapshots: GeneratedNote.MainActorSnapshots = try owner.snapshots()
         var revisions: [UInt64] = []
@@ -115,7 +114,7 @@ nonisolated private enum SequenceFlow: Sendable {
     @MainActor @Test func isolatedSchemaProjectionComposesWithSequenceOperators() async throws {
         let owner = GeneratedNote.MainActorHost(
             .init(text: "confined"),
-            drivers: .init(save: { input in .success(.init(text: input.text)) })
+            drivers: .init(save: { input in .init(text: input.text) })
         )
         var revisions: [UInt64] = []
         for await revision in try owner.snapshots({ $0.revision }).prefix(2) {

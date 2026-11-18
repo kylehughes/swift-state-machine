@@ -59,13 +59,24 @@ struct Schema {
     struct Operation {
         let name: String
         let effect: String
-        let scope: String
+        /// The named primary scope, or `nil` for the private scope of an operation that names none.
+        let scope: String?
         let requires: [String]
         let activeIn: [String]
         let admission: Admission
         let inputType: String
         let outputType: String
+        /// The declared failure spelling, `Never` when the namespace declares no `Failure` alias.
         let failureType: String
+        /// Whether the namespace declares a `Failure` alias.
+        let declaresFailure: Bool
+
+        /// The primary scope's key: the named case, or a private key that no authored reference can spell.
+        var scopeKey: String { scope ?? "\(name).self" }
+        /// The failure type as generated code spells it; an undeclared alias is never referenced.
+        var failure: String { declaresFailure ? "\(name).Failure" : "Never" }
+        /// Whether the operation cannot fail, so its driver returns the output itself.
+        var isInfallible: Bool { failureType == "Never" }
     }
 
     struct Transition {
@@ -107,13 +118,15 @@ struct Schema {
         let choices: [String]
     }
 
-    /// The authored function that validates saved data into a resting phase.
+    /// The authored function that validates saved data into a restorable phase.
     struct Restoration {
         let name: String
         /// The saved data type, spelled so it resolves outside the schema.
         let archiveType: String
         /// The typed failure, spelled so it resolves outside the schema.
         let failureType: String?
+        /// The phase cases listed in `allows:`, restorable whether or not an operation may be active in them.
+        let allows: [String]
     }
 
     let name: String
@@ -130,10 +143,23 @@ struct Schema {
     let routes: [Route]
     let restoration: Restoration?
 
-    /// The phases in which no operation is active, in declaration order; only these can be restored.
+    /// The phases in which no operation is active, in declaration order.
     var restingPhases: [Phase] {
         phases.filter { phase in !operations.contains { $0.activeIn.contains(phase.caseName) } }
     }
+
+    /// The phases saved data can restore, in declaration order: every resting phase and each phase
+    /// the `@Restoration` function lists in `allows:`.
+    var restorablePhases: [Phase] {
+        let allowed = Set(restoration?.allows ?? [])
+        return phases.filter { phase in
+            allowed.contains(phase.caseName) || !operations.contains { $0.activeIn.contains(phase.caseName) }
+        }
+    }
+
+    /// Every scope in identifier order: the declared `Scope` cases, then one private scope for each
+    /// operation that names no scope.
+    var scopeKeys: [String] { scopes + operations.filter { $0.scope == nil }.map(\.scopeKey) }
 
     static func parse(
         _ declaration: EnumDeclSyntax,
@@ -361,11 +387,25 @@ private struct SchemaParser {
         return Syntax(declaration)
     }
 
+    /// The generic arguments of a runtime type spelled `Name<…>` or, module-qualified, `StateMachine.Name<…>`.
+    private func runtimeGenericArguments(_ type: TypeSyntax, named name: String) -> GenericArgumentListSyntax? {
+        if let identifier = type.as(IdentifierTypeSyntax.self), identifier.name.text == name {
+            return identifier.genericArgumentClause?.arguments
+        }
+        if let member = type.as(MemberTypeSyntax.self), member.name.text == name,
+            member.baseType.as(IdentifierTypeSyntax.self)?.name.text == "StateMachine",
+            member.baseType.as(IdentifierTypeSyntax.self)?.genericArgumentClause == nil
+        {
+            return member.genericArgumentClause?.arguments
+        }
+        return nil
+    }
+
     private func marker(_ attributes: AttributeListSyntax, named name: String) throws -> AttributeSyntax? {
         let matches = attributes.compactMap { $0.as(AttributeSyntax.self) }
             .filter {
                 // The module-qualified spelling names the same macro.
-                [name, "StateMachineSchema.\(name)"].contains($0.attributeName.trimmedDescription)
+                [name, "StateMachine.\(name)"].contains($0.attributeName.trimmedDescription)
             }
         guard matches.count <= 1 else {
             try reject(attributes, "Apply @\(name) only once to a declaration.")
@@ -662,8 +702,8 @@ private struct SchemaParser {
             }
             let metadata = try arguments(
                 attribute,
-                required: ["scope", "activeIn", "admission"],
-                optional: ["requires"]
+                required: ["activeIn"],
+                optional: ["scope", "requires", "admission"]
             )
             let effect = lowerCamel(namespace.name.text)
             guard effect != namespace.name.text, identifier(effect), !["cancel", "authority"].contains(effect) else {
@@ -678,31 +718,35 @@ private struct SchemaParser {
                     "Operation '\(namespace.name.text)' generates the same effect case '\(effect)' as another operation; rename one."
                 )
             }
-            let scope = try caseReference(metadata["scope"]!, in: "Scope")
+            // Without a named scope, the operation holds a private scope that no edge can invalidate.
+            let scope = try metadata["scope"].map { try caseReference($0, in: "Scope") }
             let dependencies = try metadata["requires"].map { try caseReferences($0, in: "Scope") } ?? []
             let activeIn = try typeReferences(metadata["activeIn"]!).map(phase)
-            guard scopes.contains(scope),
-                Set(dependencies).isSubset(of: Set(scopes)), !dependencies.contains(scope),
+            guard scope.map(scopes.contains) ?? true,
+                Set(dependencies).isSubset(of: Set(scopes)), !dependencies.contains(where: { $0 == scope }),
                 !activeIn.isEmpty
             else {
                 try reject(
                     attribute,
-                    "Operation metadata must reference a primary Scope case, distinct additional Scope cases, and at least one active phase."
+                    "Operation metadata must reference declared Scope cases, require no scope twice or as its own primary scope, and name at least one active phase."
                 )
             }
             let aliases = namespace.memberBlock.members.compactMap { $0.decl.as(TypeAliasDeclSyntax.self) }
-            guard aliases.count == 3, Set(aliases.map { $0.name.text }) == ["Input", "Output", "Failure"],
+            let aliasNames = aliases.map { $0.name.text }
+            guard aliases.count == Set(aliasNames).count,
+                [["Input", "Output"], ["Input", "Output", "Failure"]].contains(Set(aliasNames)),
                 aliases.allSatisfy({ $0.genericParameterClause == nil })
             else {
                 try reject(
                     namespace,
-                    "An operation declares exactly three explicit nongeneric typealiases: Input, Output, and Failure."
+                    "An operation declares explicit nongeneric Input and Output typealiases, and a Failure typealias unless it cannot fail."
                 )
             }
             let types = Dictionary(
                 uniqueKeysWithValues: aliases.map { ($0.name.text, $0.initializer.value.trimmedDescription) }
             )
-            let policy = try admission(metadata["admission"]!)
+            let policy = try metadata["admission"].map(admission) ?? .latest
+            let failure = types["Failure"] ?? "Never"
             operations.append(
                 Schema.Operation(
                     name: namespace.name.text,
@@ -713,10 +757,12 @@ private struct SchemaParser {
                     admission: policy,
                     inputType: types["Input"]!,
                     outputType: types["Output"]!,
-                    failureType: types["Failure"]! == "Swift.Never" ? "Never" : types["Failure"]!
+                    failureType: failure == "Swift.Never" ? "Never" : failure,
+                    declaresFailure: types["Failure"] != nil
                 )
             )
         }
+        // A private scope has one holder, so only named scopes can disagree about eligibility.
         for scope in scopes {
             let sets = operations.filter { $0.scope == scope }.map { Set($0.activeIn) }
             guard sets.dropFirst().allSatisfy({ $0 == sets.first }) else {
@@ -754,21 +800,19 @@ private struct SchemaParser {
                 )
             }
             try validateFunction(function, role: isRoute ? "Routers" : "Transitions")
-            if !isRoute,
-                ["withValue", "phase", "payload", "record", "claim", "value", "revision", "description"]
-                    .contains(function.name.text)
+            // A router becomes the observed and owned phase's method for its input.
+            if ["withValue", "takeValue", "phase", "payload", "record", "claim", "value", "revision", "description"]
+                .contains(function.name.text)
             {
                 try reject(
                     function,
-                    "'\(function.name.text)' is reserved by generated phase wrappers; rename this transition."
+                    "'\(function.name.text)' is reserved by generated phase wrappers; rename this \(isRoute ? "router" : "transition")."
                 )
             }
-            if !isRoute, function.signature.effectSpecifiers?.throwsClause != nil,
-                ["plan", "invalidPhase"].contains(function.name.text)
-            {
+            if function.signature.effectSpecifiers?.throwsClause != nil, function.name.text == "invalidPhase" {
                 try reject(
                     function.name,
-                    "'\(function.name.text)' is already a PreparationRejection case; rename this throwing transition."
+                    "'\(function.name.text)' is already a PreparationRejection case; rename this throwing \(isRoute ? "router" : "transition")."
                 )
             }
             guard edgeNames.insert(function.name.text).inserted,
@@ -863,9 +907,7 @@ private struct SchemaParser {
             var failureType = thrown
             let shape: Schema.Transition.Shape
             let destinationNode: TypeSyntax
-            if let generic = result.as(IdentifierTypeSyntax.self), generic.name.text == "Advance",
-                let arguments = generic.genericArgumentClause?.arguments, arguments.count == 4
-            {
+            if let arguments = runtimeGenericArguments(result, named: "Advance"), arguments.count == 4 {
                 let list = Array(arguments)
                 guard mode == .ownedOnly, case .type(let destination) = list[1].argument else {
                     try reject(
@@ -883,9 +925,7 @@ private struct SchemaParser {
                 shape = .advance
                 destinationNode = destination
                 failureType = list[3].argument.trimmedDescription
-            } else if let generic = result.as(IdentifierTypeSyntax.self), generic.name.text == "Change",
-                let arguments = generic.genericArgumentClause?.arguments, arguments.count == 2
-            {
+            } else if let arguments = runtimeGenericArguments(result, named: "Change"), arguments.count == 2 {
                 let list = Array(arguments)
                 guard case .type(let destination) = list[0].argument else {
                     try reject(result, "Change must name the destination phase payload type.")
@@ -932,10 +972,10 @@ private struct SchemaParser {
                 try reject(metadata["invalidates"]!, "invalidates must reference declared Scope cases.")
             }
             for (operation, reference) in zip(started, startReferences) {
-                let boundScopes = [operation.scope] + operation.requires
+                let boundScopes = [operation.scopeKey] + operation.requires
                 guard operation.activeIn.contains(to),
                     boundScopes.allSatisfy({ scope in
-                        operations.first(where: { $0.scope == scope })?.activeIn.contains(to) ?? true
+                        operations.first(where: { $0.scopeKey == scope })?.activeIn.contains(to) ?? true
                     })
                 else {
                     try reject(
@@ -982,6 +1022,13 @@ private struct SchemaParser {
                         "A router returns its choice among \(choices.joined(separator: ", ")): Route.\(namespace)."
                     )
                 }
+                // An owned input router may return Route.<Router>Result, whose `rejected` case returns the source.
+                if route.trigger.kind == .input, route.failureType != nil, choices.contains("rejected") {
+                    try reject(
+                        function.name,
+                        "A throwing router cannot choose an edge named 'rejected', which its owned result uses; rename the edge."
+                    )
+                }
             } else {
                 guard result.trimmedDescription == "Never", route.failureType != nil else {
                     try reject(
@@ -1001,14 +1048,28 @@ private struct SchemaParser {
                 choices: choices
             )
         }
-        let restoration = try restoration(members, mode: mode, schema: declaration.name.text)
+        let namespaces = Set(routes.compactMap(\.namespace))
+        if let route = routes.first(where: { $0.namespace.map { namespaces.contains($0 + "Result") } ?? false }) {
+            try reject(
+                declaration,
+                "Router '\(route.name)' would generate Route.\(route.namespace!)Result, which another router's choice type uses; rename a router."
+            )
+        }
+        let restoration = try restoration(
+            members,
+            mode: mode,
+            schema: declaration.name.text,
+            phases: phases,
+            operations: operations
+        )
         var reserved: Set<String> = [
-            "Owned", "Observed", "Snapshot", "Prepared", "PreparationResult", "PreparationRejection", "CommitResult",
+            "Owned", "Observed", "Snapshot", "Prepared", "PreparationRejection", "CommitResult",
             "CommitRejection", "Receipt", "Completion", "Drivers", "Local", "MainActor", "Shared", "Actor",
             "MainActorHost", "ActorHost", "MainActorDrivers", "Configuration", "LocalConfiguration", "makeOwned",
             "owned", "prepare", "ExecutionHandle", "Host",
             "ExecutionDisposition", "AcknowledgmentResult", "Command", "CommandBatch", "PendingCompletionID",
-            "PendingCompletion", "DeliveryResult", "_StateMachineEngine", "_StateMachineLedger",
+            "PendingCompletion", "DeliveryResult", "ReconcileResult", "DiscardResult", "_StateMachineEngine",
+            "_StateMachineLedger",
             "_TransitionSourceIsPhasePayload", "_TransitionReturnsDeclaredResult", "_TriggerPayloadMatchesDeclaration",
             "_RouterSourceIsPhasePayload", "_SharedModeRequiresSendable",
             "_OperationFailureIsError", "_EffectIsCopyable", "_stateMachineWitnesses",
@@ -1018,20 +1079,21 @@ private struct SchemaParser {
             "_stateMachineDeliveryPreparation", "_stateMachineEligibility", "Phase", "Int", "UInt32", "UInt64",
             "String", "Bool",
             "Void", "Never", "Result", "Error", "Sendable", "Copyable", "Array", "RuntimeState", "RuntimeTicket",
-            "RuntimeLimits", "RuntimeManagedConfiguration", "RuntimeScopeID", "RuntimeOperation",
+            "Limits", "ManagedConfiguration", "RuntimeScopeID", "RuntimeOperation",
             "RuntimeOperationPolicy",
-            "RuntimeWork", "RuntimeDeliveryClaim", "RuntimeDeliveryLedger", "RuntimePendingID", "RuntimePendingStatus",
+            "RuntimeWork", "RuntimeDeliveryClaim", "RuntimeDeliveryLedger", "RuntimePendingID", "PendingStatus",
             "RuntimeCompletionPolicy", "RuntimeSharedHost", "RuntimeMainActorHost", "RuntimeActorHost",
-            "RuntimeHostDelivery", "RuntimeHostSubscriptionFailure", "RuntimeMainActorSubscription",
-            "RuntimeSubscription", "RuntimeSnapshots", "RuntimeMainActorSnapshots", "Snapshots",
+            "RuntimeHostDelivery", "SubscriptionFailure", "MainActorSubscription",
+            "Subscription", "SnapshotSequence", "MainActorSnapshotSequence", "Snapshots",
             "MainActorSnapshots", "Change", "Advance",
-            "PreparationFailure", "PlanRejection", "Effect", "Route", "SendRejection", "Subscription",
-            "MainActorSubscription", "SubscriptionFailure", "CompletionPolicy", "PendingStatus", "StateMachineSnapshot",
+            "PlanRejection", "Effect", "Route", "SendRejection", "CompletionPolicy", "StateMachineSnapshot",
             "StateMachineReceipt", "MainActorStateMachineHost", "Restoration", "_stateMachineRestored",
-            "ShutdownResult", "ShutdownDiagnostics", "RuntimeShutdownDiagnostics",
+            "ShutdownResult", "ShutdownDiagnostics", "FlushResult",
+            // Generated code qualifies the runtime's short type names with the module name.
+            "StateMachine",
         ]
         for operation in operations {
-            for suffix in ["Work", "Completion", "SuccessCompletion", "FailureCompletion"] {
+            for suffix in ["Work", "Completion"] {
                 reserved.insert(operation.name + suffix)
             }
         }
@@ -1108,10 +1170,16 @@ private struct SchemaParser {
     }
 
     /// Reads the optional `@Restoration` validator: `static func <name>(_ saved: Archive) -> Restoration`.
+    ///
+    /// Its optional `allows:` list names phases that saved data may restore, with no outstanding work,
+    /// whether or not an operation may be active in them. Listing a phase keeps it restorable when an
+    /// operation later becomes active there.
     private func restoration(
         _ members: MemberBlockItemListSyntax,
         mode: Schema.Mode,
-        schema: String
+        schema: String,
+        phases: [Schema.Phase],
+        operations: [Schema.Operation]
     ) throws -> Schema.Restoration? {
         let marked = try members.compactMap { member -> (function: FunctionDeclSyntax, attribute: AttributeSyntax)? in
             guard let function = member.decl.as(FunctionDeclSyntax.self),
@@ -1128,7 +1196,17 @@ private struct SchemaParser {
         guard mode != .ownedOnly else {
             try reject(attribute, "@Restoration is unavailable in .ownedOnly, which generates no owner to restore.")
         }
-        guard attribute.arguments == nil else { try reject(attribute, "@Restoration takes no arguments.") }
+        let metadata = try arguments(attribute, required: [], optional: ["allows"])
+        let allows = try (metadata["allows"].map(typeReferences) ?? [])
+            .map { reference -> String in
+                guard let phase = phases.first(where: { $0.typeName == reference.name }) else {
+                    try reject(
+                        reference.node,
+                        "'\(reference.name)' is not a phase payload type declared in this schema."
+                    )
+                }
+                return phase.caseName
+            }
         guard identifier(function.name.text) else {
             try reject(function.name, "Use an unescaped Swift restoration function identifier.")
         }
@@ -1155,14 +1233,15 @@ private struct SchemaParser {
         else {
             try reject(
                 function.signature.returnClause.map(Syntax.init) ?? Syntax(function),
-                "A @Restoration function returns Restoration, the resting phase to restore."
+                "A @Restoration function returns Restoration, the phase to restore."
             )
         }
         return Schema.Restoration(
             name: function.name.text,
             archiveType: outsideSchema(parameter.type, schema: schema),
             failureType: function.signature.effectSpecifiers?.throwsClause?.type
-                .map { outsideSchema($0, schema: schema) }
+                .map { outsideSchema($0, schema: schema) },
+            allows: allows
         )
     }
 

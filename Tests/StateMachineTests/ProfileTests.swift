@@ -131,8 +131,8 @@ import os
         guard case .loading(let loading) = local.snapshot(),
             case .success(let completion) = work.succeeded(Profile(userID: id, name: "Kyle"))
         else { return }
-        let candidate = try loading.received(completion)
-        let duplicate = try loading.received(completion)
+        let candidate = loading.received(completion)
+        let duplicate = loading.received(completion)
         let result = local.commit(candidate)
         guard case .committed(let receipt) = result else {
             Issue.record("Completion rejected")
@@ -217,34 +217,49 @@ import os
 
     @Test func isolatedTextReplacementReportsAdmissionFailure() throws {
         var local = IsolatedNote.Local(.init(text: "before", tags: ["retained"]), configuration: try .init(commits: 1))
-        guard case .committed(let first) = try local.replaceText("first") else {
-            Issue.record("First replacement rejected")
+        // A replacement starts and cancels nothing, so it takes no queue slot and needs no drain.
+        guard case .committed(let first) = try local.replaceText("first"),
+            case .committed(let second) = try local.replaceText("second")
+        else {
+            Issue.record("A replacement waited for a queue slot")
             return
         }
         #expect(first.revision == 1)
-        guard case .rejected(.capacityExceeded, let current) = try local.replaceText("second") else {
+        #expect(second.revision == 2)
+        #expect(local.drainCommands(limit: 1).isEmpty)
+        // Saving queues its start, which fills the one slot.
+        guard case .committed = try local.send(.save) else {
+            Issue.record("Save rejected")
+            return
+        }
+        // Replacing the saving draft cancels the save, so this batch needs a slot too.
+        guard case .rejected(.capacityExceeded, let current) = try local.replaceText("third") else {
             Issue.record("Full queue did not report capacity rejection")
             return
         }
-        #expect(current.revision == 1)
-        #expect(current.value.text == "first")
+        #expect(current.revision == 3)
+        #expect(current.value.text == "second")
         #expect(local.snapshot().value.tags == ["retained"])
-        #expect(local.drainCommands(limit: 1).count == 1)
-        guard case .committed(let second) = try local.replaceText("second") else {
+        guard case .save(let work)? = local.drainCommands(limit: 1).first?.commands.first else {
+            Issue.record("The save batch carried no start")
+            return
+        }
+        guard case .committed(let third) = try local.replaceText("third") else {
             Issue.record("Replacement rejected after draining")
             return
         }
-        #expect(second.revision == 2)
-        #expect(second.snapshot.value.text == "second")
-        #expect(second.snapshot.value.tags == ["retained"])
+        #expect(third.revision == 4)
+        #expect(third.snapshot.value.text == "third")
+        #expect(third.snapshot.value.tags == ["retained"])
         _ = local.close()
-        guard case .rejected(.closed, let closed) = try local.replaceText("third") else {
+        guard case .rejected(.closed, let closed) = try local.replaceText("fourth") else {
             Issue.record("Closed owner did not report rejection")
             return
         }
         #expect(closed.isClosed)
-        #expect(closed.value.text == "second")
+        #expect(closed.value.text == "third")
         _ = local.drainCommands(limit: 2)
+        _ = local.acknowledgeExecution(work.execution, disposition: .skippedBeforeStart)
         let quiescent = local.isQuiescent
         #expect(quiescent)
     }

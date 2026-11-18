@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 
 /// The isolated schema counterpart of the handwritten editor, with confined value inputs and outputs.
 @StateMachine(mode: .isolated)
@@ -30,23 +29,19 @@ nonisolated public enum GeneratedNote {
     @Initial case draft(Draft = Draft())
     case saving(Saving)
     case saved(Saved)
-    /// Authority that edges invalidate and operations hold.
-    enum Scope { case save }
     /// Dynamic editor inputs.
     public enum Input: ~Sendable {
         case save
         case edit(String)
         case cancel
     }
-    /// One confined operation; no Sendable conformance is imposed on its input or outcome.
-    @Operation(scope: Scope.save, activeIn: [Saving.self], admission: .latest)
+    /// One confined operation that cannot fail; no Sendable conformance is imposed on its input or outcome.
+    @Operation(activeIn: [Saving.self])
     public enum Save {
         /// The immutable input.
         public typealias Input = Draft
         /// The independent output.
         public typealias Output = Saved
-        /// This sample's storage cannot fail.
-        public typealias Failure = Never
     }
     @Transition(on: Input.save, starts: [Save.self])
     fileprivate static func begin(_ source: Draft) -> Change<Saving, Effect.Begin> {

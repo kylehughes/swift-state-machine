@@ -98,7 +98,7 @@ import Testing
         guard
             case .pending(let finishedID, .reconciliationRequired) = ledger.finish(
                 attempt,
-                preparation: .failure(.domain(.denied)),
+                preparation: .failure(.preparation(.denied)),
                 in: &core
             )
         else {
@@ -106,7 +106,7 @@ import Testing
             return
         }
         #expect(finishedID == id)
-        #expect(ledger.pending.first?.lastRejection == .preparation(.domain(.denied)))
+        #expect(ledger.pending.first?.lastRejection == .preparation(.denied))
         #expect(ledger.pending.map(\.outcome) == [42])
         #expect(core.isActive(work.ticket))
         #expect(core.executionReservations.first?.isPreparing == false)
@@ -125,7 +125,9 @@ import Testing
         let candidate = try terminal(stale, ticket: work.ticket)
         try accept(&core, model: 2)
         _ = ledger.finish(stale, preparation: .success(candidate), in: &core)
-        ledger.scheduleRetry(id)
+        let decision = try #require(ledger.pending.first?.decision)
+        let scheduled = ledger.scheduleRetry(id, after: decision)
+        #expect(scheduled)
         #expect(ledger.pending.first?.status == .retryScheduled)
         return (id, work.ticket)
     }
@@ -151,14 +153,14 @@ import Testing
         let scheduled = try scheduledAfterConflict(ledger: &ledger, core: &core)
         // An explicit attempt finishes between the scheduling decision and the queued turn.
         let explicit = try claim(scheduled.id, ledger: &ledger, core: &core)
-        _ = ledger.finish(explicit, preparation: .failure(.domain(.denied)), in: &core)
+        _ = ledger.finish(explicit, preparation: .failure(.preparation(.denied)), in: &core)
         let attempts = ledger.pending.first?.attempts
         guard case .notPending = ledger.claim(scheduled.id, in: &core, scheduledRetry: true) else {
             Issue.record("The queued turn overrode a newer decision")
             return
         }
         #expect(ledger.pending.first?.status == .reconciliationRequired)
-        #expect(ledger.pending.first?.lastRejection == .preparation(.domain(.denied)))
+        #expect(ledger.pending.first?.lastRejection == .preparation(.denied))
         #expect(ledger.pending.first?.attempts == attempts)
     }
 
@@ -189,6 +191,144 @@ import Testing
             Issue.record("The retained candidate was lost")
             return
         }
+    }
+
+    /// Prepares the terminal candidate for an attempt, or the plan defect that prevents one.
+    private func preparation(_ attempt: Ledger.Attempt, ticket: RuntimeTicket) -> Ledger.Preparation {
+        do throws(PlanRejection) {
+            return .success(
+                try Core.prepare(
+                    on: attempt.snapshot,
+                    next: attempt.outcome,
+                    requiring: [ticket],
+                    plan: .init(retire: [ticket], finishingClaims: [attempt.claim])
+                )
+            )
+        } catch { return .failure(.admission(.plan(error))) }
+    }
+
+    /// Commits an unrelated change, as a concurrent caller would; an empty plan has no defect.
+    private func commitUnrelated(_ core: inout Core, model: Int) {
+        if case .candidate(let candidate) = Core.propose(on: core.snapshot, next: model) { _ = core.commit(candidate) }
+    }
+
+    /// Claims, prepares, and finishes one explicit attempt, as `reconcile(id:)` does.
+    private func explicitAttempt(
+        _ id: RuntimePendingID,
+        ticket: RuntimeTicket,
+        ledger: inout Ledger,
+        core: inout Core
+    ) -> Ledger.Finish? {
+        guard case .claimed(let attempt) = ledger.claim(id, in: &core) else { return nil }
+        return ledger.finish(attempt, preparation: preparation(attempt, ticket: ticket), in: &core)
+    }
+
+    @Test func anImmediateRetryYieldsToAnExplicitAttemptThatFinishedBeforeIt() throws {
+        // One queue slot, so the explicit attempt's candidate waits for capacity.
+        var core = try engine(commits: 1)
+        var ledger = Ledger()
+        let work = try #require(start(&core).first)
+        #expect(core.acknowledge(work.ticket) == .recorded)
+        let id = try retain(42, ticket: work.ticket, ledger: &ledger, core: &core)
+        var claims = 0
+        var preparations = 0
+        var explicit: Ledger.Finish?
+        let result = Ledger.reconcile(
+            id,
+            policy: .retryPure,
+            automatic: true,
+            claim: { decision in
+                claims += 1
+                if claims == 2 {
+                    // The explicit attempt lands after the automatic one lost its conflict and
+                    // before the automatic loop claims again.
+                    explicit = explicitAttempt(id, ticket: work.ticket, ledger: &ledger, core: &core)
+                }
+                return ledger.claim(id, in: &core, continuing: decision)
+            },
+            prepare: { attempt in
+                preparations += 1
+                let candidate = preparation(attempt, ticket: work.ticket)
+                // Another commit wins the race and takes the only queue slot.
+                if preparations == 1 { commitUnrelated(&core, model: 2) }
+                return candidate
+            },
+            finish: { attempt, preparation in
+                let finished = ledger.finish(attempt, preparation: preparation, in: &core)
+                return (finished, ledger.pending.first)
+            },
+            scheduleRetry: { ledger.scheduleRetry($0, after: $1) }
+        )
+        guard case .pending(_, .waitingForCapacity)? = explicit else {
+            Issue.record("The explicit attempt did not wait for capacity")
+            return
+        }
+        guard case .notPending = result else {
+            Issue.record("The automatic retry overrode the explicit attempt's decision")
+            return
+        }
+        #expect(preparations == 1)
+        #expect(ledger.pending.first?.status == .waitingForCapacity)
+        #expect(ledger.pending.first?.attempts == 2)
+        _ = core.drain(limit: 1)
+        guard case .committed(let snapshot) = ledger.retryAdmission(id, in: &core) else {
+            Issue.record("The explicit attempt's candidate was lost")
+            return
+        }
+        #expect(snapshot.model == 42)
+    }
+
+    @Test func aRetryIsNotScheduledAfterAnExplicitAttemptFinishedFirst() throws {
+        // Four conflicting commits fill the queue, so the explicit attempt waits for capacity.
+        var core = try engine(commits: 4)
+        var ledger = Ledger()
+        let work = try #require(start(&core).first)
+        #expect(core.acknowledge(work.ticket) == .recorded)
+        let id = try retain(42, ticket: work.ticket, ledger: &ledger, core: &core)
+        var preparations = 0
+        var explicit: Ledger.Finish?
+        let result = Ledger.reconcile(
+            id,
+            policy: .retryPure,
+            automatic: true,
+            claim: { ledger.claim(id, in: &core, continuing: $0) },
+            prepare: { attempt in
+                preparations += 1
+                let candidate = preparation(attempt, ticket: work.ticket)
+                commitUnrelated(&core, model: 100 + preparations)
+                return candidate
+            },
+            finish: { attempt, preparation in
+                let finished = ledger.finish(attempt, preparation: preparation, in: &core)
+                return (finished, ledger.pending.first)
+            },
+            scheduleRetry: { id, decision in
+                // The explicit attempt lands after the fourth conflict and before scheduling.
+                explicit = explicitAttempt(id, ticket: work.ticket, ledger: &ledger, core: &core)
+                return ledger.scheduleRetry(id, after: decision)
+            }
+        )
+        guard case .pending(_, .waitingForCapacity)? = explicit else {
+            Issue.record("The explicit attempt did not wait for capacity")
+            return
+        }
+        #expect(preparations == 4)
+        guard case .finished(.pending(_, .reconciliationRequired)) = result else {
+            Issue.record("The automatic path reported a retry it did not schedule")
+            return
+        }
+        #expect(ledger.pending.first?.status == .waitingForCapacity)
+        // A queued turn cannot claim an envelope whose retry was never scheduled.
+        guard case .notPending = ledger.claim(id, in: &core, scheduledRetry: true) else {
+            Issue.record("A queued turn discarded the explicit attempt's candidate")
+            return
+        }
+        _ = core.drain(limit: 1)
+        guard case .committed(let snapshot) = ledger.retryAdmission(id, in: &core) else {
+            Issue.record("The explicit attempt's candidate was lost")
+            return
+        }
+        #expect(snapshot.model == 42)
     }
 
     @Test func rootConflictRetainsEnvelopeUntilFreshExplicitPreparationCommits() throws {
@@ -316,7 +456,7 @@ import Testing
         #expect(core.executionReservations.first?.isPreparing == true)
         #expect(core.executionReservations.first?.execution == .terminated)
         #expect(core.executionReservations.first?.delivery == .settled)
-        guard case .notPending = ledger.finish(attempt, preparation: .failure(.domain(.denied)), in: &core) else {
+        guard case .notPending = ledger.finish(attempt, preparation: .failure(.preparation(.denied)), in: &core) else {
             Issue.record("Invalidated attempt remained pending")
             return
         }
@@ -411,7 +551,7 @@ import Testing
         guard
             case .pending(_, .reconciliationRequired) = ledger.finish(
                 held,
-                preparation: .failure(.domain(.denied)),
+                preparation: .failure(.preparation(.denied)),
                 in: &core
             )
         else {
@@ -441,7 +581,7 @@ import Testing
             id,
             policy: .retryPure,
             automatic: true,
-            claim: { ledger.claim(id, in: &core) },
+            claim: { ledger.claim(id, in: &core, continuing: $0) },
             prepare: { attempt in
                 preparationCount += 1
                 do throws(PlanRejection) {
@@ -452,20 +592,23 @@ import Testing
                             plan: .init(controlCount: reason == .invalidPlan ? -1 : 65)
                         )
                     )
-                } catch { return .failure(.plan(error)) }
+                } catch { return .failure(.admission(.plan(error))) }
             },
             finish: { attempt, preparation in
                 let finished = ledger.finish(attempt, preparation: preparation, in: &core)
-                return (finished, ledger.pending.first?.lastRejection)
+                return (finished, ledger.pending.first)
             },
-            scheduleRetry: { scheduled.append($0) }
+            scheduleRetry: { id, _ in
+                scheduled.append(id)
+                return true
+            }
         )
         guard case .finished(.pending(let retained, .reconciliationRequired)) = result else {
             Issue.record("Plan preparation failure was not retained for reconciliation")
             return
         }
         #expect(retained == id)
-        #expect(ledger.pending.first?.lastRejection == .preparation(.plan(reason)))
+        #expect(ledger.pending.first?.lastRejection == .admission(.plan(reason)))
         #expect(ledger.pending.first?.outcome == 42)
         #expect(ledger.pending.first?.attempts == 1)
         #expect(ledger.pending.first?.attemptsSaturated == false)
@@ -594,7 +737,7 @@ extension RuntimeDeliveryLedgerTests {
                 in: &core
             )
         else { throw TestFailure.admission }
-        #expect(ledger.pending.first?.lastRejection == .preparation(.plan(.invalidPlan)))
+        #expect(ledger.pending.first?.lastRejection == .admission(.plan(.invalidPlan)))
         let otherAttempt = try claim(id, ledger: &ledger, core: &core)
         let otherPlan = try Core.prepare(
             on: otherAttempt.snapshot,
@@ -610,7 +753,7 @@ extension RuntimeDeliveryLedgerTests {
             )
         else { throw TestFailure.admission }
         let pending = try #require(ledger.pending.first)
-        #expect(pending.lastRejection == .preparation(.plan(.invalidPlan)))
+        #expect(pending.lastRejection == .admission(.plan(.invalidPlan)))
         #expect(pending.attempts == 2)
         #expect(pending.outcome == 101)
         // Neither rejected candidate changed the root or consumed the other operation's authority.
@@ -652,7 +795,7 @@ extension RuntimeDeliveryLedgerTests {
         #expect(core.drain(limit: 10).isEmpty)
         let pending = try #require(ledger.pending.first)
         #expect(pending.outcome == 101)
-        #expect(pending.lastRejection == .preparation(.plan(.invalidPlan)))
+        #expect(pending.lastRejection == .admission(.plan(.invalidPlan)))
         let retry = try claim(id, ledger: &ledger, core: &core)
         let valid = try terminal(retry, ticket: work.ticket)
         guard case .committed = ledger.finish(retry, preparation: .success(valid), in: &core) else {
@@ -691,7 +834,8 @@ extension RuntimeDeliveryLedgerTests {
         #expect(held.preparationClaim == secondAttempt.claim)
         #expect(held.isPreparing)
         #expect(held.delivery == .settled)
-        guard case .notPending = ledger.finish(secondAttempt, preparation: .failure(.domain(.denied)), in: &core) else {
+        guard case .notPending = ledger.finish(secondAttempt, preparation: .failure(.preparation(.denied)), in: &core)
+        else {
             throw TestFailure.admission
         }
         #expect(core.executionReservations.isEmpty)

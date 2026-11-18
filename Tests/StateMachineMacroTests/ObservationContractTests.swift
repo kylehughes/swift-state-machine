@@ -1,6 +1,5 @@
 import Dispatch
 import StateMachine
-import StateMachineSchema
 import Testing
 
 @StateMachine(mode: .shared)
@@ -82,9 +81,9 @@ struct ObservationContractTests {
         let owner = Host(
             manual: .before(initial),
             scopes: [],
-            limits: try RuntimeLimits(),
+            limits: try Limits(),
             ticket: { $0 },
-            prepare: { _ in .failure(.plan(.invalidPlan)) }
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
         )
         let old = owner.snapshot()
         // This raw host exercises real shared storage and FIFO batches. The test
@@ -152,15 +151,15 @@ struct ObservationContractTests {
 
     @Test func sharedNestedSnapshotsAndProjectedCopyRemainIndependent_RT008() async throws {
         let original = ["rows": [[1, 2], [3, 4]]]
-        let owner = ObservationValueFlow.Shared(.init(left: 1, right: 10, history: original), drivers: .init())
+        let owner = ObservationValueFlow.Shared(.init(left: 1, right: 10, history: original))
         do {
             let before = owner.snapshot()
             guard case .before(let initial) = before,
-                case .committed(let first) = owner.commit(try initial.advance()),
+                case .committed(let first) = owner.commit(initial.advance()),
                 case .after(let after) = first.snapshot,
-                case .committed(let second) = owner.commit(try after.append(5)),
+                case .committed(let second) = owner.commit(after.append(5)),
                 case .after(let middle) = second.snapshot,
-                case .committed(let third) = owner.commit(try middle.append(7)),
+                case .committed(let third) = owner.commit(middle.append(7)),
                 case .after(let current) = owner.snapshot()
             else { throw Failure.unexpected }
             var projected = middle.value.history
@@ -188,9 +187,9 @@ struct ObservationContractTests {
         var owner = IsolatedObservationValueFlow.Local(.init(history: original))
         let before = owner.snapshot()
         guard case .value(let initial) = before,
-            case .committed(let first) = owner.commit(try initial.append(5)),
+            case .committed(let first) = owner.commit(initial.append(5)),
             case .value(let middle) = first.snapshot,
-            case .committed(let second) = owner.commit(try middle.append(7)),
+            case .committed(let second) = owner.commit(middle.append(7)),
             case .value(let current) = owner.snapshot()
         else { throw Failure.unexpected }
         var projected = middle.value.history
@@ -204,10 +203,10 @@ struct ObservationContractTests {
         #expect([before.revision, first.revision, second.revision] == [0, 1, 2])
         guard case .value(let reread) = owner.snapshot() else { throw Failure.unexpected }
         #expect(reread.value.history == current.value.history)
-        _ = owner.close()
-        #expect(owner.drainCommands(limit: 10).map(\.receipt.revision) == [1, 2, 3])
-        let quiescent = owner.isQuiescent
-        #expect(quiescent)
+        // Without operations, receipts are the return values; the owner queues no batches to drain.
+        let closed = owner.close()
+        #expect(closed.revision == 3)
+        #expect(owner.snapshot().isClosed)
     }
 
     @Test(.parksCooperativeThread) func slowSubscriberCoalescesSnapshotsWithoutCoalescingCommands_RT026() async throws {
@@ -218,9 +217,9 @@ struct ObservationContractTests {
         let owner = Host(
             manual: 0,
             scopes: [scope],
-            limits: try RuntimeLimits(),
+            limits: try Limits(),
             ticket: { $0 },
-            prepare: { _ in .failure(.plan(.invalidPlan)) }
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
         )
         let release = DispatchSemaphore(value: 0)
         let (entered, entry) = AsyncStream<Void>.makeStream()

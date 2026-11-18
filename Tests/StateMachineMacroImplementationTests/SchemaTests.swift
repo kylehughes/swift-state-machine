@@ -52,6 +52,20 @@ struct SchemaTests {
         #expect(result.operations.first?.inputType == "Int")
     }
 
+    @Test func acceptsModuleQualifiedMarkersAndRuntimeTypes() throws {
+        let qualified = Self.schema
+            .replacingOccurrences(of: "@StateMachine(mode:", with: "@StateMachine.StateMachine(mode:")
+            .replacingOccurrences(of: "@Initial", with: "@StateMachine.Initial")
+            .replacingOccurrences(of: "@Operation(", with: "@StateMachine.Operation(")
+            .replacingOccurrences(of: "@Transition(", with: "@StateMachine.Transition(")
+            .replacingOccurrences(of: "-> Change<Loading", with: "-> StateMachine.Change<Loading")
+        let result = try Self.parse(qualified)
+        #expect(result.initial == "idle")
+        #expect(result.operations.map(\.effect) == ["fetch"])
+        #expect(result.transitions.map(\.name) == ["begin", "cancel", "received"])
+        #expect(result.transitions.first?.effectNamespace == "Begin")
+    }
+
     @Test func rejectsMalformedMetadataAndSignatures() throws {
         let schema = Self.schema
         let failures: [(String, String)] = [
@@ -321,6 +335,65 @@ struct SchemaTests {
         #expect(throws: DiagnosticsError.self) { try Self.parse(duplicate) }
     }
 
+    @Test func diagnosesRouterNamesThatTheirGeneratedMethodsWouldShadow() throws {
+        let edges = #"""
+            @Transition(on: Input.start)
+            static func alternate(_ source: Idle, _ input: Int) -> Loading { fatalError() }
+            @Route(on: Input.start)
+            static func choose(_ source: Idle, _ input: Int) throws(MyError) -> Route.Choose { fatalError() }
+            """#
+        let routed = Self.schema.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\n" + edges)
+        _ = try Self.parse(routed)
+        let failures: [(String, String)] = [
+            (
+                routed.replacingOccurrences(of: "func choose(", with: "func revision(")
+                    .replacingOccurrences(of: "Route.Choose", with: "Route.Revision"),
+                "'revision' is reserved by generated phase wrappers; rename this router."
+            ),
+            (
+                routed.replacingOccurrences(of: "func choose(", with: "func invalidPhase(")
+                    .replacingOccurrences(of: "Route.Choose", with: "Route.InvalidPhase"),
+                "'invalidPhase' is already a PreparationRejection case; rename this throwing router."
+            ),
+            (
+                routed.replacingOccurrences(of: "func alternate(", with: "func rejected("),
+                "A throwing router cannot choose an edge named 'rejected', which its owned result uses; rename the edge."
+            ),
+        ]
+        for (source, message) in failures {
+            do {
+                _ = try Self.parse(source)
+                Issue.record("Expected rejection: \(message)")
+            } catch let error as DiagnosticsError {
+                #expect(error.diagnostics.map(\.message) == [message])
+            }
+        }
+    }
+
+    @Test func diagnosesARouterResultNameAnotherRouterUses() throws {
+        let edges = #"""
+            @Transition(on: Input.start)
+            static func alternate(_ source: Idle, _ input: Int) -> Loading { fatalError() }
+            @Route(on: Input.start)
+            static func pick(_ source: Idle, _ input: Int) -> Route.Pick { fatalError() }
+            @Transition(on: Input.cancel)
+            static func stay(_ source: Loading) -> Loading { fatalError() }
+            @Route(on: Input.cancel)
+            static func pickResult(_ source: Loading) -> Route.PickResult { fatalError() }
+            """#
+        let source = Self.schema.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\n" + edges)
+        do {
+            _ = try Self.parse(source)
+            Issue.record("Expected a Route.PickResult collision")
+        } catch let error as DiagnosticsError {
+            #expect(
+                error.diagnostics.map(\.message) == [
+                    "Router 'pick' would generate Route.PickResult, which another router's choice type uses; rename a router."
+                ]
+            )
+        }
+    }
+
     @Test func rejectsRedundantOrUndeclaredDependencies() {
         for dependency in ["load", "absent"] {
             let source = Self.schema.replacingOccurrences(
@@ -370,6 +443,17 @@ struct SchemaTests {
             (
                 Self.schema.replacingOccurrences(of: "Idle", with: "Host"),
                 "'Host' is reserved for generated members; rename the authored declaration."
+            ),
+            (
+                Self.schema.replacingOccurrences(of: "enum Flow", with: "enum StateMachine"),
+                "The schema name is reserved or shadowed by a direct member; choose a distinct domain name."
+            ),
+            (
+                Self.schema.replacingOccurrences(
+                    of: "struct Loading {}",
+                    with: "struct Loading {}\nstruct FlushResult {}"
+                ),
+                "'FlushResult' is reserved for generated members; rename the authored declaration."
             ),
         ]
         for (source, message) in failures {
@@ -501,7 +585,7 @@ struct SchemaTests {
             (owned, "@Restoration is unavailable in .ownedOnly, which generates no owner to restore."),
             (
                 Self.restorable.replacingOccurrences(of: validator, with: "static func restore(_ saved: Int) -> Idle"),
-                "A @Restoration function returns Restoration, the resting phase to restore."
+                "A @Restoration function returns Restoration, the phase to restore."
             ),
             (
                 Self.restorable.replacingOccurrences(
@@ -531,7 +615,7 @@ struct SchemaTests {
             ),
             (
                 Self.restorable.replacingOccurrences(of: "@Restoration\n", with: "@Restoration(true)\n"),
-                "@Restoration takes no arguments."
+                "Unexpected metadata argument; supported labels are allows."
             ),
             (
                 Self.restorable.replacingOccurrences(
@@ -567,6 +651,214 @@ struct SchemaTests {
             } catch let error as DiagnosticsError {
                 #expect(error.diagnostics.map(\.message) == [message])
             }
+        }
+    }
+
+    @Test func restorationMayAllowPhasesInWhichAnOperationIsActive() throws {
+        let allowed = try Self.parse(
+            Self.restorable.replacingOccurrences(of: "@Restoration\n", with: "@Restoration(allows: [Loading.self])\n")
+        )
+        #expect(allowed.restoration?.allows == ["loading"])
+        #expect(allowed.restingPhases.map(\.caseName) == ["idle"])
+        #expect(allowed.restorablePhases.map(\.caseName) == ["idle", "loading"])
+        let qualified = try Self.parse(
+            Self.restorable.replacingOccurrences(
+                of: "@Restoration\n",
+                with: "@StateMachine.Restoration(allows: [])\n"
+            )
+        )
+        #expect(qualified.restoration?.allows == [])
+        #expect(qualified.restorablePhases.map(\.caseName) == ["idle"])
+    }
+
+    /// Listing a phase that is already restorable pins it, so it stays restorable once an operation
+    /// becomes active there.
+    @Test func restorationMayListAPhaseInWhichNoOperationIsActive() throws {
+        func allowing(_ list: String) -> String {
+            Self.restorable.replacingOccurrences(of: "@Restoration\n", with: "@Restoration(allows: \(list))\n")
+        }
+        let listed = try Self.parse(allowing("[Idle.self, Loading.self]"))
+        #expect(listed.restoration?.allows == ["idle", "loading"])
+        #expect(listed.restorablePhases.map(\.caseName) == ["idle", "loading"])
+        // An operation that becomes active in the listed resting phase leaves it restorable.
+        let pinned = try Self.parse(
+            allowing("[Idle.self]")
+                .replacingOccurrences(
+                    of: "@Operation(scope: Scope.load, activeIn: [Loading.self]",
+                    with: "@Operation(scope: Scope.load, activeIn: [Idle.self, Loading.self]"
+                )
+                .replacingOccurrences(
+                    of: "@Transition(onSuccess: Fetch.self)",
+                    with:
+                        "@Transition(onSuccess: Fetch.self)\n    static func settled(_ source: Idle, _ input: Fetch.Output) -> Idle { fatalError() }\n    @Transition(onSuccess: Fetch.self)"
+                )
+        )
+        #expect(pinned.restingPhases.isEmpty)
+        #expect(pinned.restorablePhases.map(\.caseName) == ["idle"])
+    }
+
+    @Test func diagnosesMalformedRestorationAllowances() throws {
+        func allowing(_ list: String) -> String {
+            Self.restorable.replacingOccurrences(of: "@Restoration\n", with: "@Restoration(allows: \(list))\n")
+        }
+        let failures: [(String, String)] = [
+            (allowing("[Fetch.self]"), "'Fetch' is not a phase payload type declared in this schema."),
+            (allowing("[Loading.self, Loading.self]"), "Remove duplicate references from this metadata list."),
+            (allowing("Loading.self"), "Use an array literal of <Type>.self references."),
+            (
+                Self.restorable.replacingOccurrences(
+                    of: "@Restoration\n",
+                    with: "@Restoration(phases: [Loading.self])\n"
+                ),
+                "Unexpected metadata argument; supported labels are allows."
+            ),
+            (
+                Self.schema.replacingOccurrences(
+                    of: "struct Loading {}",
+                    with: "@Restoration(allows: [Loading.self]) struct Loading {}"
+                ),
+                "@Restoration must mark a static function declared directly inside the schema."
+            ),
+        ]
+        for (source, message) in failures {
+            do {
+                _ = try Self.parse(source)
+                Issue.record("Expected rejection: \(message)")
+            } catch let error as DiagnosticsError {
+                #expect(error.diagnostics.map(\.message) == [message])
+            }
+        }
+    }
+
+    @Test func operationsDefaultTheirScopeAdmissionAndFailure() throws {
+        let source = Self.schema.replacingOccurrences(
+            of:
+                "@Operation(scope: Scope.load, activeIn: [Loading.self], admission: .latest)\n    enum Fetch { typealias Input = Int; typealias Output = String; typealias Failure = Never }",
+            with:
+                "@Operation(activeIn: [Loading.self])\n    enum Fetch { typealias Input = Int; typealias Output = String }"
+        )
+        let result = try Self.parse(source)
+        let operation = try #require(result.operations.first)
+        #expect(operation.scope == nil)
+        #expect(operation.admission == .latest)
+        #expect(operation.failureType == "Never")
+        #expect(!operation.declaresFailure)
+        #expect(operation.failure == "Never")
+        #expect(operation.isInfallible)
+        // The private scope follows every declared one and has a key no authored reference can spell.
+        #expect(result.scopes == ["load"])
+        #expect(result.scopeKeys == ["load", "Fetch.self"])
+        let declared = try #require(try Self.parse(Self.schema).operations.first)
+        #expect(declared.scope == "load")
+        #expect(declared.declaresFailure)
+        #expect(declared.failure == "Fetch.Failure")
+        #expect(declared.isInfallible)
+        let qualified = try #require(
+            try Self.parse(Self.schema.replacingOccurrences(of: "Failure = Never", with: "Failure = Swift.Never"))
+                .operations.first
+        )
+        #expect(qualified.isInfallible)
+        let failureEdge =
+            "struct Idle {}\n    @Transition(onFailure: Fetch.self)\n    static func failed(_ source: Loading, _ failure: Fetch.Failure) -> Idle { fatalError() }"
+        let fallible = try #require(
+            try Self.parse(
+                Self.schema.replacingOccurrences(of: "Failure = Never", with: "Failure = MyError")
+                    .replacingOccurrences(of: "struct Idle {}", with: failureEdge)
+            )
+            .operations.first
+        )
+        #expect(!fallible.isInfallible)
+    }
+
+    @Test func operationsWithoutScopesNeedNoScopeEnumAndMayDisagreeAboutActivePhases() throws {
+        let source = #"""
+            @StateMachine(mode: .shared)
+            enum Flow {
+                struct Idle {}
+                struct Loading {}
+                @Initial case idle(Idle)
+                case loading(Loading)
+                enum Input { case start }
+                @Operation(activeIn: [Loading.self])
+                enum Fetch { typealias Input = Int; typealias Output = String }
+                @Operation(activeIn: [Idle.self, Loading.self], admission: .parallel(limit: 2))
+                enum Audit { typealias Input = Int; typealias Output = Int }
+                @Transition(on: Input.start, starts: [Fetch.self, Audit.self])
+                static func begin(_ source: Idle) -> Change<Loading, Effect.Begin> { fatalError() }
+                @Transition(onSuccess: Fetch.self)
+                static func received(_ source: Loading, _ output: Fetch.Output) -> Idle { fatalError() }
+                @Transition(onSuccess: Audit.self)
+                static func audited(_ source: Loading, _ output: Audit.Output) -> Loading { fatalError() }
+                @Transition(onSuccess: Audit.self)
+                static func checked(_ source: Idle, _ output: Audit.Output) -> Idle { fatalError() }
+            }
+            """#
+        let result = try Self.parse(source)
+        #expect(result.scopes.isEmpty)
+        #expect(result.scopeKeys == ["Fetch.self", "Audit.self"])
+        #expect(result.operations.map(\.admission) == [.latest, .parallel(limit: 2)])
+        #expect(result.restingPhases.isEmpty)
+    }
+
+    @Test func diagnosesOperationMetadataAndAliases() throws {
+        let metadata =
+            "Operation metadata must reference declared Scope cases, require no scope twice or as its own primary scope, and name at least one active phase."
+        let aliases =
+            "An operation declares explicit nongeneric Input and Output typealiases, and a Failure typealias unless it cannot fail."
+        let shared =
+            "Operations sharing primary scope 'load' must declare identical activeIn sets."
+        let second = #"""
+            @Operation(scope: Scope.load, activeIn: [Idle.self, Loading.self])
+                enum Audit { typealias Input = Int; typealias Output = Int }
+                @Transition(onSuccess: Audit.self)
+                static func audited(_ source: Loading, _ output: Audit.Output) -> Loading { fatalError() }
+                @Transition(onSuccess: Audit.self)
+                static func checked(_ source: Idle, _ output: Audit.Output) -> Idle { fatalError() }
+            """#
+        let failures: [(String, String)] = [
+            (Self.schema.replacingOccurrences(of: "scope: Scope.load,", with: "scope: Scope.absent,"), metadata),
+            (
+                Self.schema.replacingOccurrences(of: "scope: Scope.load,", with: "requires: [Scope.absent],"),
+                metadata
+            ),
+            (Self.schema.replacingOccurrences(of: "activeIn: [Loading.self]", with: "activeIn: []"), metadata),
+            (
+                Self.schema.replacingOccurrences(of: "activeIn: [Loading.self], admission:", with: "admission:"),
+                "Missing required metadata: activeIn."
+            ),
+            (Self.schema.replacingOccurrences(of: " typealias Output = String;", with: ""), aliases),
+            (
+                Self.schema.replacingOccurrences(of: "typealias Failure = Never", with: "typealias Input = Never"),
+                aliases
+            ),
+            (
+                Self.schema.replacingOccurrences(of: "typealias Failure = Never", with: "typealias Problem = Never"),
+                aliases
+            ),
+            (Self.schema.replacingOccurrences(of: "struct Idle {}", with: "struct Idle {}\n    " + second), shared),
+        ]
+        for (source, message) in failures {
+            do {
+                _ = try Self.parse(source)
+                Issue.record("Expected rejection: \(message)")
+            } catch let error as DiagnosticsError {
+                #expect(error.diagnostics.map(\.message) == [message])
+            }
+        }
+    }
+
+    @Test func diagnosesAnEdgeNamedForTheOwnedPayloadExit() throws {
+        let source = Self.schema.replacingOccurrences(of: "func begin(", with: "func takeValue(")
+            .replacingOccurrences(of: "Effect.Begin", with: "Effect.TakeValue")
+        do {
+            _ = try Self.parse(source)
+            Issue.record("Expected rejection of takeValue")
+        } catch let error as DiagnosticsError {
+            #expect(
+                error.diagnostics.map(\.message) == [
+                    "'takeValue' is reserved by generated phase wrappers; rename this transition."
+                ]
+            )
         }
     }
 

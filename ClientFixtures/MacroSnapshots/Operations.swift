@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 
 @StateMachine(mode: .shared)
 nonisolated public enum Flow: Sendable {
@@ -14,17 +13,16 @@ nonisolated public enum Flow: Sendable {
     public enum Problem: Error, Sendable { case negative, offline }
     enum Scope { case load, session }
     public enum Input: Sendable { case load(Int), cancel, sessionChanged, note(String), tick(Bool) }
-    @Operation(scope: Scope.load, requires: [Scope.session], activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.load, requires: [Scope.session], activeIn: [Loading.self])
     public enum Fetch {
         public typealias Input = Int
         public typealias Output = String
         public typealias Failure = Problem
     }
-    @Operation(scope: Scope.load, requires: [Scope.session], activeIn: [Loading.self], admission: .parallel(limit: 2))
+    @Operation(requires: [Scope.session], activeIn: [Loading.self], admission: .parallel(limit: 2))
     public enum Audit {
         public typealias Input = String
         public typealias Output = Int
-        public typealias Failure = Never
     }
     public static func makeIdle() -> Idle { Idle(attempts: 0) }
     @Restoration

@@ -1,19 +1,34 @@
 /// Owner-bound identity of one retained terminal envelope in the raw runtime.
-nonisolated public struct RuntimePendingID: Equatable, Sendable {
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
+nonisolated public struct RuntimePendingID: Hashable, Sendable {
     private let identity: RuntimeIdentity
     fileprivate init() { identity = RuntimeIdentity() }
     /// Compares retained envelope identity only.
     public static func == (lhs: Self, rhs: Self) -> Bool { lhs.identity === rhs.identity }
+    /// Hashes retained envelope identity only.
+    public func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(identity)) }
+}
+
+/// The decision one finished preparation or admission made about a retained outcome.
+///
+/// An automatic retry acts only on the decision that lost a conflict. Once another attempt
+/// finishes, that older decision no longer authorizes a retry.
+nonisolated package struct RuntimeDeliveryDecision: Sendable {
+    private let identity = RuntimeIdentity()
+    func matches(_ other: Self) -> Bool { identity === other.identity }
 }
 
 /// Explicit opt-in to reevaluating pure completion preparation after root conflicts.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public enum RuntimeCompletionPolicy: Sendable {
     case manualOnConflict
     case retryPure
 }
 
-/// Historical delivery state, independent of physical execution termination.
-nonisolated public enum RuntimePendingStatus: Equatable, Sendable {
+/// What a retained completion is waiting for, independently of physical execution termination.
+nonisolated public enum PendingStatus: Equatable, Sendable {
     case awaitingAdmission
     case preparing
     case waitingForCapacity
@@ -25,14 +40,21 @@ nonisolated public enum RuntimePendingStatus: Equatable, Sendable {
 ///
 /// Hosts install this value and the associated runtime together. Ledger mutations do not explicitly invoke
 /// domain closures; payload destruction and claimed preparation occur outside installation locks.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, DomainFailure: Error> {
     /// The associated lower-guarantee value engine.
     public typealias Engine = RuntimeState<Model, Descriptor>
-    /// A prepared candidate or its typed domain or permanent plan failure.
-    public typealias Preparation = Result<Engine.Candidate, PreparationFailure<DomainFailure>>
+    /// A prepared candidate or the typed reason preparation produced none.
+    ///
+    /// A domain failure is `.preparation`; a permanent plan defect is `.admission(.plan(_:))`, the same
+    /// reason an owner reports when it is asked to commit that plan.
+    public typealias Preparation = Result<Engine.Candidate, Rejection>
     /// The last preparation or admission failure, without erasing its type.
-    public enum Rejection: Sendable {
-        case preparation(PreparationFailure<DomainFailure>)
+    @frozen public enum Rejection: Error {
+        /// Domain preparation, such as a router or completion edge, rejected the outcome.
+        case preparation(DomainFailure)
+        /// The owner refused the candidate, or its effect plan is defective (`.plan`).
         case admission(Engine.Rejection)
     }
     /// A historical projection of one first retained envelope.
@@ -42,13 +64,15 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
         /// The first retained terminal outcome.
         public let outcome: Outcome
         /// The delivery state when this projection was captured.
-        public let status: RuntimePendingStatus
+        public let status: PendingStatus
         /// The last failed preparation or admission, when present.
         public let lastRejection: Rejection?
         /// The saturating count of claimed preparations; capacity retries do not increment it.
         public let attempts: UInt64
         /// Whether the preparation count has reached its representable limit.
         public var attemptsSaturated: Bool { attempts == UInt64.max }
+        /// The decision that produced this status; a retry it authorizes is void after a newer one.
+        package let decision: RuntimeDeliveryDecision
     }
     /// One exclusive preparation claim and its captured root observation.
     public struct Attempt {
@@ -79,28 +103,36 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
     /// The outcome of one completed preparation and admission attempt.
     @frozen public enum Finish {
         case committed(Engine.Snapshot)
-        case pending(RuntimePendingID, RuntimePendingStatus)
+        case pending(RuntimePendingID, PendingStatus)
         case notPending
     }
     fileprivate struct Entry {
         let id: RuntimePendingID
         let ticket: RuntimeTicket
         let outcome: Outcome
-        var status: RuntimePendingStatus = .awaitingAdmission
+        var status: PendingStatus = .awaitingAdmission
         var reason: Rejection?
         var attempts: UInt64 = 0
         var candidate: Engine.Candidate?
         var claim: RuntimeDeliveryClaim?
+        var decision = RuntimeDeliveryDecision()
     }
     private var entries: [Entry] = []
     /// Creates an empty ledger for one associated runtime.
     public init() {}
     /// The number of retained envelopes, including any claimed by preparation.
-    public var pendingCount: Int { entries.count }
+    package var pendingCount: Int { entries.count }
     /// Historical typed projections; projecting does not claim preparation.
     public var pending: [Pending] {
         entries.map {
-            Pending(id: $0.id, outcome: $0.outcome, status: $0.status, lastRejection: $0.reason, attempts: $0.attempts)
+            Pending(
+                id: $0.id,
+                outcome: $0.outcome,
+                status: $0.status,
+                lastRejection: $0.reason,
+                attempts: $0.attempts,
+                decision: $0.decision
+            )
         }
     }
     /// Retains the first outcome together with its engine delivery disposition.
@@ -121,18 +153,30 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
     }
     /// Claims one pending envelope and captures a fresh root before domain evaluation.
     ///
-    /// A `scheduledRetry` claim belongs to a queued scheduler turn. It is granted only while the
-    /// envelope is still `retryScheduled`: an attempt that finished after the turn was queued made
-    /// a newer decision, and the queued turn reports `notPending` instead of overriding it.
+    /// An automatic retry passes the decision it acts on. A `continuing` claim belongs to the
+    /// attempt that made `decision`, and a `scheduledRetry` claim belongs to a queued scheduler
+    /// turn, which needs the envelope to be still `retryScheduled`. Either is granted only while
+    /// no other attempt has finished since: a newer attempt made a newer decision, and the retry
+    /// reports `notPending` instead of overriding it.
     public mutating func claim(
         _ id: RuntimePendingID,
         in engine: inout Engine,
+        scheduledRetry: Bool = false
+    ) -> ClaimResult {
+        claim(id, in: &engine, continuing: nil, scheduledRetry: scheduledRetry)
+    }
+    /// Claims one pending envelope for an automatic retry of the attempt that made `decision`.
+    package mutating func claim(
+        _ id: RuntimePendingID,
+        in engine: inout Engine,
+        continuing decision: RuntimeDeliveryDecision?,
         scheduledRetry: Bool = false
     ) -> ClaimResult {
         prune(in: engine)
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return .notPending }
         guard entries[index].claim == nil else { return .inProgress }
         if scheduledRetry, entries[index].status != .retryScheduled { return .notPending }
+        if let decision, !entries[index].decision.matches(decision) { return .notPending }
         guard let claim = engine.claimDelivery(for: entries[index].ticket) else { return .notPending }
         entries[index].claim = claim
         entries[index].candidate = nil
@@ -163,15 +207,16 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
             return .notPending
         }
         entries[index].claim = nil
+        entries[index].decision = RuntimeDeliveryDecision()
         switch preparation {
         case .failure(let rejection):
             entries[index].status = .reconciliationRequired
-            entries[index].reason = .preparation(rejection)
+            entries[index].reason = rejection
             return .pending(attempt.id, .reconciliationRequired)
         case .success(let candidate):
             guard let terminal = candidate.validatedForDelivery(attempt.claim) else {
                 entries[index].status = .reconciliationRequired
-                entries[index].reason = .preparation(.plan(.invalidPlan))
+                entries[index].reason = .admission(.plan(.invalidPlan))
                 return .pending(attempt.id, .reconciliationRequired)
             }
             return admit(terminal, index: index, in: &engine)
@@ -188,6 +233,7 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
                 entries.remove(at: index)
                 return .notPending
             }
+            entries[index].decision = RuntimeDeliveryDecision()
             switch reason {
             case .capacityExceeded:
                 entries[index].candidate = candidate.withoutFinishingClaims()
@@ -201,9 +247,15 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
         }
     }
     /// Marks one pure-conflict result eligible for a later bounded scheduler round.
-    public mutating func scheduleRetry(_ id: RuntimePendingID) {
-        guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].claim == nil else { return }
+    ///
+    /// Only the decision that lost the conflict can schedule its retry. Returns `false`, and leaves
+    /// the envelope unchanged, once another attempt has claimed it or made a newer decision.
+    package mutating func scheduleRetry(_ id: RuntimePendingID, after decision: RuntimeDeliveryDecision) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].claim == nil,
+            entries[index].decision.matches(decision), entries[index].status == .reconciliationRequired
+        else { return false }
         entries[index].status = .retryScheduled
+        return true
     }
     /// Admission-only retry; no router or reducer is evaluated here.
     public mutating func retryCapacity(in engine: inout Engine) -> [Finish] {
@@ -263,28 +315,38 @@ extension RuntimeDeliveryLedger {
     ///
     /// Each hook returns before the next is entered. Preparation therefore needs no
     /// shared lock, and actor-confined hosts can use the same algorithm without Sendable payloads.
-    public static func reconcile(
+    ///
+    /// `claim` receives the decision an automatic retry continues from, or `nil` for the first
+    /// claim. `finish` returns the retained record it left, if any. Every retry, immediate or
+    /// scheduled, is bound to the decision of the attempt that lost the conflict, so an attempt
+    /// that finishes in between keeps its own decision.
+    package static func reconcile(
         _ id: RuntimePendingID,
         policy: RuntimeCompletionPolicy,
         automatic: Bool,
-        claim: () -> ClaimResult,
+        claim: (RuntimeDeliveryDecision?) -> ClaimResult,
         prepare: (Attempt) -> Preparation,
-        finish: (Attempt, Preparation) -> (Finish, Rejection?),
-        scheduleRetry: (RuntimePendingID) -> Void
+        finish: (Attempt, Preparation) -> (Finish, Pending?),
+        scheduleRetry: (RuntimePendingID, RuntimeDeliveryDecision) -> Bool
     ) -> Reconciliation {
         var preparations = 0
+        var continuing: RuntimeDeliveryDecision?
         while true {
-            switch claim() {
+            switch claim(continuing) {
             case .inProgress: return .inProgress
             case .notPending: return .notPending
             case .claimed(let attempt):
                 let candidate = prepare(attempt)
                 preparations += 1
-                let (result, reason) = finish(attempt, candidate)
-                if case .pending = result, automatic, case .retryPure = policy, case .admission(.conflict) = reason {
-                    if preparations < 4 { continue }
-                    scheduleRetry(id)
-                    return .finished(.pending(id, .retryScheduled))
+                let (result, pending) = finish(attempt, candidate)
+                if case .pending = result, automatic, case .retryPure = policy, let pending,
+                    case .admission(.conflict) = pending.lastRejection
+                {
+                    if preparations < 4 {
+                        continuing = pending.decision
+                        continue
+                    }
+                    if scheduleRetry(id, pending.decision) { return .finished(.pending(id, .retryScheduled)) }
                 }
                 return .finished(result)
             }
@@ -293,30 +355,30 @@ extension RuntimeDeliveryLedger {
 }
 
 /// Bounded by retained pending IDs, with one responsible scheduler per ready cohort.
-nonisolated public struct RuntimeDeliveryReadyQueue: Sendable {
+nonisolated package struct RuntimeDeliveryReadyQueue: Sendable {
     private var ids: [RuntimePendingID] = []
     private var scheduled = false
     /// Creates an empty ready queue.
-    public init() {}
+    package init() {}
     /// Returns true only when this insertion must schedule a turn.
-    public mutating func enqueue(_ id: RuntimePendingID) -> Bool {
+    package mutating func enqueue(_ id: RuntimePendingID) -> Bool {
         if !ids.contains(id) { ids.append(id) }
         guard !scheduled else { return false }
         scheduled = true
         return true
     }
     /// Removes queued identities that no longer have retained envelopes.
-    public mutating func prune(keeping pending: [RuntimePendingID]) { ids.removeAll { !pending.contains($0) } }
+    package mutating func prune(keeping pending: [RuntimePendingID]) { ids.removeAll { !pending.contains($0) } }
     /// Whether no ready IDs or responsible scheduling turn remain.
-    public var isIdle: Bool { !scheduled && ids.isEmpty }
+    package var isIdle: Bool { !scheduled && ids.isEmpty }
     /// Transfers one rotating round while retaining its scheduler responsibility.
-    public mutating func takeRound() -> [RuntimePendingID] {
+    package mutating func takeRound() -> [RuntimePendingID] {
         let result = ids
         ids = []
         return result
     }
     /// Returns whether exactly one yielded continuation must own the next round.
-    public mutating func finishRound() -> Bool {
+    package mutating func finishRound() -> Bool {
         if ids.isEmpty {
             scheduled = false
             return false

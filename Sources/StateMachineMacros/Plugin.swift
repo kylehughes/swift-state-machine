@@ -16,7 +16,7 @@ struct MetadataMacro: PeerMacro {
     ) throws -> [DeclSyntax] {
         guard let owner = context.lexicalContext.first?.as(EnumDeclSyntax.self),
             owner.attributes.contains(where: {
-                ["StateMachine", "StateMachineSchema.StateMachine"]
+                ["StateMachine", "StateMachine.StateMachine"]
                     .contains($0.as(AttributeSyntax.self)?.attributeName.trimmedDescription)
             })
         else {

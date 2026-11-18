@@ -1,6 +1,8 @@
 /// A retained identity for a lower-guarantee runtime.
 ///
 /// It carries no facade authority.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public final class RuntimeIdentity: Sendable {
     /// Creates a fresh identity that cannot compare equal to an earlier retained marker.
     public init() {}
@@ -9,6 +11,8 @@ nonisolated public final class RuntimeIdentity: Sendable {
 /// An engine-owned scope key.
 ///
 /// Resolve domain instance keys before entering the runtime.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeScopeID: Equatable, Sendable {
     /// A generated primitive scope-kind tag.
     public let kind: UInt32
@@ -26,6 +30,8 @@ nonisolated public struct RuntimeScopeID: Equatable, Sendable {
 }
 
 /// Schema-declared active-authority admission policy.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public enum RuntimeOperationPolicy: Equatable, Sendable {
     /// Replaces active members of this scope activation and operation kind.
     case latest
@@ -36,6 +42,8 @@ nonisolated public enum RuntimeOperationPolicy: Equatable, Sendable {
 }
 
 /// A primitive operation declaration for a generated plan.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeOperation: Sendable {
     /// The generated operation-kind tag.
     public let kind: UInt32
@@ -59,8 +67,10 @@ nonisolated public struct RuntimeOperation: Sendable {
     }
 }
 
-/// Count bounds used by the raw value engine.
-nonisolated public struct RuntimeLimits: Sendable {
+/// Validated count bounds for an owner's admission, plans, and execution reservations.
+///
+/// A generated `Local` owner takes these directly; managed owners take them inside `ManagedConfiguration`.
+nonisolated public struct Limits: Sendable {
     /// Ordinary queued batches.
     public let commits: Int
     /// Descriptors in one plan.
@@ -68,7 +78,7 @@ nonisolated public struct RuntimeLimits: Sendable {
     /// Outstanding execution and delivery reservations.
     public let executions: Int
     /// The documented positive capacities for an ordinary owner.
-    public static let `default` = RuntimeLimits(validatedCommits: 256, descriptors: 64, executions: 256)
+    public static let `default` = Limits(validatedCommits: 256, descriptors: 64, executions: 256)
     private init(validatedCommits: Int, descriptors: Int, executions: Int) {
         commits = validatedCommits
         self.descriptors = descriptors
@@ -88,6 +98,8 @@ nonisolated public struct RuntimeLimits: Sendable {
 /// A raw operation identity.
 ///
 /// Generated facades must keep their tickets private.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeTicket: Equatable, Sendable {
     fileprivate struct Binding: Sendable {
         let scope: RuntimeScopeID
@@ -105,6 +117,8 @@ nonisolated public struct RuntimeTicket: Equatable, Sendable {
 }
 
 /// A sealed raw preparation attempt; facades retain it privately.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeDeliveryClaim: Equatable, Sendable {
     fileprivate let ticket: RuntimeTicket
     fileprivate let attempt: RuntimeIdentity
@@ -113,29 +127,9 @@ nonisolated public struct RuntimeDeliveryClaim: Equatable, Sendable {
     public static func == (lhs: Self, rhs: Self) -> Bool { lhs.matches(rhs) }
 }
 
-/// Execution lifetime, independently of retained result delivery.
-nonisolated public enum RuntimeExecutionDisposition: Equatable, Sendable {
-    /// Accepted but not transferred for physical execution.
-    case queued
-    /// Transferred for physical execution, with termination still owed.
-    case issued
-    /// Actual termination was acknowledged.
-    case terminated
-    /// A revoked queued start was definitely skipped.
-    case skipped
-}
-
-/// Result delivery lifetime, independently of physical execution.
-nonisolated public enum RuntimeDeliveryDisposition: Equatable, Sendable {
-    /// No terminal envelope has yet been retained.
-    case awaitingOutcome
-    /// The first terminal envelope is retained by the facade ledger.
-    case pending
-    /// Delivery committed or was explicitly disposed after invalidation.
-    case settled
-}
-
 /// A committed descriptor and its raw operation ticket.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeWork<Descriptor> {
     /// Pairs an inert descriptor with an existing raw ticket without granting facade authority.
     public init(descriptor: Descriptor, ticket: RuntimeTicket) {
@@ -157,6 +151,8 @@ nonisolated public struct RuntimeWork<Descriptor> {
 /// on the payloads; the shared installation primitive requires that conformance.
 /// No method explicitly calls domain validation, reduction, or effect closures; payload
 /// destruction may execute user code outside shared installation locks.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public struct RuntimeState<Model, Descriptor> {
     fileprivate struct Scope: Sendable {
         let key: RuntimeScopeID
@@ -174,7 +170,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         fileprivate let incarnation: RuntimeIdentity
         fileprivate let revisionIdentity: RuntimeIdentity
         fileprivate let scopes: [Scope]
-        fileprivate let limits: RuntimeLimits
+        fileprivate let limits: Limits
     }
     /// A scope lifecycle edit, including fresh activation after reinsertion.
     public enum ScopeEdit: Sendable {
@@ -271,38 +267,46 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             )
         }
     }
-    /// Exact temporal rejection precedence is the declaration order below.
-    public enum Rejection: Equatable, Sendable {
-        /// The snapshot belongs to another owner.
-        case foreignOwner
-        /// Admission has ended.
-        case closed
-        /// Reset replaced the candidate's incarnation.
-        case obsoleteIncarnation
-        /// A required ticket or a finishing delivery claim is no longer active.
-        case inactiveAuthority
-        /// The whole-root revision changed.
-        case conflict
-        /// Prospective active authority violates declared policy.
-        case operationPolicy(PolicyFailure)
-        /// The last ordinary revision has already been used.
-        case revisionExhausted
-        /// An otherwise admissible candidate encountered occupied capacity.
-        case capacityExceeded(Capacity)
+    /// Admission rejection reasons; `commit(_:)` reports them in declaration order.
+    ///
+    /// `commit(_:)` never reports `.plan`, because a defective plan never becomes a `Candidate`.
+    /// ``reject(_:)`` reports it for a ``DefectivePlan`` after the provenance checks that precede it.
+    public typealias Rejection = CommitRejection
+    /// A plan defect that preparation found, kept with the snapshot the plan was prepared on.
+    public struct DefectivePlan {
+        /// The defect.
+        public let reason: PlanRejection
+        fileprivate let expected: Snapshot
+        /// Records a defect found while preparing a plan against `expected`.
+        public init(_ reason: PlanRejection, preparedOn expected: Snapshot) {
+            self.reason = reason
+            self.expected = expected
+        }
+        /// The rejection that admission reports for this plan while `current` is its owner's state.
+        ///
+        /// A snapshot from another owner and closure take precedence over the defect, so a plan whose
+        /// defect only closure caused, because closing removes every scope, reports `.closed`.
+        public func rejection(against current: Snapshot) -> Rejection {
+            if expected.owner !== current.owner { return .foreignOwner }
+            if current.isClosed { return .closed }
+            return .plan(reason)
+        }
     }
-    /// A prospective policy rejection.
-    public enum PolicyFailure: Equatable, Sendable {
-        /// Exclusive work remains active.
-        case alreadyActive
-        /// The active-authority group would exceed its limit.
-        case parallelLimit
+    /// A validated candidate, or the defect preparation found in its plan.
+    @frozen public enum Proposal {
+        /// A candidate that admission can install.
+        case candidate(Candidate)
+        /// A plan that admission reports through ``reject(_:)``.
+        case defective(DefectivePlan)
     }
-    /// A transient occupied bound.
-    public enum Capacity: Equatable, Sendable {
-        /// Ordinary batch slots are full.
-        case commitQueue
-        /// Execution or retained delivery obligations occupy all slots.
-        case executionReservations
+    /// Which accepted batches an owner queues for draining.
+    public enum BatchRecording: Sendable {
+        /// Every acceptance and the terminal batch, for an owner that publishes each acceptance
+        /// from its queue.
+        case everyAcceptance
+        /// Only acceptances that cancel or start work, and the terminal batch, for a manual owner
+        /// whose caller receives every other receipt from the commit itself.
+        case commands
     }
     /// Historical acceptance or a rejection with coherent current observation.
     @frozen public enum Admission {
@@ -337,20 +341,20 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         case foreignOwner
     }
     /// Historical operational bookkeeping; changing it does not revise the model.
-    public struct ReservationSnapshot: Sendable {
+    package struct ReservationSnapshot: Sendable {
         /// The exact raw operation identity.
-        public let ticket: RuntimeTicket
+        package let ticket: RuntimeTicket
         /// Known execution disposition.
-        public let execution: RuntimeExecutionDisposition
+        package let execution: ShutdownDiagnostics.ExecutionDisposition
         /// Retained delivery disposition.
-        public let delivery: RuntimeDeliveryDisposition
+        package let delivery: ShutdownDiagnostics.DeliveryDisposition
         /// Whether client preparation still owns an attempt claim.
-        public let isPreparing: Bool
+        package let isPreparing: Bool
         /// The opaque identity of an executing preparation, when present.
-        public let preparationClaim: RuntimeDeliveryClaim?
+        package let preparationClaim: RuntimeDeliveryClaim?
     }
     /// A first-envelope retention decision; payload ownership stays with the facade.
-    public enum OutcomeRetention: Sendable {
+    package enum OutcomeRetention: Sendable {
         /// The caller may install its first typed envelope in the same transaction.
         case retained
         /// An envelope or settled disposition already exists; keep the first payload.
@@ -362,8 +366,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
     private struct Reservation: Sendable {
         let ticket: RuntimeTicket
-        var execution: RuntimeExecutionDisposition = .queued
-        var delivery: RuntimeDeliveryDisposition = .awaitingOutcome
+        var execution: ShutdownDiagnostics.ExecutionDisposition = .queued
+        var delivery: ShutdownDiagnostics.DeliveryDisposition = .awaitingOutcome
         var claim: RuntimeIdentity?
         var releasable: Bool {
             switch execution {
@@ -379,18 +383,28 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     private var revision: UInt64 = 0
     private var model: Model
     private var closed = false
-    private let limits: RuntimeLimits
+    private let limits: Limits
     private var scopes: [Scope]
     private var active: [RuntimeTicket] = []
     private var reservations: [Reservation] = []
     private var queue: [Batch] = []
     private var terminal: Batch?
     private var closeSnapshot: Snapshot?
+    private let recording: BatchRecording
 
     /// Creates independent raw ownership with fresh initial scope activations.
-    public init(_ model: Model, scopes: [RuntimeScopeID] = [], limits: RuntimeLimits) {
+    ///
+    /// With `.commands` recording, an acceptance that cancels and starts nothing queues no batch and
+    /// takes no queue slot, so a run of such acceptances never waits for a drain.
+    public init(
+        _ model: Model,
+        scopes: [RuntimeScopeID] = [],
+        limits: Limits,
+        recording: BatchRecording = .everyAcceptance
+    ) {
         self.model = model
         self.limits = limits
+        self.recording = recording
         var initial: [Scope] = []
         for key in scopes where !initial.contains(where: { $0.key == key }) {
             initial.append(Scope(key: key, activation: RuntimeIdentity()))
@@ -417,6 +431,20 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     public var hasQueuedBatches: Bool { !queue.isEmpty || terminal != nil }
     /// Whether closure, FIFO transfer, and all execution/delivery obligations have settled.
     public var isQuiescent: Bool { closed && !hasQueuedBatches && reservations.isEmpty }
+
+    /// Validates a complete plan outside any shared installation lock, keeping a defect's provenance.
+    public static func propose(
+        on expected: Snapshot,
+        next model: Model,
+        requiring required: [RuntimeTicket] = [],
+        plan: Plan = Plan()
+    ) -> Proposal {
+        do throws(PlanRejection) {
+            return .candidate(try prepare(on: expected, next: model, requiring: required, plan: plan))
+        } catch {
+            return .defective(DefectivePlan(error, preparedOn: expected))
+        }
+    }
 
     /// Validates a complete plan outside any shared installation lock.
     public static func prepare(
@@ -480,6 +508,9 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
     private func reject(_ reason: Rejection) -> Admission { .rejected(reason, current: snapshot) }
 
+    /// Reports a defective plan with ordinary admission precedence and installs nothing.
+    public func reject(_ defect: DefectivePlan) -> Admission { reject(defect.rejection(against: snapshot)) }
+
     /// Preflights every store and installs the complete accepted successor.
     public mutating func commit(_ candidate: Candidate) -> Admission {
         if candidate.expected.owner !== owner { return reject(.foreignOwner) }
@@ -528,8 +559,10 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             works.append(RuntimeWork(descriptor: start.descriptor, ticket: ticket))
         }
         if revision == UInt64.max - 1 { return reject(.revisionExhausted) }
-        if queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
         let revoked = active.filter { ticket in !remaining.contains { $0.operation === ticket.operation } }
+        // A commandless acceptance under `.commands` recording queues nothing, so it needs no slot.
+        let queues = recording == .everyAcceptance || !revoked.isEmpty || !works.isEmpty
+        if queues, queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
         var prospective = reservations
         for index in prospective.indices
         where revoked.contains(where: { $0.operation === prospective[index].ticket.operation }) {
@@ -553,13 +586,15 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         revision += 1
         revisionIdentity = RuntimeIdentity()
         let accepted = snapshot
-        queue.append(
-            Batch(
-                snapshot: accepted,
-                commands: revoked.map { .cancel($0) } + works.map { .start($0) },
-                terminal: false
+        if queues {
+            queue.append(
+                Batch(
+                    snapshot: accepted,
+                    commands: revoked.map { .cancel($0) } + works.map { .start($0) },
+                    terminal: false
+                )
             )
-        )
+        }
         return .committed(accepted)
     }
 
@@ -617,7 +652,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
 
     /// Returns immutable reservation diagnostics without granting mutation authority.
-    public var executionReservations: [ReservationSnapshot] {
+    package var executionReservations: [ReservationSnapshot] {
         reservations.map { reservation in
             ReservationSnapshot(
                 ticket: reservation.ticket,
@@ -634,7 +669,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     /// Claims first-envelope retention.
     ///
     /// Install the typed envelope in the same host transaction.
-    public mutating func retainOutcome(for ticket: RuntimeTicket) -> OutcomeRetention {
+    package mutating func retainOutcome(for ticket: RuntimeTicket) -> OutcomeRetention {
         guard ticket.owner === owner else { return .foreignOwner }
         guard isActive(ticket), let index = reservations.firstIndex(where: { $0.ticket == ticket }) else {
             return .inactiveAuthority
@@ -645,7 +680,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
 
     /// Claims one pending-envelope preparation attempt without evaluating user code.
-    public mutating func claimDelivery(for ticket: RuntimeTicket) -> RuntimeDeliveryClaim? {
+    package mutating func claimDelivery(for ticket: RuntimeTicket) -> RuntimeDeliveryClaim? {
         guard isActive(ticket), let index = reservations.firstIndex(where: { $0.ticket == ticket }),
             reservations[index].delivery == .pending, reservations[index].claim == nil
         else { return nil }
@@ -655,7 +690,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
 
     /// Acknowledges an attempt's exit even after invalidation or close disposed its envelope.
-    public mutating func finishDeliveryClaim(_ claim: RuntimeDeliveryClaim) {
+    package mutating func finishDeliveryClaim(_ claim: RuntimeDeliveryClaim) {
         guard let index = reservations.firstIndex(where: { $0.ticket == claim.ticket && $0.claim === claim.attempt })
         else {
             return
@@ -683,5 +718,7 @@ extension RuntimeState.Start: Sendable where Descriptor: Sendable {}
 extension RuntimeState.Plan: Sendable where Descriptor: Sendable {}
 extension RuntimeState.Candidate: Sendable where Model: Sendable, Descriptor: Sendable {}
 extension RuntimeState.Admission: Sendable where Model: Sendable {}
+extension RuntimeState.DefectivePlan: Sendable where Model: Sendable {}
+extension RuntimeState.Proposal: Sendable where Model: Sendable, Descriptor: Sendable {}
 extension RuntimeState.Command: Sendable where Descriptor: Sendable {}
 extension RuntimeState.Batch: Sendable where Model: Sendable, Descriptor: Sendable {}

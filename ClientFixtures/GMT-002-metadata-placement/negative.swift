@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 enum Scope { case work }
 struct Loading {}
 @Operation(scope: Scope.work, activeIn: [Loading.self], admission: .latest)

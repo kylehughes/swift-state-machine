@@ -15,10 +15,10 @@ private final class Box {
     MainHost(
         0,
         scopes: [],
-        configuration: try RuntimeManagedConfiguration(subscribers: subscribers),
+        configuration: try ManagedConfiguration(subscribers: subscribers),
         driver: { $0.ticket },
         ticket: { $0 },
-        prepare: { _ in .failure(.plan(.invalidPlan)) }
+        prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
     )
 }
 
@@ -26,10 +26,10 @@ private func makeActorHost(subscribers: Int = 128) throws -> ActorHost {
     ActorHost(
         0,
         scopes: [],
-        configuration: try RuntimeManagedConfiguration(subscribers: subscribers),
+        configuration: try ManagedConfiguration(subscribers: subscribers),
         driver: { $0.ticket },
         ticket: { $0 },
-        prepare: { _ in .failure(.plan(.invalidPlan)) }
+        prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
     )
 }
 
@@ -37,10 +37,10 @@ private func makeSharedHost(subscribers: Int = 128) throws -> SharedHost {
     SharedHost(
         manual: 0,
         scopes: [],
-        limits: try RuntimeLimits(),
+        limits: try Limits(),
         subscriberCapacity: subscribers,
         ticket: { $0 },
-        prepare: { _ in .failure(.plan(.invalidPlan)) }
+        prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
     )
 }
 
@@ -164,7 +164,7 @@ private struct Signal: Sendable {
         let detached = Signal()
         do {
             let snapshots = try owner.snapshots({ $0 }, onDetach: { detached.raise() })
-            #expect(throws: RuntimeHostSubscriptionFailure.capacityExceeded) { try owner.snapshots() }
+            #expect(throws: SubscriptionFailure.capacityExceeded) { try owner.snapshots() }
             _ = snapshots
         }
         // Cleanup edge: the owner has released this sequence's callbacks.
@@ -208,7 +208,7 @@ private struct Signal: Sendable {
             scopes: [],
             driver: { $0.ticket },
             ticket: { $0 },
-            prepare: { _ in .failure(.plan(.invalidPlan)) }
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
         )
         let shared = Box(2)
         var values: [Int] = []
@@ -338,7 +338,7 @@ private func collect<Source: AsyncSequence & Sendable>(
         let detached = Signal()
         do {
             let snapshots = try owner.sendableSnapshots({ $0 }, onDetach: { detached.raise() })
-            #expect(throws: RuntimeHostSubscriptionFailure.capacityExceeded) { try owner.sendableSnapshots() }
+            #expect(throws: SubscriptionFailure.capacityExceeded) { try owner.sendableSnapshots() }
             _ = snapshots
         }
         // Cleanup edge: the owner has released this sequence's callbacks.
@@ -430,7 +430,7 @@ private func collect<Source: AsyncSequence & Sendable>(
             scopes: [],
             driver: { $0.ticket },
             ticket: { $0 },
-            prepare: { _ in .failure(.plan(.invalidPlan)) }
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
         )
         var values: [Int] = []
         for await value in try owner.sendableSnapshots({ $0.model.value }).prefix(2) {
@@ -524,7 +524,7 @@ private func collect<Source: AsyncSequence & Sendable>(
         let detached = Signal()
         do {
             let snapshots = try await owner.snapshots({ $0 }, onDetach: { detached.raise() })
-            await #expect(throws: RuntimeHostSubscriptionFailure.capacityExceeded) { try await owner.snapshots() }
+            await #expect(throws: SubscriptionFailure.capacityExceeded) { try await owner.snapshots() }
             _ = snapshots
         }
         await detached.wait()
@@ -631,7 +631,7 @@ private func collect<Source: AsyncSequence & Sendable>(
         let owner = try makeSharedHost(subscribers: 1)
         do {
             let snapshots = try owner.snapshots()
-            #expect(throws: RuntimeHostSubscriptionFailure.capacityExceeded) { try owner.snapshots() }
+            #expect(throws: SubscriptionFailure.capacityExceeded) { try owner.snapshots() }
             _ = snapshots
         }
         _ = try owner.snapshots()

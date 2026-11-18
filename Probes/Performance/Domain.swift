@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 
 /// Payload byte count excludes Array storage metadata, this header, and facade metadata.
 @StateMachine(mode: .shared)

@@ -1,5 +1,4 @@
 import StateMachine
-import StateMachineSchema
 @StateMachine(mode: .shared)
 nonisolated enum OperationWitness: Sendable {
     struct Idle: Sendable {}

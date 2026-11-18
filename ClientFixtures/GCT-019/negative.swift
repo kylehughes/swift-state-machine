@@ -1,3 +1,3 @@
 import StateMachine
 import StateMachineExamples
-nonisolated func misuse(_ loading: GeneratedProfile.Observed<GeneratedProfile.Loading>, _ profile: Profile) throws { _ = try loading.received(profile) }
+nonisolated func misuse(_ owner: inout GeneratedProfile.Local, _ value: Profile) { _ = owner.deliver(value) }

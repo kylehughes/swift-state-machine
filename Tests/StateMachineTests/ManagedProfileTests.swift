@@ -34,7 +34,7 @@ import Testing
             }
         }
         #expect(owner.pendingCompletions().isEmpty)
-        #expect(await owner.shutdownAndWait() == .quiescent)
+        #expect(await owner.shutdown() == .quiescent)
         #expect(owner.isQuiescent)
     }
 
@@ -53,7 +53,7 @@ import Testing
         #expect(await owner.flush(through: close) == .processed)
         #expect(await network.inFlightCount == 1)
         #expect(!owner.isQuiescent)
-        guard case .timedOut(let diagnostics) = await owner.shutdownAndWait(deadline: .now) else {
+        guard case .timedOut(let diagnostics) = await owner.shutdown(deadline: .now) else {
             Issue.record("Cancellation-insensitive driver was reported terminated")
             return
         }
@@ -63,7 +63,7 @@ import Testing
         #expect(diagnostics.processedThrough == close.revision)
         #expect(await network.inFlightCount == 1)
         #expect(await network.complete(request.id, with: .success(Profile(userID: user, name: "Late"))))
-        #expect(await owner.shutdownAndWait() == .quiescent)
+        #expect(await owner.shutdown() == .quiescent)
         #expect(owner.snapshot().isClosed)
         guard case .loading = owner.snapshot() else {
             Issue.record("Stale result changed closed model")
@@ -82,7 +82,7 @@ import Testing
         }
         #expect(await owner.flush(through: invalidation) == .processed)
         #expect(await network.complete(request.id, with: .failure(.unauthorized)))
-        #expect(await owner.shutdownAndWait() == .quiescent)
+        #expect(await owner.shutdown() == .quiescent)
         guard case .loading = owner.snapshot() else {
             Issue.record("Revoked outcome changed model")
             return
@@ -96,12 +96,12 @@ import Testing
         let foreign = ReferenceProfile.Shared(.init(userID: user), drivers: network.drivers)
         let receipt = try start(owner)
         let request = await network.nextRequest()
-        #expect(await foreign.flush(through: receipt) == .foreignReceipt)
+        #expect(await foreign.flush(through: receipt) == .foreignOwner)
         #expect(await owner.flush(through: receipt) == .processed)
         #expect(await network.inFlightCount == 1)
         #expect(await network.complete(request.id, with: .failure(.unavailable)))
-        #expect(await owner.shutdownAndWait() == .quiescent)
-        #expect(await foreign.shutdownAndWait() == .quiescent)
+        #expect(await owner.shutdown() == .quiescent)
+        #expect(await foreign.shutdown() == .quiescent)
     }
 
     @Test func unrelatedPresentationSurvivesTypedFailureAndRetry_RT012_RT023() async throws {
@@ -127,7 +127,7 @@ import Testing
             if case .failed(let failed) = snapshot {
                 #expect(failed.value.failure == .unavailable)
                 #expect(snapshot.presentation == "Preserved")
-                guard case .committed = owner.commit(try failed.retry()) else {
+                guard case .committed = owner.commit(failed.retry()) else {
                     Issue.record("Typed retry rejected")
                     return
                 }
@@ -147,7 +147,7 @@ import Testing
             }
         }
         #expect(owner.pendingCompletions().isEmpty)
-        #expect(await owner.shutdownAndWait() == .quiescent)
+        #expect(await owner.shutdown() == .quiescent)
     }
 
     @Test func localDeliveryKeepsExecutionAcknowledgmentSeparate() throws {
@@ -189,7 +189,7 @@ import Testing
             if index.isMultiple(of: 2) { _ = owner.close() }
             token.cancel()
             #expect(await network.complete(request.id, with: .success(Profile(userID: user, name: "Cycle"))))
-            #expect(await owner.shutdownAndWait() == .quiescent)
+            #expect(await owner.shutdown() == .quiescent)
             #expect(await network.inFlightCount == 0)
         }
         // Writers contend on one actual managed owner while the fake driver is gated.
@@ -218,7 +218,7 @@ import Testing
         }
         #expect(owner.snapshot().revision == 2_001)
         #expect(await network.complete(request.id, with: .failure(.unavailable)))
-        #expect(await owner.shutdownAndWait() == .quiescent)
+        #expect(await owner.shutdown() == .quiescent)
         #expect(await network.inFlightCount == 0)
     }
 }

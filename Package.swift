@@ -30,8 +30,6 @@ let package = Package(
     platforms: [.iOS(.v16), .macOS(.v13), .tvOS(.v16), .watchOS(.v9), .visionOS(.v1), .macCatalyst(.v16)],
     products: [
         .library(name: "StateMachine", targets: ["StateMachine"]),
-        .library(name: "StateMachineExamples", targets: ["StateMachineExamples"]),
-        .library(name: "StateMachineSchema", targets: ["StateMachineSchema"]),
         .library(name: "StateMachineUI", targets: ["StateMachineUI"]),
     ],
     dependencies: [
@@ -50,24 +48,23 @@ let package = Package(
             ],
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
-        .target(
-            name: "StateMachineSchema",
-            dependencies: ["StateMachine", "StateMachineMacros"],
-            swiftSettings: [.treatAllWarnings(as: .error)]
-        ),
         .testTarget(
             name: "StateMachineMacroTests",
             dependencies: [
-                "StateMachineSchema", "StateMachine", "StateMachineExamples", "StateMachineReferenceModel",
-                "StateMachineTestSupport",
+                "StateMachine", "StateMachineExamples", "StateMachineReferenceModel", "StateMachineTestSupport",
             ],
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
-        .target(name: "StateMachine", swiftSettings: [.treatAllWarnings(as: .error)]),
+        .target(
+            name: "StateMachine",
+            dependencies: ["StateMachineMacros"],
+            swiftSettings: [.treatAllWarnings(as: .error)]
+        ),
         .target(name: "StateMachineUI", dependencies: ["StateMachine"], swiftSettings: [.treatAllWarnings(as: .error)]),
+        // Example graphs for the tests and probes; no product publishes them.
         .target(
             name: "StateMachineExamples",
-            dependencies: ["StateMachine", "StateMachineSchema", "StateMachineUI"],
+            dependencies: ["StateMachine", "StateMachineUI"],
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
         .testTarget(

@@ -44,38 +44,32 @@ import Testing
         switch (phase, historical, closed) {
         case (.idle, .idle(let original), .idle(let ended)):
             #expect(ended.value.userID == user)
-            do {
-                _ = try ended.load(request)
-                Issue.record("Closed load unexpectedly prepared")
-            } catch { guard case .plan(.invalidPlan) = error else { throw Failure.unexpected } }
+            guard case .rejected(.closed, _) = owner.commit(try ended.load(request)) else {
+                throw Failure.unexpected
+            }
             guard case .rejected(.closed, _) = owner.commit(try original.load(request)) else {
                 throw Failure.unexpected
             }
         case (.loading, .loading(let original), .loading(let ended)):
             #expect(ended.value.request == request)
-            do {
-                _ = try ended.audit("closed")
-                Issue.record("Closed audit unexpectedly prepared")
-            } catch { guard case .plan(.invalidPlan) = error else { throw Failure.unexpected } }
-            guard case .rejected(.closed, _) = owner.commit(try original.audit("historical")) else {
+            guard case .rejected(.closed, _) = owner.commit(ended.audit("closed")) else {
+                throw Failure.unexpected
+            }
+            guard case .rejected(.closed, _) = owner.commit(original.audit("historical")) else {
                 throw Failure.unexpected
             }
         case (.loaded, .loaded(let original), .loaded(let ended)):
             #expect(ended.value.profile.name == "Readable")
-            do {
-                _ = try ended.refresh(request)
-                Issue.record("Closed refresh unexpectedly prepared")
-            } catch { guard case .plan(.invalidPlan) = error else { throw Failure.unexpected } }
+            guard case .rejected(.closed, _) = owner.commit(try ended.refresh(request)) else {
+                throw Failure.unexpected
+            }
             guard case .rejected(.closed, _) = owner.commit(try original.refresh(request)) else {
                 throw Failure.unexpected
             }
         case (.failed, .failed(let original), .failed(let ended)):
             #expect(ended.value.failure == .unavailable)
-            do {
-                _ = try ended.retry()
-                Issue.record("Closed retry unexpectedly prepared")
-            } catch { guard case .plan(.invalidPlan) = error else { throw Failure.unexpected } }
-            guard case .rejected(.closed, _) = owner.commit(try original.retry()) else { throw Failure.unexpected }
+            guard case .rejected(.closed, _) = owner.commit(ended.retry()) else { throw Failure.unexpected }
+            guard case .rejected(.closed, _) = owner.commit(original.retry()) else { throw Failure.unexpected }
         default: throw Failure.unexpected
         }
         if let execution { _ = owner.acknowledgeExecution(execution, disposition: .skippedBeforeStart) }
