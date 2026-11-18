@@ -48,7 +48,7 @@ Use the work order's phase dependencies. Begin with G0 compiler and deployment p
 - Do not hold locks across suspension or execute application callbacks, validators, custom hashing, or final user-payload destruction under them.
 - Do not turn cancellation into fictitious task termination. Retain task handles until termination is observed.
 - Do not silently discard completed outcomes under queue pressure or conflicts.
-- Do not silently replay user preparation. Implement the declared manual/default and explicit retryPure policies.
+- Do not silently replay user preparation. Implement the declared retryPure default for generated managed owners, the explicit manual policy, and the manual default of raw runtime hosts.
 - Do not use experimental language flags or raise the deployment baseline to make a probe pass.
 - Treat source samples as interface targets until compiler-validated. Correct spelling or implementation mechanisms where needed while retaining the normative semantics.
 - Treat publicly accessible raw runtime APIs as a lower-level mechanism. The generated facade's private kernel, provenance, and constructors must remain inaccessible to external clients.
@@ -196,15 +196,14 @@ Implementation completion requires passing the release gates in the work order. 
 
 | Target | Responsibility |
 | --- | --- |
-| AtomicState | Ownership/value support, raw runtime kernel, hosts, authority, effects, observation, diagnostics |
-| AtomicStateSchema | Public macro declarations; consumers import this when defining a schema |
+| AtomicState | Ownership/value support, raw runtime kernel, hosts, authority, effects, observation, diagnostics, and the public macro declarations; a graph needs only this import |
 | AtomicStateMacroPlugin | Host-side SwiftSyntax/SwiftCompilerPlugin implementation |
 | AtomicStateUI | Apple UI integration, including the iOS 16 adapter |
 | AtomicStateTestSupport | Optional explicit testing helpers; never grants raw access to a production facade |
 | AtomicStateTests | Runtime and hand-written reference-domain tests |
 | AtomicStateMacroTests | Expansion and diagnostic tests |
 | ClientFixtures | Separate-module compiler-positive and compiler-negative programs |
-| Examples | Profile loader, document workflow, and an owned resource protocol |
+| Examples | Profile loader, document workflow, and an owned resource protocol; built for tests and probes, never published as a product |
 
 The compiler plugin's SwiftSyntax version must match the selected Swift 6.4 toolchain. Pin an actual verified release; do not invent a version number from the compiler version. Runtime products must not import SwiftSyntax or ship the plugin's dependency graph into an application process.
 
@@ -426,15 +425,15 @@ First-class dynamic child orchestration is optional convenience in v1, but the u
 
 ### 9. UI and application integration
 
-`UI-001`: The baseline adapter supports iOS 16 with a MainActor-isolated observable object and a copyable snapshot projection. The runtime does not require SwiftUI; UIKit consumers can use the same snapshot subscription API. The UI module provides a generic presentation over any MainActor owner that conforms to the runtime's small host protocol (`snapshot`, `send`, `commit`, `subscribe`, `close`); generated MainActor owners conform. It publishes the accepted snapshot of an input in the same turn as `send`, publishes the owner's current snapshot in the same turn as `commit`, returning the owner's `CommitResult` unchanged, and applies later deliveries through the owner's subscription. A presentation can also observe a shared or actor owner through its snapshot sequence.
+`UI-001`: The baseline adapter supports iOS 16 with a MainActor-isolated observable object and a copyable snapshot projection. The runtime does not require SwiftUI; UIKit consumers can use the same snapshot subscription API. The UI module provides a generic presentation over any MainActor owner that conforms to the runtime's small host protocol (`snapshot`, `send`, `commit`, `subscribe`, `close`); generated MainActor owners conform. It publishes the accepted snapshot of an input in the same turn as `send`, publishes the owner's current snapshot in the same turn as `commit`, returning the owner's `CommitResult` unchanged, and applies later deliveries through the owner's subscription. Creating the presentation never throws, so it can initialize a view's `@State`: if the owner refuses the registration, `isObserving` is `false` and a read-only `observationFailure` holds the reason, while the presentation still publishes the owner's snapshot at creation and every change made through it. A presentation can also observe a shared or actor owner through its snapshot sequence.
 
 `UI-002`: The UI owner retains the live machine privately. UI state contains copyable observations/model projections, not a raw lock, a mutable root pointer, or a noncopyable live authority embedded in a copying view value.
 
 `UI-003`: Publish complete snapshots. Consumers must never observe independently published fields from two different revisions as one purported atomic state.
 
-`UI-004`: Snapshot application occurs on MainActor and checks the commit ordinal. A delayed delivery must not regress the visible model. UI delivery may coalesce to the latest snapshot, but it must not coalesce effect commands.
+`UI-004`: Snapshot application occurs on MainActor and checks the commit ordinal. A delayed delivery must not regress the visible model. UI delivery may coalesce to the latest snapshot, but it must not coalesce effect commands. Ordinals are counted per owner, so a passive presentation that changes the owner it shows takes that owner's current snapshot as its new baseline: it shows the snapshot at once, restarts the ordinal check from it, and discards every later delivery and finish from the observation it replaced. Observing without a new baseline continues the same owner's history. A replacement claims its observation before it shows the new baseline, and stores its registration only if that claim still stands, so a synchronous callback that switches sources again during the publication or the registration wins, and the replaced registration is cancelled rather than installed over it.
 
-`UI-005`: A newer Observation-based adapter may be provided with proper OS availability. Internal authority and lock storage must be excluded from automatic observation tracking. Observation callbacks must not execute while the commit lock is held. The package provides this adapter as an `@Observable` counterpart of the baseline presentation, with the owner excluded from tracking.
+`UI-005`: A newer Observation-based adapter may be provided with proper OS availability. Internal authority and lock storage must be excluded from automatic observation tracking. Observation callbacks must not execute while the commit lock is held. The package provides this adapter as an `@Observable` counterpart of the baseline presentation, with the owner excluded from tracking. The Observation adapters take the short names, `StateMachinePresentation` and `SnapshotPresentation`, and the iOS 16 `ObservableObject` adapters are `StateMachineObservableObject` and `SnapshotObservableObject`; each pair has the same members.
 
 `UI-006`: The UI sample must demonstrate initial load, retry, cancellation, rapid request replacement, navigation away, and return. It must not access real services for conformance testing. A controlled fake driver supplies delayed and reordered outcomes.
 
@@ -523,7 +522,7 @@ Generic schema parameters and constraints MAY be preserved if the compiler spike
 
 `MACRO-103`: Nested `Input` is a closed enum whose cases have zero or one unlabeled payload; an empty enum represents no inputs. `Effect` is generated, never authored: it has exactly one case per `@Operation` namespace, carrying that namespace's `Input`, named by lower-casing the leading capital run of the namespace name (`Fetch` to `fetch`, `URLLoad` to `urlLoad`). A namespace whose case name would be a keyword, a duplicate, or a generated member name is rejected. For each edge with a nonempty `starts` list the macro also generates a nested `Effect.<Edge>` enum, named by capitalizing the edge function's name, containing exactly the cases of the started operations and a lowering to `Effect`.
 
-Schema metadata names declarations by reference. The accepted spellings are `Input.<case>` for an input trigger, `Scope.<case>` for a scope, and `<Type>.self` for a phase payload or an operation namespace. The compiler resolves each reference, so an undeclared name is a type-checking error at the attribute. Expansion reads the same spelling lexically, rejects a reference of the wrong kind, and lowers it to generated primitive tags. An edge's endpoints are not metadata: its source phase is the payload type of its source parameter (a router names it the same way), and its destination phase is its result when that is a phase payload, or the payload type named by its `Change` or `Advance` result. These signature types MAY be qualified with `Self.` or the schema name. A trigger is exactly one of `on: Input.<case>`, `onSuccess: <Operation>.self`, or `onFailure: <Operation>.self`. Input, scope, phase, and operation references must use the spellings listed above. String literals, implicit members such as `.load`, extra qualifiers such as `ProfileFlow.Input.load`, computed references, and arbitrary expressions cannot name those declarations. Edge names cannot be overloaded. A marker attribute MAY be written with its module qualifier, as in `@StateMachineSchema.Transition`. An `Input` case payload MAY name a type declared inside `Input`. An operation whose `Failure` is spelled `Swift.Never` is infallible, the same as `Never`.
+Schema metadata names declarations by reference. The accepted spellings are `Input.<case>` for an input trigger, `Scope.<case>` for a scope, and `<Type>.self` for a phase payload or an operation namespace. The compiler resolves each reference, so an undeclared name is a type-checking error at the attribute. Expansion reads the same spelling lexically, rejects a reference of the wrong kind, and lowers it to generated primitive tags. An edge's endpoints are not metadata: its source phase is the payload type of its source parameter (a router names it the same way), and its destination phase is its result when that is a phase payload, or the payload type named by its `Change` or `Advance` result. These signature types MAY be qualified with `Self.` or the schema name. A trigger is exactly one of `on: Input.<case>`, `onSuccess: <Operation>.self`, or `onFailure: <Operation>.self`. Input, scope, phase, and operation references must use the spellings listed above. String literals, implicit members such as `.load`, extra qualifiers such as `ProfileFlow.Input.load`, computed references, and arbitrary expressions cannot name those declarations. Edge names cannot be overloaded. A marker attribute, including the schema macro itself, MAY be written with its module qualifier, as in `@StateMachine.Transition` and `@StateMachine.StateMachine(mode:)`, and a `Change` or `Advance` result MAY be written `StateMachine.Change<…>`. The schema name `StateMachine` and a direct member of that name are reserved, because generated code qualifies the runtime's short type names with the module name. An `Input` case payload MAY name a type declared inside `Input`. An operation whose `Failure` is spelled `Swift.Never` is infallible, the same as `Never`.
 
 The following excerpt shows the required shape for a subset of the reference domain plus an authentication invalidation edge. Omitted bodies and payload fields are intentional specification placeholders.
 
@@ -608,7 +607,7 @@ Each edge has exactly one destination. Branching is expressed by explicit router
 
 ### 3. Generated values and ownership
 
-`API-101`: Generate domain-specific `Owned`, `Observed`, `Snapshot`, `Prepared`, `PreparationResult`, `PreparationRejection`, `CommitResult`, and `Receipt` declarations. Generated generic phase wrappers accept only privately constructed instances; arbitrary client specializations grant no authority.
+`API-101`: Generate domain-specific `Owned`, `Observed`, `Snapshot`, `Prepared`, `PreparationRejection`, `CommitResult`, and `Receipt` declarations. Generated generic phase wrappers accept only privately constructed instances; arbitrary client specializations grant no authority.
 
 The shared-mode shape is:
 
@@ -632,12 +631,7 @@ public enum Snapshot: Sendable {
 }
 
 public struct Prepared: ~Copyable, Sendable {
-    fileprivate let envelope: /* concrete runtime candidate type */
-}
-
-public enum PreparationResult: ~Copyable, Sendable {
-    case prepared(Prepared)
-    case rejected(PreparationRejection)
+    fileprivate let envelope: /* concrete runtime candidate type, or its plan defect */
 }
 
 public enum CommitResult: Sendable {
@@ -656,28 +650,18 @@ Concrete runtime specializations MUST replace the comments. They MUST NOT become
 
 ```swift
 public func begin(_ input: ProfileRequest)
-    throws(PreparationFailure<LoadRejection>) -> Prepared where Phase == Idle
+    throws(LoadRejection) -> Prepared where Phase == Idle
 
-public func received(_ completion: FetchSuccessCompletion)
-    throws(PreparationFailure<Never>) -> Prepared where Phase == Loading
+public func cancel() -> Prepared where Phase == Loading
 ```
 
-Generate these as constrained members or equivalent concrete phase-specific declarations verified by the compiler spike. Do not emit illegal nested extensions. An observation of Idle MUST NOT expose Loading's edge methods. An observation exposes exactly the edges whose source is its phase, including an edge that returns to that phase and the completion edges that accept a sealed completion.
+Generate these as constrained members or equivalent concrete phase-specific declarations verified by the compiler spike. Do not emit illegal nested extensions. An observation of Idle MUST NOT expose Loading's edge methods. An observation exposes exactly the input edges whose source is its phase, including an edge that returns to that phase. A routed input exposes its router's method instead of its candidate edges (`ROUTE-105`). An observation exposes no completion edge: a terminal outcome reaches its edge only through delivery (`DELIVERY-003`).
 
-`API-117`: Hosted preparation wraps authored failures and permanent plan failures in a typed support enum:
-
-```swift
-public enum PreparationFailure<DomainFailure: Error>: Error {
-    case domain(DomainFailure)
-    case plan(PlanRejection)
-}
-```
-
-Raw authored functions retain their declared domain throws. Generated wrappers validate actual effect descriptors and state-independent limits before constructing Prepared; PlanRejection includes invalidPlan and planTooLarge. An observation privately carries immutable host limit values, without retaining or reaching back into the live host. Infallible authored edges use a verified Never specialization. Dynamic routing preserves typed domain cases and plan reasons in its closed rejection enum.
+`API-117`: An observed edge method throws exactly what its authored function throws, with the same typed failure, and an infallible authored edge gives a nonthrowing method: `host.commit(searching.cancel())`. Generated wrappers validate actual effect descriptors and state-independent limits while preparing; PlanRejection includes invalidPlan and planTooLarge. A plan defect is not a preparation failure. It travels inside the sealed Prepared together with the snapshot it was prepared on, and admission reports it after the foreignOwner and closed checks of `COMMIT-004` and before any later one: `commit` returns `.rejected(.plan(reason), current:)`, `send` throws `.commit(.plan(reason))`, and nothing is installed. A defective proposal from another owner reports foreignOwner, and one submitted to a closed owner reports closed, including a plan whose defect only closure caused because closing removed the scopes its work needs. Preparation still runs outside the shared lock. An observation privately carries immutable host limit values, without retaining or reaching back into the live host. Dynamic routing preserves typed domain cases in its closed rejection enum.
 
 `API-105`: The initial factory accepts only the declared initial phase, optionally defaulted as `MACRO-102` defines. Owned factories consume unique initial payloads. No universal public initializer may wrap an arbitrary phase, model, raw observation, or raw candidate as domain authority. Restoration and fork MUST use explicitly named, validated facilities with fresh history identity as defined in the main specification; they MUST NOT adopt live tickets or synthesize a generic state-replacement setter. In a macro-declared graph the facility is the `restoring:` initializer defined by `MACRO-109`.
 
-Owned values MAY expose a nonescaping borrowed `withValue` accessor. They MUST NOT return a unique payload by ordinary copying. Conditional Sendable conformance is permitted only when checked by the compiler from actual stored data.
+The generated `Owned` exposes the nonescaping borrowed accessor `borrowing func withValue<Result: ~Copyable, Failure: Error>(_ body: (borrowing Phase) throws(Failure) -> Result) throws(Failure) -> Result`, which can return a noncopyable value and rethrows the closure's typed failure; a call with a nonthrowing closure needs no `try`. Owned values MUST NOT return a unique payload by ordinary copying. The generated `Owned` has `consuming func takeValue() -> Phase` in every mode, which ends the owned authority and moves its payload out, so a finished unique payload can be handed to another consuming API; `takeValue` is reserved, like `withValue`, as an edge or router name. Conditional Sendable conformance is permitted only when checked by the compiler from actual stored data.
 
 ### 4. Construction authority and the runtime bridge
 
@@ -693,7 +677,7 @@ All user transition code, routing, validation, payload examination, and metadata
 
 ### 5. Operation capabilities
 
-`TYPE-105`: Each `@Operation` namespace declares exactly three explicit aliases: Input, Output, and Failure. Failure conforms to Error; `.shared` requires all three types to satisfy its checked isolation requirements. Each operation has exactly one generated effect case (`MACRO-103`). The namespace is metadata, not an executor.
+`TYPE-105`: Each `@Operation` namespace declares explicit nongeneric `Input` and `Output` aliases, and a `Failure` alias unless the operation cannot fail. Without a `Failure` alias the operation's failure is `Never`, and generated code never names `<Operation>.Failure`, so an authored signature that names it does not resolve. Failure conforms to Error; `.shared` requires every declared type to satisfy its checked isolation requirements. Each operation has exactly one generated effect case (`MACRO-103`). The namespace is metadata, not an executor. A schema without operations generates none of the work, completion, or delivery surface (`API-118`).
 
 `API-109`: For operation Fetch, generate the following sealed values:
 
@@ -706,25 +690,15 @@ public struct FetchWork: Sendable {
     public func failed(_ failure: Fetch.Failure) -> FetchCompletion
 }
 
-public enum FetchCompletion: Sendable {
-    case success(FetchSuccessCompletion)
-    case failure(FetchFailureCompletion)
-}
-
-public struct FetchSuccessCompletion: Sendable {
-    public let value: Fetch.Output
-    fileprivate let authority: /* concrete operation authority */
-}
-
-public struct FetchFailureCompletion: Sendable {
-    public let value: Fetch.Failure
+public struct FetchCompletion: Sendable {
+    public let result: Result<Fetch.Output, Fetch.Failure>
     fileprivate let authority: /* concrete operation authority */
 }
 ```
 
-These have no public authority-bearing initializers. Also generate a closed domain `Completion` enum with one case per operation. Wrapping an already valid completion is harmless; constructing its hidden authority is prohibited.
+These have no public authority-bearing initializers. The work of an operation that cannot fail has no `failed(_:)`, because it has no failure to seal, and its completion exposes `public let value: Output` in place of `result`; the operation's `PendingCompletion.Outcome` case carries that `Output` rather than a `Result`. A fallible operation keeps `Result`. Also generate a closed domain `Completion` enum with one case per operation. Wrapping an already valid completion is harmless; constructing its hidden authority is prohibited.
 
-`API-110`: A hosted completion edge MUST require its appropriate sealed success/failure completion. It MUST NOT also offer a bare Output/Failure overload. Preparation combines snapshot provenance with the completion's operation authority; commit checks both. Authority includes the owner/incarnation, its primary scope activation, every declared dependency activation, and operation instance identity. For convenience, each owner's `deliver` also accepts one operation's sealed completion directly, and an operation whose Output is `Void` offers a `succeeded()` that takes no value; neither admits an unsealed outcome.
+`API-110`: A sealed completion is admitted only by its owner's `deliver`, which `Local` alone offers; no owner accepts a bare Output or Failure. Delivery prepares the matching completion edge against a current snapshot, combining its provenance with the completion's operation authority, and commit checks both. Authority includes the owner/incarnation, its primary scope activation, every declared dependency activation, and operation instance identity. For convenience, `deliver` also accepts one operation's sealed completion directly, and an operation whose Output is `Void` offers a `succeeded()` that takes no value; neither admits an unsealed outcome. An `Owned` phase keeps its completion edge methods, which take the bare Output or Failure: `Owned` holds no work authority and retains no outcome. When a completion router chooses among a phase's completion edges, `Owned` exposes one method named for the router in place of those edges' methods, which are fileprivate, exactly as for an input router (`ROUTE-105`), so an owned caller obeys the router that delivery runs.
 
 Work and completion are intentionally Copyable and Sendable in shared mode. This supports asynchronous callbacks without attempting to consume one captured noncopyable token repeatedly. Duplicate copies can request delivery, but successful terminal admission retires the operation atomically. This is at-most-once admission, not proof of honest driver results or exactly-once external execution.
 
@@ -732,7 +706,7 @@ Work and completion are intentionally Copyable and Sendable in shared mode. This
 
 ### 6. Effects, admission policies, and execution
 
-`ROUTE-101`: Operation admission is exactly one of `.latest`, `.rejectWhenActive`, or `.parallel(limit: N)`, where N is a positive bounded integer literal. A policy group is `(primary scope activation identity, generated operation-kind tag)`. Locked lookup uses generated primitive tags and bounded slots; private retained markers distinguish instances, and diagnostic ordinals never wrap. No application-defined Hashable or Equatable implementation may execute under the core lock.
+`ROUTE-101`: Operation admission is exactly one of `.latest`, `.rejectWhenActive`, or `.parallel(limit: N)`, where N is a positive bounded integer literal. An `@Operation` that omits `admission:` uses `.latest`. A policy group is `(primary scope activation identity, generated operation-kind tag)`. Locked lookup uses generated primitive tags and bounded slots; private retained markers distinguish instances, and diagnostic ordinals never wrap. No application-defined Hashable or Equatable implementation may execute under the core lock.
 
 | Policy | Required admission behavior |
 | --- | --- |
@@ -746,19 +720,21 @@ The parallel limit bounds logical active authority, not physical concurrent task
 
 `ROUTE-103`: Leaving a scope's eligible phase set revokes its activation. Explicit `invalidates` revokes scopes even when the visible phase stays unchanged. Prospectively apply invalidations and terminal retirement before checking new admissions; publish the complete result only after every check succeeds. An emitted operation and all its required scopes must be eligible in the destination phase. Domain authors MUST declare semantic dependencies; the macro cannot infer them from arbitrary field mutations.
 
-`ROUTE-108`: `@Operation` has one primary `scope` and an optional `requires` list of additional declared scopes, defaulting to empty. Work binds the post-commit activation of every scope in that union. Operations sharing a primary scope MUST declare identical `activeIn` sets; that set defines the scope's phase eligibility. A scope used only as a dependency spans all root phases. On entry, create a fresh activation; on exit, retire it. Explicit invalidation rotates to a fresh identity if the scope remains eligible, otherwise leaves it inactive. An activation records an epoch, not proof of business authorization.
+`ROUTE-108`: `@Operation` has one primary scope and an optional `requires` list of additional declared scopes, defaulting to empty. The primary scope is the declared `Scope` case named by `scope:`, or, when `scope:` is omitted, a private scope of that operation alone, eligible exactly in its `activeIn` phases, which no authored reference can name and so no edge can invalidate. A schema whose operations all omit `scope:` and whose edges invalidate nothing needs no `Scope` enum. Work binds the post-commit activation of every scope in that union. Operations sharing a named primary scope MUST declare identical `activeIn` sets; that set defines the scope's phase eligibility. A scope used only as a dependency spans all root phases. On entry, create a fresh activation; on exit, retire it. Explicit invalidation rotates to a fresh identity if the scope remains eligible, otherwise leaves it inactive. An activation records an epoch, not proof of business authorization.
 
 Invalidating any bound dependency revokes the operation and records cancellation even if its primary scope remains active. The example therefore supports authentication invalidation while Loading: Fetch requires authentication, and the authenticationChanged self-edge invalidates that scope. The old fetch cannot commit; subsequent work binds the new epoch. Validate all dependency names and reject duplicate/redundant dependencies or inconsistent primary-scope eligibility.
 
-`API-112`: Generate a typed shared-mode Drivers value, with one field per operation. Drivers return `Result` rather than using typed throws: in the pinned toolchain a closure passed to a `throws(Failure)` parameter is inferred as throwing `any Error` unless it is explicitly annotated, which would require an annotation on every throwing driver closure.
+`API-112`: Generate a typed shared-mode Drivers value, with one field per operation. A driver for an operation whose failure is `Never` returns its `Output` directly. A driver for an operation that can fail returns `Result` rather than using typed throws: in the pinned toolchain a closure passed to a `throws(Failure)` parameter is inferred as throwing `any Error` unless it is explicitly annotated, which would require an annotation on every throwing driver closure. Each operation has exactly one driver form.
 
 ```swift
 public struct Drivers: Sendable {
     public let fetch:
         @Sendable (Fetch.Input) async -> Result<Fetch.Output, Fetch.Failure>
+    public let audit: @Sendable (Audit.Input) async -> Audit.Output  // Audit cannot fail
     public init(
         fetch: @escaping @Sendable (Fetch.Input) async
-            -> Result<Fetch.Output, Fetch.Failure>
+            -> Result<Fetch.Output, Fetch.Failure>,
+        audit: @escaping @Sendable (Audit.Input) async -> Audit.Output
     )
 }
 ```
@@ -769,7 +745,7 @@ Cancellation invalidates admission before late results can commit. Physical canc
 
 ### 7. Dynamic dispatch, branching, and conflicts
 
-`ROUTE-104`: Generate `prepare(_:on:) -> PreparationResult` for dynamic Input routing. A missing input/source edge returns an explicit invalid-phase rejection. It MUST NOT silently ignore the input. Direct methods expose typed PreparationFailure; dynamic dispatch preserves domain failures in a generated closed PreparationRejection enum with cases for throwing edges, plan failures, and structural routing failures.
+`ROUTE-104`: Generate `prepare(_:on:) throws(PreparationRejection) -> Prepared` for dynamic Input routing. A missing input/source edge throws an explicit invalid-phase rejection. It MUST NOT silently ignore the input. Direct methods throw their authored failure; dynamic dispatch preserves domain failures in a generated closed PreparationRejection enum with a case for each throwing edge and router and one for the structural routing failure. A plan defect travels in the returned Prepared (`API-117`).
 
 `ROUTE-105`: Exactly one edge for a `(source, trigger)` pair permits generated dispatch. Multiple edges for one source and trigger require one router marked `@Route(on:)`, `@Route(onSuccess:)`, or `@Route(onFailure:)`. The router takes the source phase payload. It also takes the input's associated value when present, or the operation's output or failure for a completion trigger. With candidate edges, it returns `Route.<Router>`, with one case per edge sharing that source and trigger. Generated dispatch then calls the selected edge with the sealed outcome, so a router can neither prepare a transition itself nor select another trigger's edge. A router MAY use typed throws to decline; the failure becomes a `PreparationRejection` case named for the router. A router with no edge to choose returns `Never` and must throw. For example:
 
@@ -784,13 +760,29 @@ fileprivate nonisolated static func routeFetched(
 }
 ```
 
-Routes are synchronous, effect-free trusted domain functions. They cannot authorize a transition: they return only a choice among declared edges. A router runs only for dynamic dispatch. An edge method on an observation, and an edge method on an `Owned` value, prepares that edge directly and does not run the router, so a rule that every caller must obey belongs in the edge (typed `throws`) or in a validated argument type. Every operation outcome/source combination in `activeIn` MUST have an unambiguous route, except an explicitly declared `Failure = Never` case (`Never` or `Swift.Never`). Routers may explicitly reject an otherwise well-typed outcome.
+Routes are synchronous, effect-free trusted domain functions. They cannot authorize a transition: they return only a choice among declared edges. Every path to a routed edge runs its router, so a rule the router enforces binds every caller. For an input router with candidate edges, the observation and the `Owned` value expose one method named for the router in place of the candidate edges' methods, which are fileprivate. For a completion router with candidate edges, the `Owned` value exposes that method, and the observation has none because its completion edges are reached only through delivery:
+
+```swift
+// Observed: runs the router, then prepares the selected edge.
+public func choose(_ input: Bool) throws(Problem) -> Prepared where Phase == Loaded
+
+// Owned: runs the router, then advances through the selected edge.
+public consuming func choose(_ input: Bool) -> Route.ChooseResult where Phase == Loaded
+
+public enum ChooseResult: ~Copyable {   // nested in Route
+    case restart(Owned<Idle>)
+    case keep(Owned<Loaded>)
+    case rejected(Problem, Owned<Loaded>)   // the router declined; the source is returned
+}
+```
+
+The observed method throws the failure type that every throwing function of the group shares, however many of them throw, and `PreparationRejection`, with a case named for each throwing function, only when their failure types differ, so adding a candidate that throws the same type leaves the signature unchanged. `send` and `prepare(_:on:)` always report a `PreparationRejection` case named for the function that threw. The owned method returns the candidates' common result directly when the router cannot throw and every candidate returns the same type; otherwise it returns `Route.<Router>Result`, with one case per candidate holding that edge's own result and, when the router throws, a `rejected` case holding the failure and the source. A throwing router therefore cannot choose an edge named `rejected`. A router with no candidate edge gives no method; `send` and `prepare(_:on:)` report its rejection. A completion router runs during delivery and through its `Owned` method. In `.shared` mode `Route.<Router>Result` is `Sendable`, like the owned values its cases carry. Every operation outcome/source combination in `activeIn` MUST have an unambiguous route, except the failure of an operation that cannot fail: one that declares `Failure = Never` (`Never` or `Swift.Never`) or declares no `Failure` alias. Routers may explicitly reject an otherwise well-typed outcome.
 
 `ROUTE-106`: Terminal delivery prepares against a current snapshot and commits with full root-revision validation plus operation authority. MainActor/actor owners normally perform preparation and commit in one isolated turn without an intervening await. Shared owners may encounter intervening commits.
 
-The default shared conflict policy is `.manualOnConflict`: retain a still-authorized terminal outcome as a visible pending completion, emit `reconciliationRequired` outside the lock, and require explicit reconciliation. Expose `pendingCompletions()` and `reconcile(id:)`; pending IDs are opaque typed runtime identifiers. Reconciliation performs one new preparation attempt against a current snapshot. A pending record includes the operation, typed outcome, and reason needed to diagnose or resolve it; it is not an untyped error bag. Claim an attempt atomically before invoking user preparation; concurrent reconciliation of that entry returns `inProgress`, not a duplicate callback invocation.
+A generated managed owner takes one `completionPolicy:` argument of its own `CompletionPolicy` type, spelled `.retryPure`, `.retryPure(onReconciliationRequired:)`, or `.manual(onReconciliationRequired:)`, defaulting to the bare `.retryPure` (`ROUTE-107`). A handler takes the generated `PendingCompletion` in the owner's isolation: `@Sendable` for `Shared` and `ActorHost`, `@MainActor` for `MainActorHost`. Whenever a retained completion's status becomes `reconciliationRequired`, the owner passes it to the policy's handler outside the lock: because a completion edge or router rejected it, its plan is defective, or admission refused it (`DELIVERY-008`), because an explicit reconciliation did not commit, or, under the manual policy, because its preparation lost a root conflict (`DELIVERY-005`). A pure conflict retry under either `.retryPure` form is not reported. The bare `.retryPure` has no handler, so a retained completion is then reported only by `pendingCompletions()`. Raw runtime hosts keep a separate policy value and callback, and default to manual. Expose `pendingCompletions()` and `reconcile(id:)`; pending IDs are opaque typed runtime identifiers. Reconciliation performs one new preparation attempt against a current snapshot. A pending record includes the operation, typed outcome, and reason needed to diagnose or resolve it; it is not an untyped error bag. Claim an attempt atomically before invoking user preparation; concurrent reconciliation of that entry returns `inProgress`, not a duplicate callback invocation.
 
-`ROUTE-107`: `.retryPure` is an explicit schema/host contract permitting reevaluation of declared pure routing/preparation. It MUST NOT be selected implicitly for arbitrary custom code. Limit a delivery turn to four preparation attempts, then yield through the runner's scheduling mechanism. Revalidate authority and lifetime at every attempt; never reuse a stale whole-root candidate or busy-spin inside the lock. Obsolete, retired, or closed-owner outcomes are disposed according to lifecycle rules, with reservation cleanup.
+`ROUTE-107`: `.retryPure` is a host contract permitting reevaluation of declared pure routing/preparation. A macro-declared graph's completion edges and routers are synchronous static functions over the source payload and the captured outcome, and the schema author is responsible for keeping them deterministic and free of side effects, which the compiler does not prove; on that basis `.retryPure` is the default of generated managed owners, and `.manual(onReconciliationRequired:)` is the explicit choice for a graph whose completion preparation must not run twice. It MUST NOT be selected implicitly for arbitrary custom code, so raw runtime hosts default to manual. Limit a delivery turn to four preparation attempts, then yield through the runner's scheduling mechanism. Revalidate authority and lifetime at every attempt; never reuse a stale whole-root candidate or busy-spin inside the lock. Obsolete, retired, or closed-owner outcomes are disposed according to lifecycle rules, with reservation cleanup.
 
 Managed capacity-only retry retains the private copyable candidate and retries admission after capacity becomes available, without invoking preparation again. A newly detected root conflict returns to the selected conflict policy; permanent invalid/oversized plans require reconciliation rather than endless capacity retry. This internal facility does not make a consumed public Prepared reusable.
 
@@ -807,21 +799,29 @@ public final class Shared: Sendable {
     )
     public func snapshot() -> Snapshot
     public func commit(_ prepared: consuming Prepared) -> CommitResult
-    public func deliver(_ completion: Completion) -> DeliveryResult
     public func pendingCompletions() -> [PendingCompletion]
-    public func reconcile(id: PendingCompletionID) -> DeliveryResult
-    public func discardPending(id: PendingCompletionID) -> DeliveryResult
-    public func close() -> Receipt
-    public func shutdownAndWait(deadline: ContinuousClock.Instant?) async -> ShutdownResult
+    public func reconcile(id: PendingCompletionID) -> ReconcileResult
+    public func discardPending(id: PendingCompletionID) -> DiscardResult
+    @discardableResult public func close() -> Receipt
+    public func flush(through receipt: Receipt) async -> FlushResult
+    @discardableResult
+    public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult
+    public var runningCount: Int { get async }
+    public var subscriberCount: Int { get }
 }
 
-public enum ShutdownResult: Sendable {
+public enum ShutdownResult: Equatable, Sendable {
     case quiescent
     case timedOut(ShutdownDiagnostics)
 }
+
+public enum FlushResult: Equatable, Sendable {
+    case processed
+    case foreignOwner
+}
 ```
 
-Every managed host MUST receive its appropriately isolated Drivers value during initialization and retain that selection immutably for the owner's lifetime. No ambient mutable driver installation is permitted. `Configuration` sets the capacity bounds. Each managed owner initializer takes a separate `completionPolicy` argument that defaults to `.manualOnConflict`. `Shared`, `MainActorHost`, and `ActorHost` offer `shutdownAndWait(deadline:)`. The deadline defaults to `nil`, so `shutdownAndWait()` waits without a deadline. The method closes the owner and returns `ShutdownResult.quiescent` once the obligations in `LIFE-004` settle. If the deadline expires first, it returns `ShutdownResult.timedOut` with `ShutdownDiagnostics`. `ShutdownDiagnostics` is `Sendable` and holds no model data or authority; `ShutdownResult` and `ShutdownDiagnostics` are reserved generated names, generated wherever a managed owner is. DeliveryResult is a closed value distinguishing committed receipt, retained pending identifier/status, `inProgress`, `notPending`, and discarded/rejected outcome. It MUST NOT conceal a conflict as success. Synchronous queries use the runtime's protected pending-record snapshots; actual task handles remain coordinator-owned. A schema with at least one operation also generates, on each managed owner, a convenience initializer that takes each operation's driver closure as its own parameter, in declaration order, in place of `drivers:`. Each label is the operation's effect case followed by `Driver` (`fetchDriver:` for `Fetch`), so no operation name can collide with another parameter. Every other parameter and default matches the ordinary initializer, including the initial payload and its declared default. The closure types match the corresponding Drivers member: `@Sendable` for `Shared` and `ActorHost`, and `@MainActor` for `MainActorHost`. The initializer builds the Drivers value and delegates, and a declared `@Restoration` function gives the same form of `init(restoring:)`, with the same `throws`. A schema with no operations has no such initializer.
+When its schema declares operations, every managed host MUST receive its appropriately isolated Drivers value during initialization and retain that selection immutably for the owner's lifetime, and each initializer takes one `completionPolicy` argument of the owner's `CompletionPolicy` type that defaults to `.retryPure` (`ROUTE-106`). No ambient mutable driver installation is permitted. `Configuration` sets the capacity bounds. `Shared`, `MainActorHost`, and `ActorHost` offer one shutdown verb, `shutdown(deadline:)`, whose result is discardable. The deadline defaults to `nil`, so `shutdown()` waits without a deadline. The method closes the owner and returns `ShutdownResult.quiescent` once the obligations in `LIFE-004` settle. If the deadline expires first, it returns `ShutdownResult.timedOut` with `ShutdownDiagnostics`. `ShutdownDiagnostics` is an `Equatable`, `Sendable` struct that holds no model data or authority and names its retained completions by the schema's `PendingCompletionID`. `close()` returns a discardable receipt on every owner. `flush(through:)` returns `FlushResult.processed`, or `.foreignOwner` for a receipt another owner issued (`LIFE-003`). Each managed owner of a schema that declares operations reports `runningCount`, the workers whose joined termination is still unprocessed, and every managed owner reports `subscriberCount`, its live registrations; both are `async` on `ActorHost`, and `runningCount` is `async` on `Shared`, whose workers belong to an actor-isolated coordinator. `ShutdownResult`, `ShutdownDiagnostics`, and `FlushResult` are reserved generated names, generated wherever a managed owner is. A managed owner offers no `deliver`: it issues work only to its own drivers, so no caller holds a completion it could deliver, and `pendingCompletions()` exposes each retained outcome only as an inert value. Each pending operation has its own closed result with only the cases it can produce. `deliver` on `Local` returns `DeliveryResult` (committed receipt, retained pending identifier and status, stale, or foreign owner). `reconcile(id:)` and `retryAdmission(id:)` return `ReconcileResult` (committed, pending, `inProgress`, or `notPending`). `discardPending(id:)` returns `DiscardResult` (discarded receipt, admission rejection, or `notPending`). None of them conceals a conflict as success. `PendingCompletionID` is a nominal `Hashable` and `Sendable` struct generated per schema with private storage, so an identity from another graph does not type-check; two owners of one graph are still distinguished at run time. Synchronous queries use the runtime's protected pending-record snapshots; actual task handles remain coordinator-owned. A schema with at least one operation also generates, on each managed owner, a convenience initializer that takes each operation's driver closure as its own parameter, in declaration order, in place of `drivers:`. Each label is the operation's effect case followed by `Driver` (`fetchDriver:` for `Fetch`), so no operation name can collide with another parameter. Every other parameter and default matches the ordinary initializer, including the initial payload and its declared default. The closure types match the corresponding Drivers member: `@Sendable` for `Shared` and `ActorHost`, and `@MainActor` for `MainActorHost`. The initializer builds the Drivers value and delegates, and a declared `@Restoration` function gives the same form of `init(restoring:)`, with the same `throws`. A schema with no operations has no such initializer.
 
 `discardPending(id:)` performs an explicit authority-only commit: revoke that operation and dispose its pending envelope atomically, recording cancellation if needed. Normal revision/queue checks apply; rejection leaves the pending record intact. It does not invent a model recovery transition; applications use a declared cancel/recovery edge when needed. Duplicate delivery returns the existing pending status without replacing its outcome or reexecuting preparation.
 
@@ -835,11 +835,13 @@ public mutating func drainCommands(limit: Int) -> [CommandBatch]
 public mutating func acknowledgeExecution(
     _ execution: ExecutionHandle, disposition: ExecutionDisposition
 ) -> AcknowledgmentResult
-public mutating func retryAdmission(id: PendingCompletionID) -> DeliveryResult
+public mutating func retryAdmission(id: PendingCompletionID) -> ReconcileResult
 public var isQuiescent: Bool { get }
 ```
 
-The limit counts whole FIFO batches, each containing its receipt, closed typed start/cancel commands, and terminal flag; a nonpositive limit drains nothing. Draining transfers batches and frees queue capacity. Draining and acknowledging never change the model and never admit a retained completion. If queue or execution capacity prevents admission, `Local` retains the prepared candidate as `.pending(id, .waitingForCapacity)`. `retryAdmission(id:)` rechecks that candidate without preparing it again. If the revision and authority are current, the retry commits when the candidate fits or reports `.waitingForCapacity` while capacity is exhausted. If the revision changed and the operation still has authority, it reports `.pending(id, .reconciliationRequired)`. If the pending record was removed, it reports `.notPending`. Execute commands only after mutating access ends; never capture Local or its inout access in an escaping task/closure. Reenter synchronously with typed completion and a separate idempotent acknowledgment: `.terminated` or `.skippedBeforeStart`. The sealed ExecutionHandle comes from issued Work/commands. Acknowledgment distinguishes recorded, duplicate, and foreign-owner outcomes. A ticket of this owner with no outstanding obligation is reported as duplicate, because distinguishing an execution that was never issued from one already released would require the tombstone history that `DIAG-003` prohibits. An acknowledgment records actual termination/definite nonstart, not a cancellation request. Caller lifecycle correctness is explicit; completion alone cannot free a still-running reservation.
+A schema with no `@Operation` has nothing to execute or deliver. It generates no work, completion, command, execution, or pending types, and no owner offers `drainCommands`, `acknowledgeExecution`, `deliver`, `reconcile`, `retryAdmission`, `pendingCompletions`, `discardPending`, `drivers:`, or `completionPolicy:`. Its `Local` has no `isQuiescent`, and no acceptance of it carries a command, so an unbounded run of `send` needs no draining (`API-114`); `send`, `commit`, and `close` return each receipt. Its managed owners have no `runningCount`, and their `flush(through:)` and `shutdown(deadline:)` wait only for batch processing, which offers each accepted snapshot to subscriptions. They still drain their own batches to publish snapshots, so their commit queue bounds an undrained burst.
+
+`Local` queues a batch only for an acceptance that carries at least one command, a start or a cancellation, and for closure. An acceptance that starts and cancels nothing queues no batch and needs no queue slot; its receipt is the return value of `send` or `commit`. Managed hosts queue every acceptance, because they publish each accepted snapshot from their queue. The limit counts whole FIFO batches, each containing its receipt, closed typed start/cancel commands, and terminal flag; a nonpositive limit drains nothing. Draining transfers batches and frees queue capacity. Draining and acknowledging never change the model and never admit a retained completion. If queue or execution capacity prevents admission, `Local` retains the prepared candidate as `.pending(id, .waitingForCapacity)`. `retryAdmission(id:)` rechecks that candidate without preparing it again. If the revision and authority are current, the retry commits when the candidate fits or reports `.waitingForCapacity` while capacity is exhausted. If the revision changed and the operation still has authority, it reports `.pending(id, .reconciliationRequired)`. If the pending record was removed, it reports `.notPending`. Execute commands only after mutating access ends; never capture Local or its inout access in an escaping task/closure. Reenter synchronously with typed completion and a separate idempotent acknowledgment: `.terminated` or `.skippedBeforeStart`. The sealed ExecutionHandle comes from issued Work/commands. Acknowledgment distinguishes recorded, duplicate, and foreign-owner outcomes. A ticket of this owner with no outstanding obligation is reported as duplicate, because distinguishing an execution that was never issued from one already released would require the tombstone history that `DIAG-003` prohibits. An acknowledgment records actual termination/definite nonstart, not a cancellation request. Caller lifecycle correctness is explicit; completion alone cannot free a still-running reservation.
 
 LocalConfiguration exposes capacities with a fixed manual completion policy. Local has no coordinator, async runner, automatic subscription delivery, retryPure scheduler, or async shutdown. Reads and drained receipt batches supply observations; managed observation, flush, and shutdown facilities apply to managed hosts. Its caller drains, reconciles, and acknowledges execution until closed, the terminal batch is drained, and all reservations/pending obligations are settled; only then isQuiescent is true. Use MainActor/actor/Shared for managed callbacks. These rules also apply when Local contains non-Sendable isolated-mode data.
 
@@ -868,13 +870,13 @@ Owned completion-shaped edges MAY take ordinary output values: the caller owns t
 
 ### 10. Diagnostics and acceptance obligations
 
-`MACRO-106`: Reject unsupported reference spellings, references of the wrong kind, duplicate/reserved names, unsupported placements/signatures, a missing or repeated initial marker, source or destination types that are not phase payloads, aliased/reused phase types, wrong payload arity, a hand-written `Effect`, operation names that generate an unusable effect case, a result shape that disagrees with `starts`, a router result that is not its generated choice type, undeclared scopes, malformed admission limits, ambiguous routes, mode-incompatible host requests, more than one `@Restoration` function, a `@Restoration` function in an `.ownedOnly` schema or whose result is not `Restoration`, and a restoration function that is also an edge or router. Diagnose declared starts that are ineligible in the destination phase. Report the offending declaration and corrective requirement.
+`MACRO-106`: Reject unsupported reference spellings, references of the wrong kind, duplicate/reserved names, unsupported placements/signatures, a missing or repeated initial marker, source or destination types that are not phase payloads, aliased/reused phase types, wrong payload arity, a hand-written `Effect`, operation names that generate an unusable effect case, a result shape that disagrees with `starts`, a router result that is not its generated choice type, undeclared scopes, an operation namespace whose aliases are not `Input` and `Output` with an optional `Failure`, malformed admission limits, ambiguous routes, mode-incompatible host requests, more than one `@Restoration` function, a `@Restoration` function in an `.ownedOnly` schema or whose result is not `Restoration`, a restoration function that is also an edge or router, and an `allows:` entry that is not a phase payload, is listed twice, or names a phase in which no operation is active (which is restorable without being listed). Diagnose declared starts that are ineligible in the destination phase. Report the offending declaration and corrective requirement.
 
 `MACRO-107`: Emit compiler witnesses for source/input/destination types, per-edge result and effect types, operation aliases, router signatures, ownership, isolation, Copyable, and Sendable requirements. SwiftSyntax text inspection MUST NOT pretend to resolve arbitrary semantic type equality or inspect imported implementations. Diagnostics and witnesses complement each other.
 
 `MACRO-108`: Terminal phases and unused edges are legal. Unreachable-from-initial phases receive at most an opt-in warning because restoration may enter them. Malformed references and type violations remain errors. Publish a measured supported graph-size range; include a representative 128-phase/512-edge expansion/compiler stress fixture. Do not invent a compiler limit or an unsupported build-time performance target.
 
-`MACRO-109`: A `.shared` or `.isolated` schema generates `Restoration`, an enum with one case, carrying the phase payload, for each phase that appears in no operation's `activeIn`. A schema MAY declare at most one static function marked `@Restoration`. It takes one unlabeled, by-value parameter for the saved data and returns `Restoration`. The saved-data type and any typed failure must resolve to the same types in the schema and its generated owners. In those type spellings, `Self` refers to the schema. It MAY use typed `throws`. Declaring it generates an `init(restoring:)` on every owner except `Owned`. The initializer mirrors the owner's ordinary initializer, takes the saved data in place of the initial payload, and throws exactly the function's failure. It creates fresh owner identity, incarnation, and scope activations at revision zero. It adopts no live authority and starts no work. A phase with an active operation has no `Restoration` case, so restoring into it MUST NOT compile; the function either rejects that saved shape or maps it to a resting phase, after which the caller sends an input to start fresh work. Forking is restoration from a saved copy of `snapshot.model`. Without the function the schema has the `Restoration` type and no `restoring:` initializer.
+`MACRO-109`: A `.shared` or `.isolated` schema generates `Restoration`, an enum with one case, carrying the phase payload, for each phase that appears in no operation's `activeIn`, and for each phase its `@Restoration` function lists in `allows:`. A schema MAY declare at most one static function marked `@Restoration`, optionally as `@Restoration(allows: [Ready.self])`, whose list names phases that saved data may restore whether or not an operation may be active in them. Listing a phase in which no operation is active is permitted and pins it: it stays in the archive contract if an operation later becomes active there. The only diagnostics for the list are a duplicate entry and an entry that is not a phase payload type of the schema. It takes one unlabeled, by-value parameter for the saved data and returns `Restoration`. The saved-data type and any typed failure must resolve to the same types in the schema and its generated owners. In those type spellings, `Self` refers to the schema. It MAY use typed `throws`. Declaring it generates an `init(restoring:)` on every owner except `Owned`. The initializer mirrors the owner's ordinary initializer, takes the saved data in place of the initial payload, and throws exactly the function's failure. It creates fresh owner identity, incarnation, and scope activations at revision zero. It adopts no live authority and starts no work: a restored owner has no outstanding work, exactly as a fresh owner that starts in the restored phase, and the phase's edges start work as usual. A phase in which an operation may be active and that `allows:` does not list has no `Restoration` case, so restoring into it MUST NOT compile; the function either rejects that saved shape or maps it to a restorable phase, after which the caller sends an input to start fresh work. Forking is restoration from a saved copy of `snapshot.model`. Without the function the schema has the `Restoration` type and no `restoring:` initializer.
 
 `API-116`: Separate-module positive/negative fixtures MUST cover constructor sealing, wrong-phase edges, completion-without-ticket attempts, noncopyable reuse, cross-owner rejection, duplicate completion, unsupported isolation crossings, dynamic effect-policy rejection, and owned failure recovery. Include a hand-written facade exercising the same runtime contract. The factory MUST record actual compiler and minimum-OS results; generated source or plausible examples alone do not satisfy acceptance.
 
@@ -951,7 +953,7 @@ Reserve the final ordinal for close. Ordinary commits may produce ordinals throu
 
 **AUTH-005 — Final validation.** All required authority MUST be checked again in the same critical section that installs the completion and retires its operation. Preliminary checks are optimizations. Root freshness and operation validity are distinct requirements; satisfying one does not satisfy the other.
 
-**AUTH-006 — Typed terminal inputs.** A completion edge accepts the operation's sealed SuccessCompletion or FailureCompletion, carrying its ticket. It MUST NOT accept an unaccompanied result such as Profile as equivalent authority. A ticket is intentionally copyable for callbacks; the runtime admits at most one terminal transition.
+**AUTH-006 — Typed terminal inputs.** Delivery accepts the operation's sealed completion, carrying its ticket. It MUST NOT accept an unaccompanied result such as Profile as equivalent authority. A ticket is intentionally copyable for callbacks; the runtime admits at most one terminal transition.
 
 Operation policy is schema-declared and applies to a group identified by the scope activation plus generated operation-kind tag:
 
@@ -990,7 +992,7 @@ The prepared payload includes the expected owner, incarnation, root revision ide
 
 Authority requirements are inspected in a stable generated order. Distinguish required scope, operation, and dependency failures where useful, but do not claim historical reasons that the engine no longer stores. An absent operation can truthfully be reported inactive without retaining an unbounded cancellation/completion history.
 
-The precedence makes a revoked response terminal rather than misclassifying it as a useful root-conflict retry. Preparation errors occur before a Prepared value exists and are separate from this admission order.
+The precedence makes a revoked response terminal rather than misclassifying it as a useful root-conflict retry. Preparation errors occur before a Prepared value exists and are separate from this admission order. A plan defect found while preparing travels with the snapshot it was prepared on and is reported as plan after foreignOwner and closed; no candidate exists, so the later checks do not apply (`API-117`). `CommitRejection`, with its `PolicyFailure` and `Capacity` payloads, is one nongeneric type of the `AtomicState` module that the kernel uses and every generated facade names, so a client spells a capacity payload without naming the kernel.
 
 **COMMIT-005 — Installation algorithm.**
 
@@ -1049,31 +1051,31 @@ Managed delivery may retain the private immutable candidate inside its pending r
 
 The runner holds the committed Work capability, invokes the typed driver with input, and seals its terminal result into the matching completion. Duplicate callback adapters use the same at-most-once admission rule. The first envelope retained by the pending ledger occupies its operation's pending slot; subsequent duplicate delivery requests return that slot's status without replacing its payload or running a second preparation.
 
-**DELIVERY-002 — Pending query.** pendingCompletions() returns typed historical records containing an opaque owner-bound PendingCompletionID, operation kind, typed terminal outcome, status, last rejection, and attempt count. Retain boxes while locked, then construct public projections outside the lock. Do not expose private authority constructors or a mutable payload reference.
+**DELIVERY-002 — Pending query.** pendingCompletions() returns typed historical records containing an opaque owner-bound PendingCompletionID, operation kind, typed terminal outcome, status, last rejection, and attempt count. The outcome is an inert value, one case per operation carrying `Result<Output, Failure>`, never a sealed completion a caller could submit again. Retain boxes while locked, then construct public projections outside the lock. Do not expose private authority constructors or a mutable payload reference.
 
 Required statuses are awaitingAdmission, preparing, waitingForCapacity, retryScheduled, and reconciliationRequired. The last carries a conflict, domain rejection, invalid plan, or other actionable reason. A pending record is operational state, not a new domain snapshot; changing its status does not increment the model revision.
 
 Attempt counts are diagnostic only. At their representation limit, saturate and expose that fact; never wrap or use a diagnostic count as authority.
 
-**DELIVERY-003 — Attempt claim.** Before evaluating any pending envelope, claim it with a fresh private attempt identity under the core lock and capture the current snapshot. Only one claim may be active for that pending record. A concurrent reconcile returns inProgress rather than evaluating the reducer again. After preparation, publish a result/status only if the same pending and attempt identities remain current.
+**DELIVERY-003 — Attempt claim.** A completion edge is not independently committable: its observed method is fileprivate, and only delivery, `reconcile(id:)`, and `retryAdmission(id:)` prepare or admit it. The first retained outcome is therefore the only one that can commit for its work, whichever public method a caller uses. Before evaluating any pending envelope, claim it with a fresh private attempt identity under the core lock and capture the current snapshot. Only one claim may be active for that pending record. A concurrent reconcile returns inProgress rather than evaluating the reducer again. After preparation, publish a result/status only if the same pending and attempt identities remain current.
 
 Close, invalidation, or an independently accepted terminal completion can dispose the pending record while preparation runs. That work then loses its claim, and normal authority validation prevents its candidate from committing. Retain all accessed envelopes across the unlocked work; never dereference a removed slot. Every preparation exit acknowledges its claim, including throws and stale rejection. Its reservation remains occupied until that acknowledgment even if the pending record was removed meanwhile.
 
 **DELIVERY-004 — Sole-writer default.** On an isolated sole-writer host, route, prepare, and commit in one actor turn without suspension. Internal execution bookkeeping does not change its domain revision. Unexpected conflict remains a reported pending condition, not a reason to bypass freshness checking.
 
-**DELIVERY-005 — Shared default.** The default shared managed policy is manualOnConflict. On root conflict, retain the completed envelope, discard the stale candidate outside the lock, set reconciliationRequired, and report that status outside the lock. No automatic second router/reducer invocation occurs.
+**DELIVERY-005 — Manual policy.** A generated managed owner selects the manual policy with `.manual(onReconciliationRequired:)`; a raw runtime host uses it by default. On root conflict, retain the completed envelope, discard the stale candidate outside the lock, set reconciliationRequired, and report that status outside the lock to the manual handler. No automatic second router/reducer invocation occurs.
 
 reconcile(id:) claims the pending record, captures a fresh snapshot, and performs at most one new preparation during that call. It returns committed, retained pending, inProgress, or notPending/discarded as applicable. A conflict leaves the same envelope visible for another explicit decision. Repeated calls are new explicit authorizations to evaluate; one call is not an unbounded retry loop.
 
-**DELIVERY-006 — Opt-in retryPure.** A schema/host may explicitly select retryPure. This contract allows reevaluating domain-authored synchronous routers, validators, and reducers for that operation. They must be deterministic and effect-free for the supplied snapshot and captured inputs. Swift does not prove these properties.
+**DELIVERY-006 — retryPure.** Generated managed owners select retryPure, with or without a handler, unless constructed with `.manual(onReconciliationRequired:)`; a raw runtime host selects it explicitly. This contract allows reevaluating domain-authored synchronous routers, validators, and reducers for that operation. They must be deterministic and effect-free for the supplied snapshot and captured inputs. Swift does not prove these properties.
 
 Network I/O, decoding, external reads, clocks, random values, and mutable dependency observations MUST be captured once into immutable input before the retry pipeline. Retrying may use a newer root, so a different valid successor is permitted; performing an external action again is not.
 
-A retryPure delivery turn performs at most four preparation attempts. Each captures a fresh snapshot and revalidates authority. If still conflicted, retain the outcome, release its claim, mark retryScheduled, and return control to the scheduler. Use a fair rotating ready queue with at most one scheduled-ready entry per pending ID; permit at most one follow-up round after an executor yield for each turn. There is no starvation guarantee under continuous external mutation.
+A retryPure delivery turn performs at most four preparation attempts. Each captures a fresh snapshot and revalidates authority. If still conflicted, retain the outcome, release its claim, mark retryScheduled, and return control to the scheduler. Every automatic retry, immediate or scheduled, is bound to the decision of the attempt that lost the conflict: once any other attempt finishes, that decision authorizes neither another claim nor scheduling, and a queued turn claims only while the record is still retryScheduled, so a newer explicit decision, including a candidate waiting for capacity, is never overridden or prepared again. Use a fair rotating ready queue with at most one scheduled-ready entry per pending ID; permit at most one follow-up round after an executor yield for each turn. There is no starvation guarantee under continuous external mutation.
 
-The ReferenceProfile example may explicitly select retryPure to demonstrate automatic recovery. Documentation and example configuration must make that selection visible.
+The handwritten ReferenceProfile example keeps the raw hosts' manual default and may explicitly select retryPure to demonstrate automatic recovery. Documentation and example configuration must make that selection visible.
 
-**DELIVERY-007 — Capacity retry.** Transient capacity rejection preserves the already prepared private candidate and sets waitingForCapacity. Retry only admission when capacity changes. If revision has changed, apply manualOnConflict or retryPure; do not submit an old whole-root candidate as a partial patch. A capacity retry does not consume another preparation attempt unless it actually prepares again. A managed host retries admission itself when capacity changes. `Local` has no runner, so its caller asks with `retryAdmission(id:)` after draining.
+**DELIVERY-007 — Capacity retry.** Transient capacity rejection preserves the already prepared private candidate and sets waitingForCapacity. Retry only admission when capacity changes. If revision has changed, apply the manual or retryPure policy; do not submit an old whole-root candidate as a partial patch. A capacity retry does not consume another preparation attempt unless it actually prepares again. A managed host retries admission itself when capacity changes. `Local` has no runner, so its caller asks with `retryAdmission(id:)` after draining.
 
 **DELIVERY-008 — No automatic retry.** Domain preparation rejection, invalidPlan, planTooLarge, operation-policy rejection, and revisionExhausted retain the envelope as reconciliationRequired. They do not trigger an automatic retry loop. A completion issued by a foreign owner is a caller error and is reported with a distinct foreign-owner outcome. Closed lifecycle, obsolete incarnation, inactive operation/dependency authority, or a matching completion already committed disposes the envelope with an explicit stale/closed/discarded outcome.
 
@@ -1083,7 +1085,7 @@ Because task termination and domain admission are separate, a disposed envelope 
 
 Discard leaves the domain payload unchanged. The caller must choose a declared recovery/cancel transition if the UI/model should also leave a loading phase. No hidden failure-state transition is invented.
 
-**DELIVERY-010 — No universal transparent replay.** Concurrent arbitrary synchronous writers, prohibition of reducer replay, and invisible conflict resolution cannot all be promised together. The documented host and policy choice is part of the public contract. No implementation may select retryPure implicitly to make a test pass.
+**DELIVERY-010 — No universal transparent replay.** Concurrent arbitrary synchronous writers, prohibition of reducer replay, and invisible conflict resolution cannot all be promised together. The documented host and policy choice is part of the public contract: generated managed owners default to retryPure on the declared purity of macro-declared completion edges and routers (`ROUTE-107`), and raw hosts default to manual. No implementation may select retryPure implicitly for custom code to make a test pass, and a test that depends on manual reconciliation names `.manual(onReconciliationRequired:)`.
 
 ### 7. Managed FIFO drain and task ownership
 
@@ -1153,9 +1155,9 @@ After its linearization point, new ordinary commits return closed and no fresh o
 
 **LIFE-002 — Terminal drain.** Process the terminal record after all earlier accepted batches have received their launch/publication decisions. Cancel all still-running owned work, discard remaining pending delivery state, and finish subscriptions with their final snapshot. The runner MUST remain alive to reap cancelled tasks; processing the terminal record alone is not complete shutdown. An owner released without closing finishes its subscriptions without a closed snapshot. On the MainActor and actor hosts this includes retained callback registrations, whose finish action runs without a closed snapshot.
 
-**LIFE-003 — Flush.** flush(through:) accepts a receipt from this owner and waits until processedThrough reaches its ordinal. It covers snapshot offering and effect launch/skip decisions, not execution completion or completion of user observer callbacks. A long-lived effect must not make ordinary flush impossible. Reject a foreign receipt; resolve waiters outside the core lock.
+**LIFE-003 — Flush.** flush(through:) accepts a receipt from this owner and waits until processedThrough reaches its ordinal. It covers snapshot offering and effect launch/skip decisions, not execution completion or completion of user observer callbacks. A long-lived effect must not make ordinary flush impossible. Reject a foreign receipt without waiting, reporting it as a foreign owner; resolve waiters outside the core lock.
 
-**LIFE-004 — Shutdown and join.** shutdownAndWait() first closes, then awaits all of the following:
+**LIFE-004 — Shutdown and join.** shutdown(deadline:) first closes, then awaits all of the following:
 
 - The terminal record has been processed.
 - All accepted starts are registered or acknowledged as skipped.
@@ -1164,7 +1166,7 @@ After its linearization point, new ordinary commits return closed and no fresh o
 - Every in-flight managed/reconciliation preparation claim has acknowledged exit.
 - Every execution reservation has been released.
 
-Do not remove task handles or reservations to manufacture quiescence. Task cancellation is cooperative, and domain code termination is not statically proved. If the deadline expires before quiescence, `shutdownAndWait(deadline:)` returns `ShutdownResult.timedOut` with `ShutdownDiagnostics`. The diagnostics record the accepted revision, the last fully processed revision, whether batches remain queued, whether a drain is in progress, and the IDs of retained completions. Each outstanding reservation records an opaque execution identity, separate execution and delivery dispositions, and an optional opaque preparation identity. The runtime stays closed and tracks the remaining work. The diagnostics are a historical observation and expose no ticket or authority. They do not assert that the work stopped.
+Do not remove task handles or reservations to manufacture quiescence. Task cancellation is cooperative, and domain code termination is not statically proved. If the deadline expires before quiescence, `shutdown(deadline:)` returns `ShutdownResult.timedOut` with `ShutdownDiagnostics`. The diagnostics come from the same observation that decides the owner is still unsettled after the deadline has expired: an actor host decides and captures in one turn, and `Shared` takes one atomic load after it observes that the deadline passed, so an owner whose work settled before that load returns `.quiescent`. A timed-out result therefore always names at least one unsettled obligation. They record the accepted revision, the last fully processed revision, whether batches remain queued, whether a drain is in progress, whether an automatic completion retry is still scheduled, and the IDs of retained completions. Each outstanding reservation records an opaque execution identity, separate execution and delivery dispositions, and an optional opaque preparation identity. The runtime stays closed and tracks the remaining work. The diagnostics are a historical observation and expose no ticket or authority. They do not assert that the work stopped.
 
 Explicit close establishes lifecycle semantics. Finalization may request best-effort cancellation but MUST NOT be the only correctness mechanism. Pure manual preparation on a caller-owned historical snapshot and unregistered external work are outside the engine's join set.
 
@@ -1174,7 +1176,7 @@ Reset uses normal queue/capacity/revision admission and can be rejected without 
 
 **LIFE-006 — Fork.** Fork copies selected validated model data into a new owner with a fresh incarnation, ordinal sequence, authority ledger, queues, and runner. It adopts no tickets, tasks, pending outcomes, subscribers, or live scope activations from the source. Shared immutable value storage is permitted; live authority sharing is not.
 
-**LIFE-007 — Persistence.** Encode versioned domain data, never live provenance, tickets, lock state, prepared candidates, tasks, or closure queues. Decode through semantic validation before construction/reset. Restoring a loading-shaped payload requires an explicit domain policy: start fresh work, mark interruption through a declared restoration rule, or reject restoration. It cannot fabricate an active task. In a macro-declared graph the restoration rule is the `@Restoration` function of `MACRO-109`, and a phase with active work cannot be restored into.
+**LIFE-007 — Persistence.** Encode versioned domain data, never live provenance, tickets, lock state, prepared candidates, tasks, or closure queues. Decode through semantic validation before construction/reset. Restoring a loading-shaped payload requires an explicit domain policy: start fresh work, mark interruption through a declared restoration rule, or reject restoration. It cannot fabricate an active task. In a macro-declared graph the restoration rule is the `@Restoration` function of `MACRO-109`, and a phase in which an operation may be active can be restored into only when `allows:` lists it, and then with no outstanding work.
 
 In-memory commit plus later external execution is not a durable transaction. Durable effects require a separately specified durable outbox, idempotency, and recovery design; this contract does not supply them.
 
@@ -1190,7 +1192,7 @@ The caller completes the mutating drain access before executing any driver, canc
 
 Completion delivery and execution acknowledgment are independent: a completion may be accepted while work still requires termination acknowledgment, or terminated work may retain a pending outcome. Cancellation requests never impersonate termination. Free the reservation only after both obligations are settled, with any in-flight preparation claim exited.
 
-**LIFE-008 — Local close and quiescence.** Local close uses the same reserved revision and terminal slot, immediately ending admission and revoking authority. The caller must continue draining cancellation/terminal records and acknowledge issued work. isQuiescent becomes true only when closed, the terminal batch is drained, all pending outcomes are disposed, and every reservation is released.
+**LIFE-008 — Local close and quiescence.** Local close uses the same reserved revision and terminal slot, immediately ending admission and revoking authority. The caller must continue draining cancellation/terminal records and acknowledge issued work. isQuiescent becomes true only when closed, the terminal batch is drained, all pending outcomes are disposed, and every reservation is released. A `Local` whose schema has no operations has neither `drainCommands` nor `isQuiescent`; its closure is `snapshot().isClosed` (`API-118`).
 
 LocalConfiguration has bounded capacities and a fixed manual delivery policy. There is no automatic capacity retry or retryPure scheduling for Local. Callers explicitly drain, deliver/reconcile, and acknowledge. Managed automatic behavior requires a MainActor, actor, or shared reference host. Dropping Local ends its in-memory ownership; it does not prove that externally issued work terminated.
 
@@ -1205,7 +1207,7 @@ The acceptance suite MUST include these histories with deterministic gates, not 
 | ABA | Exit/reentry and dynamic remove/reinsert with equal visible identifiers |
 | Unrelated root edit | Valid old operation completes after an unrelated root edit; preparing against the newer snapshot, or reconciling after a concurrent edit, preserves the newer field |
 | Capacity | Full ordinary queue still admits close; impossible plan never retries |
-| Delivery | manualOnConflict remains visible; retryPure stops each turn after four preparations |
+| Delivery | A manual conflict remains visible; retryPure stops each turn after four preparations |
 | Claim ownership | Concurrent reconcile calls produce one preparation and an inProgress outcome |
 | Capacity retry | Draining frees capacity, and a managed host (or `retryAdmission(id:)` on Local) then admits a retained candidate without invoking its reducer again |
 | Destruction | Payload/closure deinitializers reenter during every retirement path, only after unlock |
@@ -1433,7 +1435,7 @@ The construction guarantee applies to the supported statically typed public Swif
 **Operations and assertions:**
 
 - **Isolated sole writer:** Prepare and commit synchronously in one isolation turn without suspension. Verify there is no intervening writer, and capacity failure follows its explicit retained-candidate path.
-- **Shared `.manualOnConflict` default:** Force a stale candidate. The immutable result remains in a queryable pending ledger with `.reconciliationRequired`. One explicit `reconcile(id)` performs one new preparation/admission attempt; another conflict remains queryable rather than silently retrying or dropping the result.
+- **Shared `.manual(onReconciliationRequired:)` policy:** Force a stale candidate. The immutable result remains in a queryable pending ledger with `.reconciliationRequired`. One explicit `reconcile(id)` performs one new preparation/admission attempt; another conflict remains queryable rather than silently retrying or dropping the result.
 - **Optional `.retryPure`:** Use an explicitly opted-in, contractually pure synchronous domain reducer. Force more than four conflicts. No turn performs more than four preparation attempts; the runner yields/reschedules with the result retained. Swift does not prove the reducer's purity, so the opt-in contract and counters are part of the test.
 - **Transient `capacityExceeded`:** The runtime retains and retries the same sealed candidate without rerunning its reducer. If the candidate subsequently becomes stale, its selected conflict policy applies.
 - **Permanent `planTooLarge`:** A plan that cannot fit the configured maximum receives its explicit permanent outcome; it is not retried forever as transient capacity pressure.
@@ -1598,7 +1600,7 @@ Across policies, decoding, I/O, and one-time external input acquisition are not 
 
 #### RT-036 — Pending-result ledger lifetime
 
-**Setup:** Produce managed shared completions in `.manualOnConflict` and `.retryPure` modes. Force conflicts and transient queue pressure; keep a ledger query handle while releasing the originating UI screen.
+**Setup:** Produce managed shared completions under the manual and `.retryPure` policies. Force conflicts and transient queue pressure; keep a ledger query handle while releasing the originating UI screen.
 
 **Operations:** Query pending outcomes, reconcile one explicitly, cancel its authority, close the owner, and let a worker terminate after its outcome was already captured.
 
@@ -1851,7 +1853,7 @@ Competing candidates cannot overwrite each other or lose unrelated data. The enq
 
 ### 7. G3 — Effects, completion admission, and lifecycle
 
-Implement typed copyable work descriptors and tickets, scope/operation identity, provisionally checked completion preparation, final authority-plus-revision validation, accepted-only retirement, and cooperative cancellation. Implement isolated sole-writer preparation/admission in one synchronous turn. Shared managed completion delivery defaults to `.manualOnConflict`: preserve its immutable outcome in a queryable ledger with `.reconciliationRequired`, and let one explicit `reconcile(id)` make one fresh preparation/admission attempt. Optional `.retryPure` requires an explicit contractually pure synchronous domain reducer, attempts preparation at most four times per turn, and yields/reschedules while retaining the outcome; the compiler does not prove purity. Transient `capacityExceeded` retries the same sealed candidate without rerunning preparation; a subsequent stale candidate follows its conflict policy. Distinguish permanent `planTooLarge`.
+Implement typed copyable work descriptors and tickets, scope/operation identity, provisionally checked completion preparation, final authority-plus-revision validation, accepted-only retirement, and cooperative cancellation. Implement isolated sole-writer preparation/admission in one synchronous turn. Shared managed completion delivery under the manual policy preserves its immutable outcome in a queryable ledger with `.reconciliationRequired`, and lets one explicit `reconcile(id)` make one fresh preparation/admission attempt. `.retryPure`, the default of generated managed owners, requires contractually pure synchronous domain reducers, attempts preparation at most four times per turn, and yields/reschedules while retaining the outcome; the compiler does not prove purity. Transient `capacityExceeded` retries the same sealed candidate without rerunning preparation; a subsequent stale candidate follows its conflict policy. Distinguish permanent `planTooLarge`.
 
 Make one serialized runner own physical task handles. Its creation/registration step and its processing of completion cleanup/cancellation must have a documented ordering that handles an immediately completing worker. Task cleanup cannot depend on accepting a result into model state. A cancellation revokes authority but keeps a running task's handle and execution reservation until actual termination. Track pending result lifetime separately from physical task lifetime. Protect synchronous pending query/delivery/reconciliation with immutable pending boxes and an atomic per-record attempt claim; report `inProgress` and `notPending` explicitly. Per-operation `.parallel` limits count active authorities in a `(scope activation, operation tag)` group. The independent global execution-reservation bound counts queued/running work, cancelled work until termination, and retained pending results. A capacity rejection must not partially apply prospective `.latest` cancellation or other authority changes.
 

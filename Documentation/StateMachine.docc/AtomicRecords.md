@@ -2,20 +2,27 @@
 
 Use the raw storage primitive when implementing a runtime's admission boundary.
 
+`AtomicRecordStorage` supports generated code and carries no source-stability
+promise, like the other raw runtime types. Application code declares a graph
+with the macros and does not need it.
+
 ``AtomicRecordStorage`` retains one immutable version behind a checked
-`OSAllocatedUnfairLock`. Loading a version retains the whole record. Installation
-succeeds only if the current version is identical to the expected version.
+`OSAllocatedUnfairLock`. Loading a version retains the whole record.
+Installation succeeds only if the current version is identical to the expected
+version.
 
 ```swift
 import StateMachine
 
-let storage = AtomicRecordStorage("Draft")
-let before = storage.load()
-let after = AtomicRecordStorage<String>.Version("Ready")
-let installed = storage.install(after, replacing: before)
+func replaceDraft() -> Bool {
+    let storage = AtomicRecordStorage("Draft")
+    let before = storage.load()
+    let after = AtomicRecordStorage<String>.Version("Ready")
+    return storage.install(after, replacing: before)
+}
 ```
 
-If another writer replaces `before` first, `installed` is `false`. The caller
+If another writer replaces `before` first, `install` returns `false`. The caller
 must decide whether to read again, report a conflict, or discard its proposal.
 Create a fresh `Version` for each proposed installation; deliberately
 reinstalling an old version also reuses its comparison identity.
@@ -34,9 +41,9 @@ for testing or customization.
 
 ## Preserve payload lifetime
 
-The shared primitive requires `Copyable`, `Sendable` records. Extract the immutable
-payload from a consumed public proposal before calling it. No caller closure
-executes while the primitive holds its lock.
+The shared primitive requires `Copyable`, `Sendable` records. Extract the
+immutable payload from a consumed public proposal before calling it. No caller
+closure executes while the primitive holds its lock.
 
 An accepted replacement retains the outgoing version through unlock. Failed
 replacement also keeps its input versions alive through the locked comparison.

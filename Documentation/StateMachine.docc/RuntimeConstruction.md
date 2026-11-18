@@ -2,6 +2,11 @@
 
 Keep the reusable admission engine separate from a domain's sealed API.
 
+The `Runtime*` types in this article support generated code and carry no
+source-stability promise. A graph declared with the macros uses its generated
+owners and never names them. Read this article to learn what a generated owner
+relies on, not as a public construction API.
+
 ``RuntimeState`` holds a complete value record: model data, retained identities,
 active operation authority, execution reservations, and committed batches. Its
 methods perform synchronous engine work without invoking reducer or driver
@@ -13,11 +18,23 @@ whole value through ``AtomicRecordStorage``. If the storage version changed,
 the host must validate again. Repeating engine preflight does not authorize
 repeating an application reducer.
 
+A manual owner creates the engine with `.commands` recording, which queues a
+batch only for an acceptance that cancels or starts work and for closure. Its
+caller receives every other receipt from the commit. A managed host uses
+`.everyAcceptance`, because it publishes each accepted snapshot from its queue.
+
+``RuntimeState/propose(on:next:requiring:plan:)`` returns either a candidate or
+a ``RuntimeState/DefectivePlan`` that keeps the snapshot the plan was prepared
+on. ``RuntimeState/reject(_:)`` reports that defect after the checks that
+precede it, so a snapshot from another owner reports
+``CommitRejection/foreignOwner`` and a closed owner reports
+``CommitRejection/closed``. The rejection type and the values it carries are
+ordinary `StateMachine` types that generated facades name directly.
+
 ``RuntimeSharedHost`` provides this shared orchestration. Its copies refer to
 one owner. It requires `Sendable` model data, effect descriptions, and outcomes;
 its immutable preparation and driver closures run outside the storage lock.
-Generated facades and the handwritten profile example project their sealed
-domain types through this common host.
+Generated facades project their sealed domain types through this common host.
 
 ``RuntimeMainActorHost`` and ``RuntimeActorHost`` own the value engine and
 delivery ledger directly on their actor. Their synchronous input handling can
@@ -35,11 +52,11 @@ boundaries.
 ## Define the trust boundary
 
 The raw runtime validates identities, freshness, and operation policy. It also
-checks that the revision counter has room for another commit and that the proposed
-change fits the configured capacity limits. It trusts the supplied model, scope eligibility,
-operation metadata, and value semantics. A generated facade adds the domain's
-legal edge surface and privately binds observations, prepared proposals, and
-typed completions to this runtime.
+checks that the revision counter has room for another commit and that the
+proposed change fits the configured capacity limits. It trusts the supplied
+model, scope eligibility, operation metadata, and value semantics. A generated
+facade adds the domain's legal edge surface and privately binds observations,
+prepared proposals, and typed completions to this runtime.
 
 Keep raw snapshots, candidates, tickets, and the runtime instance out of the
 facade's public properties. Public access to these lower-level types allows a
@@ -104,15 +121,23 @@ cannot settle the pending result. That invalid plan leaves the first outcome
 available for explicit reconciliation. A candidate's rejected authority also
 does not discard an outcome whose own operation remains active.
 
-The default `manualOnConflict` policy retains a failed attempt with its typed
-reason. `retryPure` permits automatic preparation after root conflicts, with
-at most four preparations per result in a scheduling turn before yielding.
-Choose it only for deterministic, side-effect-free preparation. A capacity
-retry reuses the sealed candidate and does not rerun preparation.
+A raw host takes a ``RuntimeCompletionPolicy`` and a separate reconciliation
+callback. Its default, `manualOnConflict`, retains a failed attempt with its
+typed reason and passes the retained completion to the callback. `retryPure`
+permits automatic preparation after root conflicts, with at most four
+preparations per result in a scheduling turn before yielding. Choose it only
+for deterministic, side-effect-free preparation. Every automatic retry,
+immediate or scheduled, acts on the decision of the attempt that lost the
+conflict. An explicit attempt that finishes first makes a newer decision, and
+the retry neither prepares again nor replaces a candidate that waits for
+capacity. A capacity retry reuses the
+sealed candidate and does not rerun preparation. A generated owner combines the
+two raw parameters into one `CompletionPolicy` value that carries its handler
+and defaults to `.retryPure`.
 
 Managed defaults allow 256 queued batches, 64 effect descriptions per plan, 256
 execution reservations, and 128 subscriptions. Use
-``RuntimeManagedConfiguration`` to validate explicit bounds. Shared callback
+``ManagedConfiguration`` to validate explicit bounds. Shared callback
 subscriptions and all managed snapshot sequences keep one pending latest value
 per subscriber. Callback subscriptions on ``RuntimeActorHost`` and
 ``RuntimeMainActorHost`` receive each eligible batch directly. A live

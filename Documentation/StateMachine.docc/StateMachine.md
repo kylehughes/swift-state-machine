@@ -1,80 +1,102 @@
 # ``StateMachine``
 
-Represent consuming transitions and install immutable shared records.
+Declare a typed graph of phases, own its transitions, and manage the asynchronous work they start.
+
+State Machine models a workflow as a graph of phases and generates a typed Swift
+API for it. Each phase holds its own data and exposes only the transitions
+declared from it. `import StateMachine` is the only import a graph needs: the
+macros that declare it, the generated owners' runtime types, and `Change` and
+`Advance` all live in this module.
 
 State Machine separates model data from the authority to change a workflow. A
 consuming edge transfers ownership of its phase. A hosted edge prepares a
 proposal from an observation; the host checks that observation again when it
 commits the proposal. Constructing a model value does not grant either kind of
-authority.
+authority. Domain code decides whether a transition is valid and which inert
+effects it describes. The runtime decides whether a hosted proposal, or the
+result of work a transition started, still has authority to change the model.
 
-Use ``Change`` for a successful transition and its ordered, inert effects. Use
-``Advance`` when a transition can reject its input and return the original
-owner. ``PreparationFailure`` separates domain rejection from a permanently
-invalid effect plan.
-
-``AtomicRecordStorage`` provides the lower-level atomic record primitive used
-by shared runtimes. It checks record identity, not legal domain transitions.
-``RuntimeState`` supplies the value engine for admission, operation authority,
-and whole FIFO batches. ``RuntimeDeliveryLedger`` retains terminal results and
-grants one preparation claim at a time. ``RuntimeSharedHost`` combines those
-algorithms with managed execution and observation. Domain facades keep their
-host, storage, and provenance private.
-
-``RuntimeMainActorHost`` and ``RuntimeActorHost`` provide managed execution
-while confining the engine and ledger to one actor. The `MainActor` host also
-supports non-`Sendable` copyable value data within that actor.
-
-A host of your own, such as a test double, conforms to
-``MainActorStateMachineHost``. It returns each observer registration as a
-``RuntimeMainActorSubscription`` that it creates with
-``RuntimeMainActorSubscription/init(onCancel:)``. The action runs exactly once,
-whether the registration is cancelled or released.
+Start with <doc:DeclaringAGraph>, which builds a graph one declaration at a
+time. <doc:Ownership> explains the owners it generates, <doc:Persistence>
+restores saved data into a graph, and <doc:TestingAGraph> tests each of them.
+The raw runtime that generated owners rely on is advanced material at the end.
 
 ## Topics
 
-### Ownership and preparation
+### Declaring a graph
+
+- <doc:DeclaringAGraph>
+
+### The macros
+
+- ``StateMachine(mode:)``
+- ``Initial()``
+- ``Transition(on:invalidates:starts:)``
+- ``Transition(onSuccess:invalidates:starts:)``
+- ``Transition(onFailure:invalidates:starts:)``
+- ``Operation(scope:requires:activeIn:admission:)``
+- ``Route(on:)``
+- ``Route(onSuccess:)``
+- ``Route(onFailure:)``
+- ``Restoration(allows:)``
+- ``StateMachineMode``
+- ``StateMachineAdmission``
+
+### Owners, edges, and observation
 
 - <doc:Ownership>
 - ``Change``
 - ``Advance``
-- ``PreparationFailure``
 - ``PlanRejection``
+- ``CommitRejection``
+- ``StateMachineSnapshot``
+- ``StateMachineReceipt``
+- ``MainActorStateMachineHost``
+- ``SnapshotSequence``
+- ``MainActorSnapshotSequence``
+- ``SnapshotSubscription``
+- ``MainActorSnapshotSubscription``
+- ``SubscriptionFailure``
 
-### Atomic records
+### Limits, delivery, and shutdown
 
-- <doc:AtomicRecords>
-- ``AtomicRecordStorage``
+- ``Limits``
+- ``ManagedConfiguration``
+- ``PendingStatus``
+- ``ShutdownDiagnostics``
 
-### Runtime construction
+### Restoring saved data
+
+- <doc:Persistence>
+
+### Testing a graph
+
+- <doc:TestingAGraph>
+
+### Worked examples
+
+- <doc:Examples>
+
+### Advanced: runtime construction
 
 - <doc:RuntimeConstruction>
 - ``RuntimeState``
-- ``RuntimeLimits``
 - ``RuntimeOperation``
 - ``RuntimeOperationPolicy``
 - ``RuntimeScopeID``
 - ``RuntimeIdentity``
 - ``RuntimeWork``
 - ``RuntimeTicket``
-
-### Hosting and observation
-
-- ``StateMachineSnapshot``
-- ``StateMachineReceipt``
-- ``MainActorStateMachineHost``
-- ``RuntimeSnapshots``
-- ``RuntimeMainActorSnapshots``
-
-### Managed delivery
-
 - ``RuntimeSharedHost``
 - ``RuntimeMainActorHost``
 - ``RuntimeActorHost``
-- ``RuntimeManagedConfiguration``
 - ``RuntimeDeliveryLedger``
+- ``RuntimeDeliveryClaim``
 - ``RuntimeCompletionPolicy``
 - ``RuntimePendingID``
-- ``RuntimePendingStatus``
-- ``RuntimeSubscription``
-- ``RuntimeMainActorSubscription``
+- ``RuntimeHostDelivery``
+
+### Advanced: atomic records
+
+- <doc:AtomicRecords>
+- ``AtomicRecordStorage``

@@ -43,11 +43,19 @@ does not promise that its revision is still current. Preparing from it reads
 that captured value and creates a noncopyable proposal without starting work.
 
 Commit consumes the proposal and checks its owner, incarnation, authority, and
-whole-root revision. The incarnation changes when an owner is reset, so
-proposals from before the reset can no longer be committed. A rejection returns
-the current observation so the caller can make a new decision. Copying an
-observation does not create another owner, and a receipt does not reserve the
-current state for later use.
+whole-root revision. The raw runtime changes its incarnation when it resets an
+owner, so proposals from before the reset can no longer be committed. A
+rejection returns the current observation so the caller can make a new
+decision. A defective effect plan travels inside the proposal and is reported by
+`commit` as a rejection, never as a silent success. Copying an observation does
+not create another owner, and a receipt does not reserve the current state for
+later use.
+
+An observation prepares only the edges a caller may choose. A completion edge is
+not one of them: a managed owner admits a completion only from its own driver's
+result, and a `Local` owner only through `deliver`, `reconcile(id:)`, or
+`retryAdmission(id:)`. A caller therefore cannot commit a result that no driver
+produced, and the first retained outcome is the only one that can commit.
 
 ## Keep construction separate from authority
 

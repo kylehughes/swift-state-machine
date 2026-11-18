@@ -2,63 +2,108 @@
 
 Keep one complete snapshot observable and give its owner an explicit lifetime.
 
-``ObservableStateMachinePresentation`` wraps a generated `MainActorHost` as an
-`@Observable` model. It requires iOS 17, Mac Catalyst 17, macOS 14, tvOS 17,
-watchOS 10, or visionOS 1. Pass the host to its initializer, read
-``ObservableStateMachinePresentation/snapshot`` from a view, and call
-``ObservableStateMachinePresentation/send(_:)`` from actions that act on the
-current state:
+The examples in this article present one small graph. A profile loads by name,
+can be cancelled while it loads, and can be retried after it fails:
 
 ```swift
 import StateMachine
-import StateMachineExamples
+
+@StateMachine(mode: .shared)
+nonisolated enum Profile: Sendable {
+    struct Idle: Sendable {}
+    struct Loading: Sendable { let name: String }
+    struct Loaded: Sendable { let name: String }
+    struct Failed: Sendable {
+        let name: String
+        let reason: Reason
+    }
+
+    enum Reason: String, Error, Sendable { case unavailable }
+
+    @Initial case idle(Idle = Idle())
+    case loading(Loading)
+    case loaded(Loaded)
+    case failed(Failed)
+
+    enum Input: Sendable { case load(String), cancel, retry }
+
+    @Operation(activeIn: [Loading.self])
+    enum Fetch {
+        typealias Input = String
+        typealias Output = String
+        typealias Failure = Reason
+    }
+
+    @Transition(on: Input.load, starts: [Fetch.self])
+    fileprivate static func begin(_ source: Idle, _ name: String) -> Change<Loading, Effect.Begin> {
+        Change(Loading(name: name), effects: [.fetch(name)])
+    }
+
+    @Transition(on: Input.cancel)
+    fileprivate static func cancel(_ source: Loading) -> Idle { Idle() }
+
+    @Transition(on: Input.retry, starts: [Fetch.self])
+    fileprivate static func retry(_ source: Failed) -> Change<Loading, Effect.Retry> {
+        Change(Loading(name: source.name), effects: [.fetch(source.name)])
+    }
+
+    @Transition(onSuccess: Fetch.self)
+    fileprivate static func received(_ source: Loading, _ title: Fetch.Output) -> Loaded {
+        Loaded(name: title)
+    }
+
+    @Transition(onFailure: Fetch.self)
+    fileprivate static func failed(_ source: Loading, _ reason: Fetch.Failure) -> Failed {
+        Failed(name: source.name, reason: reason)
+    }
+}
+```
+
+``StateMachinePresentation`` wraps a generated `MainActorHost` as an
+`@Observable` model. It requires iOS 17, Mac Catalyst 17, macOS 14, tvOS 17,
+watchOS 10, or visionOS 1. Pass the host to its initializer, read
+``StateMachinePresentation/snapshot`` from a view, and call
+``StateMachinePresentation/send(_:)`` from actions that act on the
+current state. Creating a presentation never throws, so it can initialize the
+view's `@State` directly:
+
+```swift
 import StateMachineUI
 import SwiftUI
 
 @MainActor
-func makePresentation() throws -> ObservableStateMachinePresentation<GeneratedProfile.MainActorHost> {
-    let user = try UserID("taylor")
-    let host = GeneratedProfile.MainActorHost(
-        GeneratedProfile.Idle(userID: user),
-        fetchDriver: { request in
-            .success(Profile(userID: request.userID, name: "Taylor"))
-        },
-        auditDriver: { _ in .failure(.unavailable) }
-    )
-    return try ObservableStateMachinePresentation(host)
-}
-
-@MainActor
 struct ProfileScreen: View {
-    let presentation: ObservableStateMachinePresentation<GeneratedProfile.MainActorHost>
-    let request: ProfileRequest
+    let name: String
+    @State private var presentation = StateMachinePresentation(
+        Profile.MainActorHost(fetchDriver: { user in .success("Profile of \(user)") })
+    )
     @State private var inputFailure: String?
 
     var body: some View {
         VStack {
             switch presentation.snapshot {
             case .idle:
-                Button("Load profile") { send(.load(request)) }
+                Button("Load profile") { send(.load(name)) }
             case .loading:
                 ProgressView("Loading profile")
                 Button("Cancel", role: .cancel) { send(.cancel) }
             case .loaded(let loaded):
-                Text(loaded.value.profile.name)
+                Text(loaded.value.name)
             case .failed(let failed):
                 ContentUnavailableView {
                     Label("Profile Unavailable", systemImage: "person.slash")
                 } description: {
-                    Text(failed.value.failure.rawValue)
+                    Text(failed.value.reason.rawValue)
                 } actions: {
                     Button("Retry") { send(.retry) }
                 }
             }
             if let inputFailure { Text(inputFailure) }
+            if presentation.observationFailure != nil { Text("Updates are unavailable.") }
         }
-        .onDisappear { presentation.close() }
     }
 
-    private func send(_ input: GeneratedProfile.Input) {
+    private func send(_ input: Profile.Input) {
         do {
             try presentation.send(input)
             inputFailure = nil
@@ -69,19 +114,19 @@ struct ProfileScreen: View {
 }
 ```
 
-Creating the presentation starts no request. Keep it for the screen's lifetime,
-for example in `@State` or in the model that owns the feature, and
-create a new one when returning after `close()`. This example ends that
-lifetime in `onDisappear`; an application that keeps work alive across
-navigation should put ownership in the longer-lived feature instead.
+Creating the presentation starts no request. SwiftUI evaluates the initial
+value of `@State` each time it rebuilds the view and keeps only the first, so
+the copies it discards cost nothing. Keep the presentation for the screen's
+lifetime, in `@State` or in the model that owns the feature, and create a new
+one when returning after `close()`.
 
-``StateMachinePresentation`` is the `ObservableObject` counterpart for the
-iOS 16 and macOS 13 baseline. It has the same initializer and members, and a
-view holds it with `@StateObject` or `@ObservedObject`.
-
-The `ProfileEditor` example in `StateMachineExamples` wraps a
-``StateMachinePresentation`` in a screen-scoped object with named actions such as `load()`, `retry()`, and
-`cancel()`.
+If the host has no room for another observer, creation still succeeds. The
+presentation shows the host's snapshot at creation and every change made
+through it, `isObserving` is `false`, and `observationFailure` holds the
+`SubscriptionFailure`. The same holds for ``StateMachineObservableObject``, the
+`ObservableObject` counterpart for the iOS 16 and macOS 13 baseline. It has the
+same initializer and members, and a view holds it with `@StateObject` or
+`@ObservedObject`.
 
 ## Accept input and publish without suspension
 
@@ -95,22 +140,23 @@ changing the account can revoke operation authority and make a late response
 stale.
 
 `send(_:)` throws `SendRejection`. The `.preparation` case covers a missing
-route, an edge or router that declines the input, or an invalid or oversized
-effect plan. The `.commit` case means the owner refused the prepared change, for
-example because it is closed.
+route or an edge or router that declines the input. The `.commit` case means the
+owner refused the prepared change, for example because it is closed, or because
+its effect plan is defective, which is `.commit(.plan)`.
 
 ## Act on the snapshot a view rendered
 
-`send(_:)` routes an input against whatever the host currently holds. Use it for an
-event that should act on the current state: a push notification, a timer, or a
-tap that means "cancel the current load".
+`send(_:)` routes an input against whatever the host currently holds. Use it for
+an event that should act on the current state: a push notification, a timer, or
+a tap that means "cancel the current load".
 
 Each case of the snapshot holds an `Observed<Phase>`, whose edge methods exist
-only for edges whose source is that phase. Calling one prepares a proposal.
-`commit(_:)` on the presentation admits the proposal only if that observation is
-still the owner's current revision, shows the resulting snapshot before it
-returns, as `send(_:)` does, and returns a `CommitResult`: `.committed(receipt)`
-or `.rejected(reason, current:)`. The result is not discardable.
+only for edges whose source is that phase. Calling one prepares a proposal, and
+an edge that cannot fail needs no `try`. `commit(_:)` on the presentation admits
+the proposal only if that observation is still the owner's current revision,
+shows the resulting snapshot before it returns, as `send(_:)` does, and returns
+a `CommitResult`: `.committed(receipt)` or `.rejected(reason, current:)`. The
+result is not discardable.
 
 Use `commit` when the action belongs to the exact observation the user saw, and
 handle `.conflict`, which an unrelated intervening revision causes; a closed
@@ -118,21 +164,22 @@ owner reports `.closed` instead. The call is compile-checked: if an edge is
 removed or moved to another phase, the view that calls it stops compiling,
 whereas `send(_:)` routes a declared input at run time. It reports
 `.preparation(.invalidPhase)` if the current phase has no edge or router for
-that input.
+that input. An edge that declares a typed throw is prepared with `try`, and it
+throws exactly that failure.
 
 ```swift
 @MainActor
 struct ProfileActions: View {
-    let presentation: ObservableStateMachinePresentation<GeneratedProfile.MainActorHost>
+    let presentation: StateMachinePresentation<Profile.MainActorHost>
     @State private var notice: String?
 
     var body: some View {
         VStack {
             switch presentation.snapshot {
             case .loading(let loading):
-                Button("Cancel", role: .cancel) { commit { try loading.cancel() } }
+                Button("Cancel", role: .cancel) { show(presentation.commit(loading.cancel())) }
             case .failed(let failed):
-                Button("Retry") { commit { try failed.retry() } }
+                Button("Retry") { show(presentation.commit(failed.retry())) }
             case .idle, .loaded:
                 EmptyView()
             }
@@ -140,18 +187,14 @@ struct ProfileActions: View {
         }
     }
 
-    private func commit(_ prepare: () throws -> GeneratedProfile.Prepared) {
-        do {
-            switch presentation.commit(try prepare()) {
-            case .committed:
-                notice = nil
-            case .rejected(.conflict, _):
-                notice = "The profile changed. Try again."
-            case .rejected(let reason, _):
-                notice = "The change was not accepted: \(reason)"
-            }
-        } catch {
-            notice = "The change is not available: \(error)"
+    private func show(_ result: Profile.CommitResult) {
+        switch result {
+        case .committed:
+            notice = nil
+        case .rejected(.conflict, _):
+            notice = "The profile changed. Try again."
+        case .rejected(let reason, _):
+            notice = "The change was not accepted: \(reason)"
         }
     }
 }
@@ -167,9 +210,10 @@ phase fields. The presentation applies only strictly increasing revisions, so it
 can show an immediate receipt before asynchronous observation reaches the same
 revision, without regressing when that delayed observation arrives.
 
-One presentation belongs to one owner history. A restored or forked owner starts
-at revision zero, so create a new presentation for it rather than feeding those
-revisions into the original presentation's watermark.
+A presentation over a host observes that one host for its lifetime. A restored
+or forked owner starts at revision zero, so create a new presentation for it
+rather than feeding those revisions into the original presentation's watermark.
+A passive presentation, described below, switches owners explicitly.
 
 ## Separate observation from running work
 
@@ -180,10 +224,11 @@ historical loading data cannot authorize another request.
 
 Cancellation is cooperative. A driver can continue running after the screen
 disappears, and its handle remains tracked until actual termination. Await the
-host's `shutdown()` through ``StateMachinePresentation/host`` when the
-surrounding task needs that termination and delivery cleanup to finish. A driver
-that never returns can prevent the wait from finishing; `close()` itself is
-synchronous.
+host's `shutdown(deadline:)` through ``StateMachinePresentation/host`` when the
+surrounding task needs that termination and delivery cleanup to finish. It
+returns `.quiescent`, or `.timedOut` with diagnostics if the deadline passes
+first, and it is discardable. A driver that never returns can prevent an
+unbounded wait from finishing; `close()` itself is synchronous and discardable.
 
 Releasing an owner without closing it publishes no closed snapshot. It finishes
 the registrations the owner retained, so no snapshot has `isClosed == true`;
@@ -199,22 +244,20 @@ registration. `UIContentUnavailableConfiguration` requires iOS 17, tvOS 17,
 Mac Catalyst 17, or visionOS 1:
 
 ```swift
-import StateMachine
-import StateMachineExamples
 import UIKit
 
 @MainActor
 final class ProfileViewController: UIViewController {
-    private let host: GeneratedProfile.MainActorHost
+    private let host: Profile.MainActorHost
     private var observation: Task<Void, Never>?
     private let nameLabel = UILabel()
 
-    init(host: GeneratedProfile.MainActorHost) {
+    init(host: Profile.MainActorHost) {
         self.host = host
         super.init(nibName: nil, bundle: nil)
     }
 
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    required init?(coder: NSCoder) { return nil }
 
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
@@ -236,7 +279,7 @@ final class ProfileViewController: UIViewController {
         observation = nil
     }
 
-    private func render(_ snapshot: GeneratedProfile.Snapshot) {
+    private func render(_ snapshot: Profile.Snapshot) {
         switch snapshot {
         case .idle:
             nameLabel.text = nil
@@ -245,7 +288,7 @@ final class ProfileViewController: UIViewController {
             nameLabel.text = nil
             contentUnavailableConfiguration = UIContentUnavailableConfiguration.loading()
         case .loaded(let loaded):
-            nameLabel.text = loaded.value.profile.name
+            nameLabel.text = loaded.value.name
             contentUnavailableConfiguration = nil
         case .failed:
             let retry = UIAction(title: "Retry") { [weak self] _ in
@@ -277,28 +320,32 @@ ends when the host is released without closing; in that case no element has
 needs the result in the same turn uses the receipt from `send`, or a
 presentation.
 
-In a `shared` schema the sequence is a `Snapshots` value. It works with `map`,
-`prefix`, and generic `AsyncSequence` code on every supported OS, and a
-`for await` loop over it runs on the caller's actor.
+In a `shared` schema the sequence is a `Snapshots` value, an alias of
+`SnapshotSequence<Snapshot>`. It works with `map`, `prefix`, and generic
+`AsyncSequence` code on every supported OS, and a `for await` loop over it runs
+on the caller's actor.
 
-In an `isolated` schema the sequence is a `MainActorSnapshots` value, iterated
-on the main actor because its snapshots are not `Sendable`. Using `for await`
-works on every supported OS. Operators need a deployment target of iOS 18,
-macOS 15, tvOS 18, watchOS 11, or visionOS 2. For an earlier target, pass a
-closure that projects each snapshot to a `Sendable` value, as in
-`host.snapshots({ $0.revision })`. The closure runs on the main actor and the
-result is an ordinary sequence of the projected values.
+In an `isolated` schema the sequence is a `MainActorSnapshots` value, an alias
+of `MainActorSnapshotSequence<Snapshot>`, iterated on the main actor because its
+snapshots are not `Sendable`. Using `for await` works on every supported OS.
+Operators need a deployment target of iOS 18, macOS 15, tvOS 18, watchOS 11, or
+visionOS 2. For an earlier target, pass a closure that projects each snapshot to
+a `Sendable` value, as in `host.snapshots({ $0.revision })`. The closure runs on
+the main actor and the result is an ordinary sequence of the projected values.
 
-For Combine, `$snapshot` on a ``StateMachinePresentation`` is the publisher.
-It does not complete; `$isObserving` becoming `false` signals the end:
+For Combine, `$snapshot` on a ``StateMachineObservableObject`` is the publisher.
+It does not complete; `$isObserving` becoming `false` signals the end. The
+runtime's registration types are `SnapshotSubscription` and
+`MainActorSnapshotSubscription`, so importing Combine beside State Machine
+leaves `Subscription` meaning Combine's protocol:
 
 ```swift
 import Combine
 
 @MainActor
 func bind(
-    _ presentation: StateMachinePresentation<GeneratedProfile.MainActorHost>,
-    to render: @escaping @MainActor (GeneratedProfile.Snapshot) -> Void
+    _ presentation: StateMachineObservableObject<Profile.MainActorHost>,
+    to render: @escaping @MainActor (Profile.Snapshot) -> Void
 ) -> AnyCancellable {
     presentation.$snapshot.sink { render($0) }
 }
@@ -308,39 +355,66 @@ Retain the returned `AnyCancellable` for as long as the view observes.
 
 ## Present an owner without a hosting protocol
 
-``ObservableSnapshotPresentation`` and its `ObservableObject` counterpart
-``SnapshotPresentation`` present snapshots of any type. For a generated
+``SnapshotPresentation`` and its `ObservableObject` counterpart
+``SnapshotObservableObject`` present snapshots of any type. For a generated
 snapshot, create it from the owner's current snapshot. For another type, also
 pass a closure that reads a snapshot's revision. Register an owner's
-subscription with `observe(_:)`, or apply snapshots
-yourself. Use it for owners that do not conform to
-`MainActorStateMachineHost`. ``SnapshotPresentation/apply(_:)`` accepts
-strictly increasing revisions, and ``SnapshotPresentation/stopObserving()``
-removes only the registration.
+subscription with `observe(_:)`, or apply snapshots yourself. Use it for owners
+that do not conform to `MainActorStateMachineHost`.
+``SnapshotPresentation/apply(_:)`` accepts strictly increasing revisions, and
+``SnapshotPresentation/stopObserving()`` removes only the registration.
+
+Each owner counts its own revisions, so a passive presentation that begins
+observing a different owner passes that owner's current snapshot as
+`startingAt:`. The presentation shows that snapshot at once, restarts its
+revision check from it, and ignores any late delivery from the owner it
+replaced. Without `startingAt:`, the new registration continues the same owner's
+history, and a delivery that is not newer than the snapshot shown is discarded.
+Both `observe` forms and `follow` take it. A callback that runs while the
+presentation shows the new snapshot, such as a view update, can switch it again;
+the later switch wins, and the registration it replaced is cancelled. A closure
+literal does not infer a typed throw, so the registration closure spells
+`throws(SubscriptionFailure)`:
+
+```swift
+@MainActor
+func switchOwner(
+    _ presentation: SnapshotPresentation<Profile.Snapshot>,
+    to other: Profile.Shared
+) throws {
+    presentation.observe(try other.snapshots(), startingAt: other.snapshot())
+}
+
+@MainActor
+func switchHost(
+    _ presentation: SnapshotPresentation<Profile.Snapshot>,
+    to other: Profile.MainActorHost
+) throws(SubscriptionFailure) {
+    try presentation.observe(startingAt: other.snapshot()) {
+        (receive, finish) throws(SubscriptionFailure) in
+        try other.subscribe(receive, onFinish: finish)
+    }
+}
+```
 
 ## Bridge a shared or actor host
 
-A `Shared` or `ActorHost` owner is not confined to `MainActor`. Create an
-``ObservableSnapshotPresentation`` from its current snapshot, as in
-`ObservableSnapshotPresentation(machine.snapshot())`, and follow the owner's
+A `Shared` or `ActorHost` owner is not confined to `MainActor`. Create a
+``SnapshotPresentation`` from its current snapshot, as in
+`SnapshotPresentation(machine.snapshot())`, and follow the owner's
 snapshot sequence from the view's task. The presentation applies each snapshot
 on `MainActor` through the revision check:
 
 ```swift
-import StateMachine
-import StateMachineExamples
-import StateMachineUI
-import SwiftUI
-
 @MainActor
 struct ProfileName: View {
-    let machine: GeneratedProfile.Shared
-    let profile: ObservableSnapshotPresentation<GeneratedProfile.Snapshot>
+    let machine: Profile.Shared
+    let profile: SnapshotPresentation<Profile.Snapshot>
 
     var body: some View {
         Group {
             if case .loaded(let loaded) = profile.snapshot {
-                Text(loaded.value.profile.name)
+                Text(loaded.value.name)
             } else {
                 ProgressView()
             }
@@ -353,18 +427,17 @@ struct ProfileName: View {
 }
 ```
 
-``ObservableSnapshotPresentation/follow(_:)`` returns when the sequence ends,
-the calling task is cancelled, or the presentation stops or replaces the
-observation. SwiftUI cancels the view's task when the view disappears.
-``SnapshotPresentation`` has the same members at the iOS 16 baseline, and
-`observe(_:)` starts the observation in a task the presentation owns:
+``SnapshotPresentation/follow(_:startingAt:)`` returns when the
+sequence ends, the calling task is cancelled, or the presentation stops or
+replaces the observation. SwiftUI cancels the view's task when the view
+disappears. ``SnapshotObservableObject`` has the same members at the iOS 16
+baseline, and `observe(_:startingAt:)` starts the observation in a task the
+presentation owns:
 
 ```swift
 @MainActor
-func present(
-    _ shared: GeneratedProfile.Shared
-) throws -> SnapshotPresentation<GeneratedProfile.Snapshot> {
-    let presentation = SnapshotPresentation(shared.snapshot())
+func present(_ shared: Profile.Shared) throws -> SnapshotObservableObject<Profile.Snapshot> {
+    let presentation = SnapshotObservableObject(shared.snapshot())
     presentation.observe(try shared.snapshots())
     return presentation
 }
@@ -373,10 +446,10 @@ func present(
 Creating the sequence throws `SubscriptionFailure` when subscriber capacity is
 exhausted. For an `ActorHost`, use `try await actor.snapshots()`. The snapshot
 sequence keeps only the latest pending snapshot, and
-``SnapshotPresentation/isObserving`` becomes `false` when the sequence ends,
-after the owner closes or is released. ``SnapshotPresentation/snapshot`` keeps
-the last value applied. ``SnapshotPresentation/stopObserving()`` ends the
-observation, and `$snapshot` is the Combine publisher. Observation coalesces
+``SnapshotObservableObject/isObserving`` becomes `false` when the sequence ends,
+after the owner closes or is released. ``SnapshotObservableObject/snapshot``
+keeps the last value applied. ``SnapshotObservableObject/stopObserving()`` ends
+the observation, and `$snapshot` is the Combine publisher. Observation coalesces
 presentation data only; every accepted effect remains the host's responsibility.
 
 ``MainActorSnapshotIngress`` is the lower-level option when snapshots arrive
