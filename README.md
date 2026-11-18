@@ -6,9 +6,9 @@
 [![Test](https://github.com/kylehughes/swift-state-machine/actions/workflows/ci.yml/badge.svg)](https://github.com/kylehughes/swift-state-machine/actions/workflows/ci.yml)
 
 State Machine models a workflow as a graph of phases and generates a typed Swift
-API for it. The compiler only offers the edges that leave the current phase, and
-the runtime only accepts a change from an owner that still has authority to make
-it.
+API for it. The compiler only offers the edges declared for the current phase,
+and an owner only admits a change that was prepared from its current revision. A
+completion is admitted only while its operation still has authority.
 
 Two bugs motivate the design. An asynchronous result can arrive after a request
 was cancelled or the account changed, and overwrite newer state with stale data.
@@ -182,9 +182,9 @@ snapshot to observers.
 The schema is the only place the graph is written down, and the compiler
 enforces it:
 
-- `begin` can return only `Effect.Begin`, which contains just the operations in
-  its `starts:` list. Starting an operation that the edge does not list does not
-  compile.
+- `begin` returns `Change<Searching, Effect.Begin>`. Its effects can name only
+  operations in its `starts:` list. Starting an operation that the edge does not
+  list does not compile.
 - `Fetch` is active in `Searching`, so the macro requires a success edge from
   `Searching`. Omitting `received` is a compile error.
 - `cancel` leaves `Searching`, the only phase where `Fetch` is active, so the
@@ -214,11 +214,13 @@ and `Owned` are manual owners for callers that run effects themselves.
 
 Choose `shared` for concurrent access with checked `Sendable` data, `isolated`
 for copyable values that stay within their permitted actor, or `ownedOnly` for
-noncopyable resources. Every owner except `Owned` has
-`send(_:) throws(SendRejection) -> Receipt`. A rejection is either
-`.preparation` (the input has no edge from the current phase, or the edge
-declined it) or `.commit` (the owner refused the prepared change). The receipt
-carries the accepted `revision` and the snapshot it produced.
+noncopyable resources. Every owner except `Owned` accepts input through
+`send(_:)`, which returns a `Receipt` or throws `SendRejection`.
+`ActorHost.send(_:)` is `async`, and `Local.send(_:)` is `mutating`. A
+`.preparation` rejection covers an invalid phase, a router or edge that declines
+the input, or a rejected effect plan. A `.commit` rejection means the owner
+refused the prepared change. The receipt carries the accepted `revision` and the
+snapshot it produced.
 
 `ActorHost` and `MainActorHost` own their state directly, so `send` reads,
 prepares, and admits a change in one isolated turn. For asynchronous work, a
@@ -245,9 +247,9 @@ whose source is that phase, and each returns a `Prepared` proposal. An owner's
 `commit(_:)` admits the proposal only if that observation is still the owner's
 current revision, and returns a `CommitResult`: `.committed(receipt)` or
 `.rejected(reason, current:)`. The result is not discardable. Use this path when
-the action belongs to the exact observation the user saw, and handle
-`.conflict`, which any revision that landed in between causes, even an unrelated
-one:
+the action belongs to the exact observation the user saw, and handle `.conflict`
+if an intervening commit advances the same open owner. Closing the owner takes
+precedence and produces `.closed`.
 
 ```swift
 @MainActor
@@ -329,25 +331,25 @@ for await snapshot in try machine.snapshots() {
 subscription throws `SubscriptionFailure.capacityExceeded` when subscriber
 capacity is exhausted.
 
-Observation is latest-value for every owner. The sequence keeps one pending
-snapshot. The first element is the snapshot current at registration unless a
-newer one replaced it, revisions strictly increase, and a slow consumer skips
-intermediate snapshots. This is state observation, not an event log. Effects and
-execution acknowledgments never coalesce. The closed snapshot is always
-delivered before the sequence ends, and a sequence is single-pass: a second
-iterator ends immediately. The sequence does not keep the owner alive. If the
-owner is released without closing, the sequence ends and no element has
-`isClosed == true`.
+Each managed owner's snapshot sequence keeps one pending value. The first value
+is the snapshot current at registration or a later revision. Revisions strictly
+increase, and slow consumers can skip intermediate snapshots. Effects and
+execution acknowledgments never coalesce. If closing the owner ends iteration,
+the final element is the closed snapshot. Cancelling iteration can end it
+earlier. A second iterator ends immediately. The sequence does not keep the
+owner alive. If the owner is released without closing, the sequence ends without
+a closed snapshot.
 
 ### Handle conflicts and capacity explicitly
 
 Managed completion delivery defaults to `manualOnConflict`. A conflict can occur
 if another write commits between completion preparation and admission. The owner
-retains the first terminal outcome in `pendingCompletions()` with a reconciliation
-reason. `reconcile(id:)` authorizes one fresh preparation; a concurrent attempt
-reports `inProgress`. Duplicate delivery does not replace the retained outcome.
-A completion whose operation no longer has authority, or whose outcome was
-already settled, reports `.stale`.
+retains the first terminal outcome in `pendingCompletions()` with a
+reconciliation reason. `reconcile(id:)` authorizes one fresh preparation; a
+concurrent attempt reports `inProgress`. Duplicate delivery does not replace the
+retained outcome. For a completion issued by the receiving owner, `deliver(_:)`
+reports `.stale` if the operation has lost its authority or its outcome has
+already settled.
 
 Pass `completionPolicy: .retryPure` to the owner's initializer only when
 completion preparation is deterministic and effect-free. It permits reevaluation
@@ -362,45 +364,49 @@ produces `planTooLarge` and needs an application decision.
 
 ### End a lifetime
 
-Call `subscription.cancel()` to unsubscribe. Cancelling the task that consumes
-a snapshot sequence ends the sequence and removes its registration; releasing the
-sequence does the same. An already claimed callback may finish. Call
-`machine.close()` to end admission and revoke work authority;
-cancellation remains cooperative. `shutdown()` also waits for actual task
-termination and delivery cleanup. On `MainActorHost`, `ActorHost`, and `Shared`,
-`shutdownAndWait(deadline:)` returns `.quiescent` once the owner settled, or
-`.timedOut` with `ShutdownDiagnostics` when the deadline passes first; the closed
-owner keeps tracking the outstanding work the diagnostics describe. Releasing
-an owner without closing it finishes its retained registrations without a closed
-snapshot.
+Call `subscription.cancel()` to unsubscribe. Cancelling the consuming task ends
+iteration and removes the registration. Releasing the sequence and its iterator
+also removes the registration. An already claimed callback may finish. Call
+`machine.close()` to end admission and revoke work authority; cancellation
+remains cooperative. `shutdown()` also waits for actual task termination and
+delivery cleanup. On `MainActorHost`, `ActorHost`, and `Shared`,
+`shutdownAndWait(deadline:)` returns `.quiescent` once the owner has settled, or
+`.timedOut` with `ShutdownDiagnostics` when the deadline passes first; the
+closed owner keeps tracking the outstanding work the diagnostics describe.
+Releasing an owner without closing it finishes its retained registrations
+without a closed snapshot.
 
 `flush(through:)` waits for snapshot offers and effect launch or skip decisions
 through an accepted receipt. It does not wait for network completion or observer
-callbacks. On `ActorHost` and `MainActorHost`, accepted work is launched and
-`flush(through:)` is satisfied before that batch's observer callbacks run, so a
-slow observer cannot hold work back. Retained snapshots and receipts describe
-history, not reservations of the current state.
+callbacks. `ActorHost` and `MainActorHost` process a batch's start commands and
+advance the revision tracked by `flush(through:)` before invoking that batch's
+observer callbacks. A synchronous `MainActor` callback can delay a driver on the
+same actor. Retained snapshots and receipts describe history, not reservations
+of the current state.
 
 ## Run effects yourself with `Local` and `Owned`
 
 `Local` is a noncopyable value with no background runner. After `send` or
 `commit` accepts a change, `drainCommands(limit:)` yields whole batches of
-commands such as `.fetch(work)`. Finish the mutating access, run the work, then
-report two separate obligations: `deliver(work.succeeded(value))` returns the
-sealed completion, and `acknowledgeExecution(work.execution, disposition:)`
-records that the execution actually ended. `DeliveryResult` includes `.stale`
-and `.foreignOwner`; `AcknowledgmentResult` is `.recorded`, `.duplicate`, or
-`.foreignOwner`.
+commands such as `.fetch(work)`. Finish the mutating access before running the
+work. `work.succeeded(value)` builds a sealed completion. Pass it to
+`deliver(_:)` to get a `DeliveryResult`. Call
+`acknowledgeExecution(work.execution, disposition:)` separately to record that
+execution ended. `DeliveryResult` includes `.stale` and `.foreignOwner`;
+`AcknowledgmentResult` is `.recorded`, `.duplicate`, or `.foreignOwner`.
 
-Draining and acknowledging never change the model. A completion delivered while
-the queue is full is retained as `.pending(id, .waitingForCapacity)`; after
-draining frees capacity, `retryAdmission(id:)` admits the prepared candidate
-without preparing it again.
+Draining and acknowledging never change the model. If capacity blocks an
+otherwise admissible completion, `Local` retains its candidate as
+`.pending(id, .waitingForCapacity)`. After freeing capacity, call
+`retryAdmission(id:)` to recheck that candidate without preparing it again. An
+intervening revision requires reconciliation if the operation is still active.
 
-`Owned<Phase>` carries no runtime at all. An edge that starts nothing returns
-the next `Owned` directly. An edge that starts operations returns a `Change`
-with that edge's own effect type and its ordered, inert effects for the caller
-to run; `.effect` on each value widens it to the schema-wide `Effect`. The
+`Owned<Phase>` carries no runtime at all. If the authored edge returns the
+destination payload without throwing, its `Owned` method returns the next owner
+directly. If it returns `Change` without throwing, the method returns a `Change`
+with the next owner and ordered, inert effects. A typed-throwing edge or one
+declared to return `Advance` gives the caller an `Advance`. Each effect's
+`effect` property widens it to the schema-wide `Effect`. The
 [schema guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/declaringagraph)
 has an example of each.
 
@@ -409,8 +415,8 @@ has an example of each.
 The optional `StateMachineUI` module adapts owners for SwiftUI and UIKit.
 `ObservableStateMachinePresentation` wraps a generated `MainActorHost` as an
 `@Observable` model and exposes `snapshot`, `isObserving`, `send(_:)`,
-`commit(_:)`, `close()`, `stopObserving()`, and `host`. It requires iOS 17,
-macOS 14, tvOS 17, watchOS 10, or visionOS 1.
+`commit(_:)`, `close()`, `stopObserving()`, and `host`. It requires iOS 17, Mac
+Catalyst 17, macOS 14, tvOS 17, watchOS 10, or visionOS 1.
 
 This example presents the `Lookup` workflow from earlier in SwiftUI:
 
@@ -490,14 +496,15 @@ struct ProfileName: View {
 }
 ```
 
-`follow(_:)` applies each snapshot on `MainActor` and returns when the sequence
-ends or the task is cancelled, so the observation lasts exactly as long as the
-view is on screen. `observe(_:)` starts the same observation in a task the
-presentation owns, until `stopObserving()`. `isObserving` becomes `false` when
-the sequence ends. `SnapshotPresentation` is the `ObservableObject` counterpart
-for the iOS 16 and macOS 13 baseline, with the same members and `$snapshot` as
-its publisher. `MainActorSnapshotIngress` is the lower-level piece for owners
-that deliver `Sendable` snapshots through a callback.
+`follow(_:)` applies snapshots with increasing revisions on `MainActor`. It
+returns when the sequence ends, the calling task is cancelled, or the
+presentation stops or replaces the observation. SwiftUI cancels the view's task
+when the view disappears. `observe(_:)` starts the same observation in a task
+the presentation owns, until `stopObserving()`. `isObserving` becomes `false`
+when the sequence ends. `SnapshotPresentation` is the `ObservableObject`
+counterpart for the iOS 16 and macOS 13 baseline, with the same members and
+`$snapshot` as its publisher. `MainActorSnapshotIngress` is the lower-level
+piece for owners that deliver `Sendable` snapshots through a callback.
 
 ### Observe from UIKit
 
@@ -578,9 +585,10 @@ let cancellable = presentation.$snapshot.sink { render($0) }
 
 `$snapshot` does not complete. `$isObserving` becoming `false` signals the end.
 
-In a `shared` schema every owner returns the same `Snapshots` type. It works
-with `map`, `prefix`, and generic `AsyncSequence` code on every supported OS, and
-a `for await` loop over it runs on the caller's actor:
+In a `shared` schema, `MainActorHost`, `ActorHost`, and `Shared` return the same
+`Snapshots` type. It works with `map`, `prefix`, and generic `AsyncSequence`
+code on every supported OS, and a `for await` loop over it runs on the caller's
+actor:
 
 ```swift
 for await revision in try host.snapshots().map(\.revision) { /* ... */ }
@@ -630,13 +638,13 @@ do {
 }
 ```
 
-The restored owner starts at revision zero with fresh authority. `Restoration`
-has one case for each phase in which no operation is active, so a validator
-cannot return a phase with running work, and naming one does not compile. The
-validator either rejects that saved shape, as `GeneratedProfile` does for
-`.loading`, or maps it to a resting phase, and the caller sends an input
-afterward to start fresh work. Forking is restoring a saved copy of
-`snapshot.model`. The
+The restored owner starts at revision zero with fresh authority. The generated
+`Restoration` return type has one case for each phase in which no operation is
+active, so a validator cannot return a phase with running work, and naming one
+does not compile. The validator either rejects that saved shape, as
+`GeneratedProfile` does for `.loading`, or maps it to a resting phase, and the
+caller sends an input afterward to start fresh work. Forking is restoring a
+saved copy of `snapshot.model`. The
 [schema guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachineschema/declaringagraph)
 declares a validator and forks an owner.
 

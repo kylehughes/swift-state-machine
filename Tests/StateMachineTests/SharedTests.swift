@@ -441,7 +441,7 @@ private final class SharedCallbackLifetime: Sendable {
         #expect(throws: Flow.SubscriptionFailure.self) {
             try shared.subscribe { _ in }
         }
-        // Keep the canceled token alive: cancel must free capacity immediately.
+        // Keep the cancelled token alive: cancel must free capacity immediately.
         subscriptions[0].cancel()
         subscriptions.append(try shared.subscribe { _ in })
         #expect(throws: Flow.SubscriptionFailure.self) {
@@ -484,7 +484,7 @@ private final class SharedCallbackLifetime: Sendable {
         subscription.cancel()
         subscription.cancel()
         // This offer happens after removal; the previous pending offer was
-        // canceled while the initial callback was already in flight.
+        // cancelled while the initial callback was already in flight.
         guard case .committed = shared.commit(shared.snapshot().presentationChanged("after cancel")) else {
             Issue.record("Post-cancel edit rejected")
             return
@@ -496,7 +496,7 @@ private final class SharedCallbackLifetime: Sendable {
         var releaseEvents = released.makeAsyncIterator()
         _ = try #require(await releaseEvents.next())
         // Capture destruction is a teardown barrier for this callback. The
-        // retained canceled token cannot keep its registration closure alive.
+        // retained cancelled token cannot keep its registration closure alive.
         withExtendedLifetime(subscription) {
             #expect(revisions.withLock { $0 } == [0])
         }

@@ -99,10 +99,10 @@ private final class ParallelWorkerGate: Sendable {
             #expect(await coordinator.runningCount == 2)
             let old = try #require(initial.first)
             let batch = try admit([2], retiring: [old.ticket])
-            guard case .cancel(let canceled) = batch.commands.first else { throw Failure.unexpected }
-            #expect(canceled == old.ticket)
+            guard case .cancel(let cancelled) = batch.commands.first else { throw Failure.unexpected }
+            #expect(cancelled == old.ticket)
             let replacement = try #require(starts(batch).first)
-            await coordinator.cancel([canceled])
+            await coordinator.cancel([cancelled])
             await coordinator.start([replacement])
             var replacementEntries = gates[2].entered.makeAsyncIterator()
             _ = await replacementEntries.next()

@@ -3,8 +3,8 @@
 Keep one complete snapshot observable and give its owner an explicit lifetime.
 
 ``ObservableStateMachinePresentation`` wraps a generated `MainActorHost` as an
-`@Observable` model. It requires iOS 17, macOS 14, tvOS 17, watchOS 10, or
-visionOS 1. Pass the host to its initializer, read
+`@Observable` model. It requires iOS 17, Mac Catalyst 17, macOS 14, tvOS 17,
+watchOS 10, or visionOS 1. Pass the host to its initializer, read
 ``ObservableStateMachinePresentation/snapshot`` from a view, and call
 ``ObservableStateMachinePresentation/send(_:)`` from actions that act on the
 current state:
@@ -92,12 +92,14 @@ turn, then publishes the accepted snapshot before it returns. Driver work runs
 afterward. When a result returns, the host checks its operation authority,
 prepares the completion from a fresh snapshot, and checks that snapshot's
 revision at commit. Snapshots that arrive later, such as an operation's result,
-reach the presentation through the host's subscription. Cancelling or changing
-the account can revoke operation authority and make a late response stale.
+reach the presentation through the host's subscription. Cancelling a load or
+changing the account can revoke operation authority and make a late response
+stale.
 
-`send(_:)` throws `SendRejection`. The `.preparation` case means the input has
-no edge from the current phase or the edge declined it. The `.commit` case means
-the owner refused the prepared change, for example because it is closed.
+`send(_:)` throws `SendRejection`. The `.preparation` case covers a missing
+route, an edge or router that declines the input, or an invalid or oversized
+effect plan. The `.commit` case means the owner refused the prepared change, for
+example because it is closed.
 
 ## Act on the snapshot a view rendered
 
@@ -113,10 +115,12 @@ returns, as `send(_:)` does, and returns a `CommitResult`: `.committed(receipt)`
 or `.rejected(reason, current:)`. The result is not discardable.
 
 Use `commit` when the action belongs to the exact observation the user saw, and
-handle `.conflict`, which an unrelated intervening revision causes. The call is
-compile-checked: if an edge is removed or moved to another phase, the view that
-calls it stops compiling, whereas `send(.input)` routes at run time and fails
-with `.preparation(.invalidPhase)`.
+handle `.conflict`, which an unrelated intervening revision causes; a closed
+owner reports `.closed` instead. The call is compile-checked: if an edge is
+removed or moved to another phase, the view that calls it stops compiling,
+whereas `send(_:)` routes a declared input at run time. It reports
+`.preparation(.invalidPhase)` if the current phase has no edge or router for
+that input.
 
 ```swift
 @MainActor
@@ -156,8 +160,9 @@ struct ProfileActions: View {
 ```
 
 Each button prepares its edge from the observation it was rendered from. If
-another revision lands before a tap is handled, the commit is rejected with
-`.conflict`, and the view shows the notice instead of acting on newer state.
+another ordinary commit advances the same open owner before the tap, the
+proposal is rejected with `.conflict`. If the owner closes first, the rejection
+is `.closed`.
 
 Observe the complete `snapshot` rather than maintaining independently published
 phase fields. The presentation applies only strictly increasing revisions, so it
@@ -266,8 +271,9 @@ final class ProfileViewController: UIViewController {
 ```
 
 The sequence delivers the latest snapshot, not every snapshot: a loop that is
-busy skips intermediate snapshots and sees strictly increasing revisions. The
-closed snapshot is always delivered before the sequence ends. The sequence also
+busy skips intermediate snapshots and sees strictly increasing revisions. If the
+owner closes and the task continues iterating, the last element is the closed
+snapshot. Cancelling iteration can end the sequence earlier. The sequence also
 ends when the host is released without closing; in that case no element has
 `isClosed == true`. A loop sees an accepted input on a later turn, so code that
 needs the result in the same turn uses the receipt from `send`, or a
@@ -349,10 +355,11 @@ struct ProfileName: View {
 }
 ```
 
-``ObservableSnapshotPresentation/follow(_:)`` returns when the sequence ends or
-the task is cancelled, so the observation lasts as long as the view is on
-screen. ``SnapshotPresentation`` has the same members at the iOS 16 baseline,
-and `observe(_:)` starts the observation in a task the presentation owns:
+``ObservableSnapshotPresentation/follow(_:)`` returns when the sequence ends,
+the calling task is cancelled, or the presentation stops or replaces the
+observation. SwiftUI cancels the view's task when the view disappears.
+``SnapshotPresentation`` has the same members at the iOS 16 baseline, and
+`observe(_:)` starts the observation in a task the presentation owns:
 
 ```swift
 @MainActor

@@ -41,7 +41,10 @@ import StateMachine
         return receipt
     }
 
-    /// Admits a proposal from an edge of the snapshot a view rendered, exposing the result before returning.
+    /// Submits a proposal from the rendered snapshot and returns the owner's commit result.
+    ///
+    /// After either outcome, it reads the owner's snapshot and publishes it only if the revision
+    /// advances. A reentrant call defers publication until the current assignment finishes.
     ///
     /// The proposal is checked against the owner's current revision, so an action offered from
     /// a snapshot that has since been replaced is rejected instead of applied to newer state.
@@ -125,7 +128,10 @@ import StateMachine
         return receipt
     }
 
-    /// Admits a proposal from an edge of the snapshot a view rendered, exposing the result before returning.
+    /// Submits a proposal from the rendered snapshot and returns the owner's commit result.
+    ///
+    /// After either outcome, it reads the owner's snapshot and updates `snapshot` only if the
+    /// revision advances. A reentrant call defers the update until the current assignment finishes.
     ///
     /// The proposal is checked against the owner's current revision, so an action offered from
     /// a snapshot that has since been replaced is rejected instead of applied to newer state.

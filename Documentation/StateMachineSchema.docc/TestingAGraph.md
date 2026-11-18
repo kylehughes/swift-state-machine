@@ -73,8 +73,9 @@ extension Lookup.Effect: Equatable {}
 ```
 
 The schema and its phase payloads conform to `Equatable`, and the last line
-makes the generated `Effect` equatable. Both let a test compare values with `==`.
-The next sections explain where each conformance must be declared.
+makes the generated `Effect` equatable. Both let a test compare values with
+`==`. “Compare models and effects” explains where to declare these conformances
+for synthesized equality.
 
 The generated owners have the schema's access level. A schema that is `internal`
 is visible to a test target through `@testable import`, which the examples use.
@@ -121,13 +122,14 @@ Every snapshot has a `model`, which is the schema enum itself. When the schema
 and its payloads are `Equatable`, a test compares a whole model, as in
 `#expect(machine.snapshot().model == .found(.init(answer: "Swift.org")))`.
 
-An edge's effects are the generated `Effect` type. It is not `Equatable` until
-the schema's file says so. Declare `extension Lookup.Effect: Equatable {}` in the
-file that declares the schema. The compiler synthesizes `==` only in the file
-that declares the type, so the same extension in another file fails with
-`extension outside of file declaring enum 'Effect' prevents automatic synthesis
-of '==' for protocol 'Equatable'`. The same rule applies to an extension that
-makes the schema itself `Equatable`.
+The generated `Effect` enum represents every operation in the schema. To
+synthesize its `Equatable` conformance, each operation's input must be
+`Equatable`. Declare `extension Lookup.Effect: Equatable {}` in the file that
+declares the schema. The compiler synthesizes `==` only in the file that
+declares the type, so the same extension in another file fails with `extension
+outside of file declaring enum 'Effect' prevents automatic synthesis of '==' for
+protocol 'Equatable'`. The same rule applies to an extension that makes the
+schema itself `Equatable`.
 
 An `Owned` edge returns its own effect type, `Effect.Begin` for `begin`. Its
 `effect` property widens each value to the schema-wide `Effect`, so
@@ -151,15 +153,22 @@ so a test needs no waiting:
         #expect(receipt.snapshot.model == .searching(.init(query: "swift")))
 
         let batches = machine.drainCommands(limit: 8)
-        #expect(batches.count == 1)
-        guard case .record(let record) = batches[0].commands[0],
-            case .fetch(let fetch) = batches[0].commands[1]
+        let batch = try #require(batches.first)
+        try #require(batches.count == 1 && batch.commands.count == 2)
+        guard case .record(let record) = batch.commands[0],
+            case .fetch(let fetch) = batch.commands[1]
         else {
             Issue.record("the batch did not start the record and then the fetch")
             return
         }
         #expect(record.input == "swift")
         #expect(fetch.input == "swift")
+
+        guard case .committed = machine.deliver(record.succeeded()) else {
+            Issue.record("the record completion was not admitted")
+            return
+        }
+        #expect(machine.acknowledgeExecution(record.execution, disposition: .terminated) == .recorded)
 
         guard case .committed(let completed) = machine.deliver(fetch.succeeded("Swift.org")) else {
             Issue.record("the completion was not admitted")
@@ -173,10 +182,10 @@ so a test needs no waiting:
 ```
 
 `send` routes the input and admits it, `drainCommands(limit:)` returns whole
-batches in commit order, and `deliver` hands back the sealed completion that
-`work.succeeded(_:)` builds. Delivery and acknowledgment are separate
-obligations, so the test reports both. Acknowledging the same execution twice is
-harmless and reports `.duplicate`.
+batches in commit order, and `work.succeeded(_:)` builds the sealed completion.
+`deliver` accepts it and returns a `DeliveryResult`. Delivery and acknowledgment
+are separate obligations, so the test reports both. Acknowledging the same
+execution twice is harmless and reports `.duplicate`.
 
 A completion from work that has lost its authority is stale. Cancelling leaves
 `Searching`, the only phase where `Fetch` is active, so the fetch the test
@@ -206,9 +215,10 @@ extension LookupLocalTests {
 Each accepted change queues one batch, including a change that starts nothing.
 When the queue is full, a completion that is otherwise admissible is retained as
 `.pending(id, .waitingForCapacity)`, with its prepared candidate. Draining and
-acknowledging never change the model. `retryAdmission(id:)` admits the retained
-candidate once draining has freed capacity, without preparing it again. A queue
-of one batch makes the case easy to build:
+acknowledging never change the model. `retryAdmission(id:)` retries the retained
+candidate without preparing it again. In this test, draining frees the queue's
+only slot and the revision stays current, so the retry commits. A queue of one
+batch makes the case easy to build:
 
 ```swift
 extension LookupLocalTests {
@@ -282,9 +292,12 @@ struct Gate: Sendable {
         #expect(receipt.snapshot.model == .searching(.init(query: "swift")))
 
         gate.open()
+        var sawAnswer = false
         for await snapshot in snapshots where snapshot.model == .found(.init(answer: "Results for swift")) {
+            sawAnswer = true
             break
         }
+        #expect(sawAnswer)
         await host.shutdown()
     }
 }
@@ -303,12 +316,13 @@ outlives the test. `Shared` takes the same drivers and supports the same
 assertions. A `MainActorHost` takes `MainActor` drivers, and its test is marked
 `@MainActor`.
 
-`shutdownAndWait(deadline:)` bounds that wait. It returns `.quiescent` once every
-driver has terminated. When a driver ignores cancellation past the deadline, it
-returns `.timedOut(diagnostics)`: the owner stays closed and keeps tracking the
-work, and `diagnostics.outstandingExecutions` identifies each execution still
-running, with no authority over it. Release the driver, then call
-`shutdownAndWait()` again to join it.
+Pass a deadline to `shutdownAndWait(deadline:)` to bound the wait. It returns
+`.quiescent` after the owner processes its terminal batch and its execution and
+delivery obligations settle. On timeout it returns `.timedOut(diagnostics)`. The
+owner stays closed. `diagnostics.outstandingExecutions` identifies the
+reservations it still tracks, including any outstanding delivery or preparation.
+The diagnostic handles grant no authority. Release the driver, then call
+`shutdownAndWait()` again to wait without a deadline.
 
 ## Test a presentation with a test double
 
@@ -364,8 +378,12 @@ final class FakeHost: MainActorStateMachineHost {
         _ receive: @escaping @MainActor (Snapshot) -> Void,
         onFinish: @escaping @MainActor () -> Void
     ) throws(RuntimeHostSubscriptionFailure) -> RuntimeMainActorSubscription {
+        guard self.receive == nil else { throw .capacityExceeded }
         self.receive = receive
-        return RuntimeMainActorSubscription(onCancel: { [weak self] in self?.cancellations += 1 })
+        return RuntimeMainActorSubscription(onCancel: { [weak self] in
+            self?.receive = nil
+            self?.cancellations += 1
+        })
     }
 
     func close() -> Receipt { Receipt(snapshot: current) }
@@ -413,14 +431,16 @@ presentation and reads the result in the same turn.
 
 ## Keep a wrong-phase call out of the codebase
 
-A phase offers only the edges that leave it. `Owned<Idle>` has no `cancel`, and
-neither does the `Observed<Idle>` in an idle snapshot, so these calls do not
-compile:
+A phase offers only the edges that leave it. Neither `Owned<Idle>` nor the
+`Observed<Idle>` in an idle snapshot offers `cancel()`. Uncomment the call below
+to see the compiler diagnostic.
 
 ```swift
-// Does not compile.
-let idle = Lookup.owned(.init())
-let cancelled = idle.cancel()
+func beginFromIdle() {
+    let idle = Lookup.owned(.init())
+    // _ = idle.cancel()
+    _ = idle.begin("swift")
+}
 ```
 
 The compiler reports `instance method 'cancel()' requires the types 'Lookup.Idle'

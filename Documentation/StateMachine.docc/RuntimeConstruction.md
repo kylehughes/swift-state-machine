@@ -24,12 +24,13 @@ delivery ledger directly on their actor. Their synchronous input handling can
 read, prepare, and admit in one isolated turn. They release stored-property
 access before invoking domain functions or observation callbacks, and recheck
 the captured revision if synchronous reentry changed it. For each accepted
-batch they launch its work and settle `flush(through:)` before they run that
-batch's observer callbacks, so a slow observer cannot hold work back. Releasing
-a host without closing it finishes its retained registrations without a closed
-snapshot. The `MainActor` host
-can retain non-`Sendable` value data within that actor; the native actor host
-requires `Sendable` data at its crossing boundaries.
+batch, they process start commands and advance the revision tracked by
+`flush(through:)` before invoking that batch's observer callbacks. A synchronous
+`MainActor` callback can delay a scheduled driver on the same actor. Releasing a
+host without closing it finishes its retained registrations without a closed
+snapshot. The `MainActor` host can retain non-`Sendable` value data within that
+actor; the native actor host requires `Sendable` data at its crossing
+boundaries.
 
 ## Define the trust boundary
 
@@ -109,10 +110,12 @@ at most four preparations per result in a scheduling turn before yielding.
 Choose it only for deterministic, side-effect-free preparation. A capacity
 retry reuses the sealed candidate and does not rerun preparation.
 
-Managed defaults allow 256 queued batches, 64 effect descriptions per plan,
-256 execution reservations, and 128 subscriptions. Use
-``RuntimeManagedConfiguration`` to validate explicit bounds. Observations use
-one pending latest value per subscriber plus reserved terminal delivery;
-coalescing observations never discards accepted effect commands. The
-asynchronous-sequence form, `snapshots()`, follows the same latest-value rule and
-registers one subscriber.
+Managed defaults allow 256 queued batches, 64 effect descriptions per plan, 256
+execution reservations, and 128 subscriptions. Use
+``RuntimeManagedConfiguration`` to validate explicit bounds. Shared callback
+subscriptions and all managed snapshot sequences keep one pending latest value
+per subscriber. Callback subscriptions on ``RuntimeActorHost`` and
+``RuntimeMainActorHost`` receive each eligible batch directly. A live
+registration receives the terminal snapshot when closure ends observation. A
+sequence registers one subscriber. Coalescing snapshots preserves all accepted
+effect commands.

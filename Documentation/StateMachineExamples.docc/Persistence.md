@@ -3,11 +3,13 @@
 Persist validated model data and create new authority when it is restored.
 
 Neither form of the profile graph can restore a loading phase: the interrupted
-request has no live execution to resume. Choose an application recovery state
-before creating an archive. ``GeneratedProfile`` declares restoration with the
-schema macro and is the shortest path. ``ReferenceProfile`` is the handwritten
-form of the same graph, and its versioned ``ReferenceProfile/Archive`` is the
-fuller example of encoding, decoding, and migration.
+request has no live execution to resume. The application can reject an
+interrupted request or map it to a resting phase when creating the archive or
+validating it for restoration. ``GeneratedProfile`` declares restoration with
+the schema macro and is the shortest path. ``ReferenceProfile`` is the
+handwritten form of the same graph, and its versioned
+``ReferenceProfile/Archive`` is the fuller example of encoding, decoding, and
+migration.
 
 ## Restore a generated owner
 
@@ -56,10 +58,11 @@ request instead of rejecting it, map `.loading(let request)` to
 `.idle(Idle(userID: request.userID))`, restore, and send `.load(request)` to
 start a fresh fetch.
 
-The archive is ordinary data, and its encoding is the application's choice. Its
-`UserID`, `ProfileRequest`, and `Profile` members decode through their checked
-initializers, so decoding cannot produce an invalid value. No live ticket,
-observation provenance, prepared transition, or task is part of it.
+The archive is ordinary data, and its encoding is the application's choice.
+`UserID` and `ProfileRequest` validate their values during decoding. `Profile`
+uses synthesized decoding, which calls the checked decoder for its `userID`
+field. No live ticket, observation provenance, prepared transition, or task is
+part of it.
 
 ## Encode a historical snapshot
 
@@ -94,9 +97,10 @@ task appears in the archive.
 ## Decode and migrate before restoration
 
 The encoder writes version 1 with the fields `version`, `model`, and
-`presentation`. Version 0 uses the same model and presentation shape; a missing
-version identifies that legacy format. Both legacy forms decode through the
-current validation and encode back as version 1.
+`presentation`. An explicit `version` of 0 and an omitted `version` field both
+select version 0. Its `model` and `presentation` fields have the same shape as
+in version 1. Both forms pass through the same validation and encode as
+version 1.
 
 Decoding checks the version before reading the model payload. An unsupported
 integer version throws `Archive.DecodingRejection.unsupportedVersion`.

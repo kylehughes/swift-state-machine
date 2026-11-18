@@ -54,11 +54,11 @@ import Testing
         )
         let batch = try #require(state.drain(limit: 1).first)
         #expect(batch.commands.count == 3)
-        guard case .cancel(let canceled) = batch.commands.first else {
+        guard case .cancel(let cancelled) = batch.commands.first else {
             Issue.record("Expected cancellation before authored starts")
             return
         }
-        #expect(canceled == old.ticket)
+        #expect(cancelled == old.ticket)
         #expect(works([batch]).map(\.descriptor) == ["replacement", "second"])
         #expect(!state.isActive(old.ticket))
         #expect(works([batch]).allSatisfy { state.isActive($0.ticket) })

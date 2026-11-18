@@ -65,12 +65,11 @@ The plain `Draft` and `Approved` values remain ordinary data. Constructing an
 Write each reference in an attribute exactly as shown: `Input.approve`,
 `Scope.search`, `Fetch.self`, and `.shared`. The macro reads the spelling, so it
 rejects qualified forms such as `Lookup.Input.approve`, implicit members such as
-`.approve`, and computed expressions. Three spellings outside the attribute
-arguments are equivalent to the short forms. An attribute name may carry its
-module, as in `@StateMachineSchema.Transition`. A payload or result type in an
-edge signature may be written `Self.Draft` or `Approval.Draft`. An `Input`
-payload may name a type declared inside `Input`, and an operation's `Failure`
-may be written `Swift.Never`, which counts as infallible.
+`.approve`, and computed expressions. An attribute may include its module name,
+as in `@StateMachineSchema.Transition`. A phase payload in an edge signature may
+be written `Draft`, `Self.Draft`, or `Approval.Draft`. An operation can spell
+its infallible `Failure` as `Never` or `Swift.Never`. An `Input` case can also
+carry a type declared inside `Input`.
 
 ## Start an operation
 
@@ -123,9 +122,9 @@ to `Idle`, so a result that arrives afterward is stale. To revoke work while
 staying in an active phase, list its scope in `invalidates:`, as in
 `@Transition(on: Input.accountChanged, invalidates: [Scope.account])`.
 
-The macro generates the `Effect` type. It has one case per operation, named by
-lower-casing the leading capital run of the namespace name, so `Fetch` becomes
-`.fetch`. Each edge that lists `starts:` also gets its own effect type named
+The macro generates the `Effect` type. It has one case per operation, named in
+lower camel case. For example, `Fetch` becomes `.fetch`, and `URLFetch` becomes
+`.urlFetch`. Each edge that lists `starts:` also gets its own effect type named
 after the function, so `begin` has `Effect.Begin`. That type contains only the
 listed operations, and returning an effect outside `starts:` does not compile.
 Two edges with the same `starts:` have distinct effect types.
@@ -133,10 +132,6 @@ Two edges with the same `starts:` have distinct effect types.
 Each operation needs a success edge or router in every `activeIn` phase, and a
 failure edge or router unless `Failure` is `Never`. A completion edge may also
 list `starts:` to chain a successor operation.
-
-An edge may use typed `throws(Failure)` to reject its input. The failure becomes
-a case of the generated `PreparationRejection`, named after the edge, such as
-`.begin(.wrongUser)`.
 
 ## Host the graph
 
@@ -203,13 +198,15 @@ func search() async throws {
 }
 ```
 
-Every owner except `Owned` has `send(_:) throws(SendRejection) -> Receipt`. It
-routes, prepares, and admits the input, and a rejection is one of two cases:
-`.preparation(PreparationRejection)` when the input has no edge from the current
-phase (`invalidPhase`) or the edge declined it, and `.commit(CommitRejection)`
-when the owner refused the prepared change. `Shared.send` makes exactly one
-attempt and is the only owner where `.commit(.conflict)` can occur. The
-`MainActorHost` and `ActorHost` read, prepare, and admit in one isolated turn.
+Every owner except `Owned` routes, prepares, and attempts to admit an `Input`
+through `send(_:)`. It returns a `Receipt` or throws `SendRejection`.
+`ActorHost.send(_:)` is `async`, and `Local.send(_:)` is `mutating`.
+`.preparation(PreparationRejection)` covers a missing route (`.invalidPhase`), a
+router or edge that declines the input, or a rejected effect plan.
+`.commit(CommitRejection)` means the owner refused the prepared change.
+`Shared.send` makes exactly one attempt and is the only owner where a
+concurrent write can cause `.commit(.conflict)`. The `MainActorHost` and `ActorHost` read,
+prepare, and admit in one isolated turn.
 
 The receipt carries the accepted `revision` and the complete `Snapshot`. A
 snapshot has one case per phase, holding an `Observed<Phase>` whose `value` is
@@ -264,9 +261,9 @@ commit changes neither model data nor operation authority. Every owner except
 `ActorHost.commit(_:)` is `async`, and `Local.commit(_:)` is `mutating`. A
 presentation shows the result in the same turn.
 
-Use this path when the action belongs to the exact observation the user saw,
-and handle `.conflict`, which any revision that landed in between causes, even
-an unrelated one:
+Use this path when the action belongs to the exact observation the user saw, and
+handle `.conflict` if an intervening commit advances the same open owner.
+Closing the owner takes precedence and produces `.closed`.
 
 ```swift
 @MainActor
@@ -326,14 +323,16 @@ nonisolated enum Session: Sendable {
 `Route.Choose` has the cases `.keep` and `.end`, one per candidate edge. A
 router may use typed throws to decline, and the failure becomes a
 `PreparationRejection` case named after the router. A router with no candidate
-edge returns `Never` and must throw. A completion router, declared with
-`@Route(onSuccess:)` or `@Route(onFailure:)`, must select a terminal edge for
-that same operation. Terminal phases and unused edges are legal. Restoration can
-enter a phase that is not reachable from the initial factory.
+edge returns `Never` and must throw. If a completion router declared with
+`@Route(onSuccess:)` or `@Route(onFailure:)` selects an edge, the edge must
+match its source phase, operation, and success or failure trigger. Terminal
+phases and unused edges are legal. Restoration can enter a phase unreachable
+from the initial phase.
 
-A router runs only when an input is routed. `send(.refresh(true))` goes through
-`choose`, which selects `end`. An edge method on an observation, or on an `Owned`
-value, prepares that edge directly, so the router never sees the call:
+`send(_:)` and `prepare(_:on:)` use input routers. Completion delivery uses
+success or failure routers. `send(.refresh(true))` goes through `choose`, which
+selects `end`. An edge method on an observation, or on an `Owned` value, calls
+that edge directly.
 
 ```swift
 func keepActive(_ active: Session.Observed<Session.Active>) throws -> Session.Prepared {
@@ -341,9 +340,8 @@ func keepActive(_ active: Session.Observed<Session.Active>) throws -> Session.Pr
 }
 ```
 
-A rule that every caller must obey therefore belongs in the edge, as typed
-`throws`, or in a validated argument type. A rule that lives only in a router
-binds `send(_:)` and nothing else.
+Put a rule that every caller must obey in the edge or in a validated argument
+type. Direct edge calls bypass rules that live only in a router.
 
 ## Handle fallible edges
 
@@ -516,23 +514,26 @@ attempts, while successful terminal admission retires the operation at most
 once.
 
 Returning a completion and acknowledging termination are separate obligations.
-`DeliveryResult` includes `.stale`, when the operation's authority is no longer
-active or its outcome already settled, and `.foreignOwner`, when a different
-owner issued the completion. `AcknowledgmentResult` is `.recorded`, `.duplicate`,
-or `.foreignOwner`. An asynchronous runner must retain its execution handles
-until the tasks terminate, and a cancellation request alone does not acknowledge
+`DeliveryResult` includes `.stale`, when the operation has lost its authority or
+its outcome already settled, and `.foreignOwner`, when a different owner issued
+the completion. `AcknowledgmentResult` is `.recorded`, `.duplicate`, or
+`.foreignOwner`. An asynchronous runner must retain its execution handles until
+the tasks terminate, and a cancellation request alone does not acknowledge
 termination. A retained delivery may still need admission or explicit
-reconciliation after execution has ended. Draining and acknowledging never
-admit a retained completion. One that reports `.waitingForCapacity` is admitted
-by `retryAdmission(id:)` once draining has freed capacity.
+reconciliation after execution has ended. Draining and acknowledging never admit
+a retained completion. For a completion pending on capacity,
+`retryAdmission(id:)` rechecks the prepared candidate. It commits if capacity is
+available and the candidate is still current. An intervening revision requires
+reconciliation while the operation remains active.
 
-`Owned` runs nothing. An edge that starts nothing returns the next `Owned`
-directly. An edge that starts operations returns a
-`Change<Owned<Next>, Effect.<Edge>>` carrying that edge's own effect values in
-authored order, and the caller decides when to run them. A fallible edge returns
-`Advance<Owned<Source>, Owned<Next>, Effect.<Edge>, Failure>`, where the effect
-argument is `Never` for an edge that starts nothing. The `effect` property on
-each value widens it to the schema-wide `Effect`:
+`Owned` runs the authored edge and leaves its effects to the caller. If the edge
+returns the destination payload without throwing, the consuming method returns
+the next `Owned` directly. If it returns `Change` without throwing, the method
+returns `Change<Owned<Next>, Effect.<Edge>>` with ordered effects. An edge that
+uses typed throws or returns `Advance` produces
+`Advance<Owned<Source>, Owned<Next>, Intent, Failure>`, with `Never` for
+`Intent` when `starts:` is empty and `Effect.<Edge>` otherwise. The `effect`
+property on each value widens it to the schema-wide `Effect`:
 
 ```swift
 func ownedSearch() {
