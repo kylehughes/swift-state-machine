@@ -242,6 +242,15 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
     /// Starts `flush(through:)` of the receipt the held drainer's batch returned, which must not return until
     /// that batch is processed.
     case flushHeld
+    /// `images` family: an explicit reconciliation of the retained work on a thread of its own, whose report
+    /// the handler holds until `releaseReport`.
+    case holdReport
+    /// The held report handler returns.
+    case releaseReport
+    /// `images` family: four further works start and complete, one at a time.
+    case completeOthers
+    /// `reconcile` family: delivers another payload under work `k`'s ticket while its first is retained.
+    case redeliver(Int)
 
     // E9, `demand` family of the `ObservableObject` classes.
     /// Attaches a subscriber to `presentedSnapshots` that requests no value from `receive(subscription:)`.
@@ -412,6 +421,10 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
         case .onReport(let work, let event): "onReport(\(work),\(event))"
         case .stage(let text): "stage(\(text))"
         case .flushHeld: "flushHeld"
+        case .holdReport: "holdReport"
+        case .releaseReport: "releaseReport"
+        case .completeOthers: "completeOthers"
+        case .redeliver(let work): "redeliver(\(work))"
         case .releaseDrivers: "releaseDrivers"
         case .emit: "emit"
         case .releaseDecided(let index): "releaseDecided(\(index))"
@@ -504,7 +517,7 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
     var works: [Int] {
         switch self {
         case .refuse(let work), .accept(let work), .reconcile(let work), .discard(let work),
-            .returnWork(let work, _):
+            .returnWork(let work, _), .redeliver(let work):
             [work]
         case .onReport(let work, let event): [work] + event.works
         case .arm(_, let event): event.works
@@ -583,13 +596,14 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
             .saveProjected, .subscribeSavedProjected, .factoryReturnNewest, .factoryThrowNewest, .cancelFollowerOldest,
             .cancelCall, .observeUnseeded, .claim, .read, .cancelReader, .sendCancel, .ownerSend, .commitCurrent,
             .saveProposal, .commitSaved, .commitForeign, .copyOwner, .dropCopy, .releaseDrivers, .resetOwner, .emit,
-            .stopCustody, .flushHeld,
+            .stopCustody, .flushHeld, .holdReport, .releaseReport, .completeOthers,
             .releaseDecided(0), .releaseDecided(1),
         ]
         all += [.subscribeElsewhere(once: false), .subscribeElsewhere(once: true)]
         for work in 1 ... 3 {
             all += [
-                .refuse(work), .accept(work), .reconcile(work), .discard(work), .returnWork(work, accepts: false),
+                .refuse(work), .accept(work), .reconcile(work), .discard(work), .redeliver(work),
+                .returnWork(work, accepts: false),
                 .returnWork(work, accepts: true),
             ]
         }

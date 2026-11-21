@@ -212,6 +212,9 @@ nonisolated final class ExplorerReportsLog: Sendable {
             if let id = state.ids[work], id != entry {
                 violate("a report of \(name) names another retained entry")
             }
+            if let other = state.ids.first(where: { $0.key != work && $0.value == entry })?.key {
+                violate("a report of \(name) names the retained entry of work \(other)")
+            }
             if state.ids[work] == nil { state.ids[work] = entry }
             if !requiresReconciliation {
                 violate("attempt \(attempt) of \(name) was reported without requiring reconciliation")
@@ -385,6 +388,7 @@ nonisolated final class ExplorerReportsLog: Sendable {
     private var armUsed = false
     private var emissionArmed = false
     private var driversReleased = false
+    private var redelivered = false
     private var nextModel = 10
     private var steps = 0
     // I53: the receipt of the held drainer's batch, and a flush through it that the harness started.
@@ -490,7 +494,11 @@ nonisolated final class ExplorerReportsLog: Sendable {
             result.append(.arm(.emission, .edit))
         }
         if !driversReleased { result.append(.releaseDrivers) }
-        for work in works where pendingID(work) != nil { result += [.reconcile(work), .discard(work)] }
+        for work in works where pendingID(work) != nil {
+            result += [.reconcile(work), .discard(work)]
+            // Another payload under the same ticket, once per sequence: the first retained outcome stays.
+            if !redelivered { result.append(.redeliver(work)) }
+        }
         if !armUsed {
             for source in works {
                 for target in works {
@@ -611,6 +619,20 @@ nonisolated final class ExplorerReportsLog: Sendable {
             delivered.insert(work)
             log.offered(outcome)
             world.note("deliver \(event): \(owner.deliver(outcome))")
+        case .redeliver(let work):
+            // DELIVERY-003: a duplicate delivery of a retained completion prepares nothing and keeps the first
+            // payload, which I44 checks on every later report.
+            redelivered = true
+            guard let outcome = outcome(work, accepts: true) else { return }
+            let before = log.state.withLock { $0.preparations[work]?.count ?? 0 }
+            world.note("redeliver \(work): \(owner.deliver(outcome))")
+            let after = log.state.withLock { $0.preparations[work]?.count ?? 0 }
+            if after != before {
+                world.violate(
+                    .attemptOrder,
+                    "a duplicate delivery of work \(work)'s retained completion prepared it \(after - before) more times"
+                )
+            }
         case .returnWork(let work, let accepts):
             guard let outcome = outcome(work, accepts: accepts) else { return }
             delivered.insert(work)
@@ -654,20 +676,17 @@ nonisolated final class ExplorerReportsLog: Sendable {
                 flushed.withLock { $0 = done }
             }
             for _ in 0 ..< 20 { await Task { @MainActor in }.value }
-            if flushed.withLock({ $0 }) != nil {
-                world.violate(
-                    .flushBoundary,
-                    "flush(through:) of the held batch's receipt returned while its emission handler is held"
-                )
+            if let problem = explorerFlushProblem(held: true, result: flushed.withLock { $0 }) {
+                world.violate(.flushBoundary, problem)
             }
         case .releaseDrainer:
             drainerHeld = false
             emission.proceed()
-            if flushStarted, await !hop(until: { self.flushed.withLock { $0 } == true }) {
-                world.violate(
-                    .flushBoundary,
-                    "flush(through:) of the held batch's receipt did not return true once the batch was processed"
-                )
+            if flushStarted {
+                _ = await hop(until: { self.flushed.withLock { $0 } == true })
+                if let problem = explorerFlushProblem(held: false, result: flushed.withLock { $0 }) {
+                    world.violate(.flushBoundary, problem)
+                }
             }
         case .edit:
             nextModel += 1

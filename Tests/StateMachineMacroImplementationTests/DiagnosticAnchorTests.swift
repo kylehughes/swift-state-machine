@@ -25,7 +25,7 @@ struct DiagnosticAnchorTests {
         else { fatalError("Malformed test fixture") }
         let converter = SourceLocationConverter(fileName: "Flow.swift", tree: syntax)
         do {
-            _ = try Schema.parse(declaration, attribute: attribute, context: BasicMacroExpansionContext())
+            _ = try Schema.parse(declaration, attribute: attribute)
             return []
         } catch let error as DiagnosticsError {
             return error.diagnostics.map { diagnostic in

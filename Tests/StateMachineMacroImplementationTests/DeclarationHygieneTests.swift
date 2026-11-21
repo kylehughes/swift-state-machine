@@ -1,7 +1,6 @@
 import SwiftDiagnostics
 import SwiftParser
 import SwiftSyntax
-import SwiftSyntaxMacroExpansion
 import Testing
 
 @testable import StateMachineMacros
@@ -13,7 +12,7 @@ struct DeclarationHygieneTests {
         guard let declaration = syntax.statements.first?.item.as(EnumDeclSyntax.self),
             let attribute = declaration.attributes.first?.as(AttributeSyntax.self)
         else { fatalError("Malformed test fixture") }
-        return try Schema.parse(declaration, attribute: attribute, context: BasicMacroExpansionContext())
+        return try Schema.parse(declaration, attribute: attribute)
     }
 
     static func diagnostics(_ text: String) -> [String]? {

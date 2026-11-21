@@ -132,7 +132,8 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     /// in order, with the route the owner says refused it.
     public private(set) var rejections: [Rejection] = []
     /// Every terminal outcome whose router or completion edge refused it in a `deliver` or `reconcile`
-    /// call, in order, with the route the owner names; an owner that names no route records none.
+    /// call, in order, with the route that call's result names; a result that names no route, as one
+    /// that found the outcome already retained, records none.
     public private(set) var completionRejections: [CompletionRejection] = []
     /// How many accepted changes the harness never observed, because `withOwner` made them before
     /// the last change of its body; their snapshots were not checked against any invariant.
@@ -265,7 +266,7 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     /// an ``Step/Kind/unattributed`` step with no edge. When `body` makes several changes, the harness
     /// sees only the last: each earlier one counts toward ``unobservedChanges``, the history is no longer
     /// complete, and ``requireInvariants(fileID:filePath:line:column:)`` and
-    /// ``GraphCoverage/requireCoverage(excluding:fileID:filePath:line:column:)`` fail, because they can
+    /// ``GraphCoverage/requireCoverage(excluding:includingRejectingRouters:fileID:filePath:line:column:)`` fail, because they can
     /// no longer vouch for every accepted snapshot.
     ///
     /// The harness compares the owner `body` leaves with the one it lent. When `body` assigns another
@@ -373,8 +374,8 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
         )
     }
 
-    /// Records the refusal of a completion that a call prepared from `before`, when the owner names the
-    /// route that refused it.
+    /// Records the refusal of a completion that a call prepared from `before`, when the result of that
+    /// call names the route that refused it.
     fileprivate mutating func recordRefusal(_ kind: Step.Kind, from before: Owner.Snapshot, route: String?) {
         guard let route else { return }
         completionRejections.append(
@@ -481,7 +482,7 @@ extension ManualMachineTest where Owner: DeliveringLocalStateMachine & ~Copyable
         let before = owner.snapshot()
         let result = owner.deliver(completion)
         record(.delivery, from: before, receipt: Owner.receipt(of: result))
-        recordRefusal(.delivery, from: before, route: owner.rejectingRoute(of: result, in: Owner.phase(of: before)))
+        recordRefusal(.delivery, from: before, route: Owner.rejectingRoute(of: result))
         return result
     }
 
@@ -498,11 +499,7 @@ extension ManualMachineTest where Owner: DeliveringLocalStateMachine & ~Copyable
         let before = owner.snapshot()
         let result = owner.reconcile(id: id)
         record(.reconciliation, from: before, receipt: Owner.receipt(of: result))
-        recordRefusal(
-            .reconciliation,
-            from: before,
-            route: owner.rejectingRoute(of: result, in: Owner.phase(of: before))
-        )
+        recordRefusal(.reconciliation, from: before, route: Owner.rejectingRoute(of: result))
         return result
     }
 

@@ -522,6 +522,30 @@ fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snap
     }
 }
 
+fileprivate static func _stateMachinePhase(of record: _StateMachineEngine.Snapshot) -> Swift::String {
+    switch record.model {
+    case .idle:
+        return "idle"
+    case .loading:
+        return "loading"
+    case .loaded:
+        return "loaded"
+    case .failed:
+        return "failed"
+    }
+}
+
+fileprivate static func _stateMachineRefusingRoute(_ rejection: PreparationRejection, in phase: Swift::String) -> Swift::String? {
+    switch (rejection, phase) {
+    case (.begin, "idle"):
+        return "idle.begin"
+    case (.choose, "loaded"):
+        return "loaded.choose"
+    default:
+        return nil
+    }
+}
+
 /// A sealed inert candidate consumed by admission.
 ///
 /// A plan defect found while preparing travels inside it with the snapshot it was prepared on,
@@ -979,6 +1003,12 @@ public enum DeliveryResult: Swift::Sendable {
     case committed(Receipt)
     /// The outcome is retained; its status says what admission is waiting for.
     case pending(PendingCompletionID, PendingStatus)
+        /// This call prepared the outcome, and its routing or an authored function refused it, so the outcome
+    /// is retained with status `reconciliationRequired`.
+    ///
+    /// `routeID` is the identifier of the router or completion edge whose authored function refused it,
+    /// as `graph` names it, or `nil` when no authored function refused it.
+    case refused(PendingCompletionID, PreparationRejection, routeID: Swift::String?)
     /// The operation's authority is inactive or its outcome was already settled.
     case stale
     /// The completion was issued by a different owner.
@@ -991,6 +1021,12 @@ public enum ReconcileResult: Swift::Sendable {
     case committed(Receipt)
     /// The outcome is still retained; its status says what admission is waiting for.
     case pending(PendingCompletionID, PendingStatus)
+        /// This call prepared the outcome, and its routing or an authored function refused it, so the outcome
+    /// is retained with status `reconciliationRequired`.
+    ///
+    /// `routeID` is the identifier of the router or completion edge whose authored function refused it,
+    /// as `graph` names it, or `nil` when no authored function refused it.
+    case refused(PendingCompletionID, PreparationRejection, routeID: Swift::String?)
     /// Another attempt holds the only preparation claim.
     case inProgress
     /// No outcome with this identity is retained.
@@ -1005,6 +1041,11 @@ public enum DiscardResult: Swift::Sendable {
     case rejected(CommitRejection)
     /// No outcome with this identity is retained.
     case notPending
+}
+
+/// The refusal of the outcome retained as `id`, whose preparation from `record` threw `rejection`.
+fileprivate static func _stateMachineRefused(_ id: StateMachine::RuntimePendingID, _ rejection: PreparationRejection, on record: _StateMachineEngine.Snapshot) -> ReconcileResult {
+    .refused(PendingCompletionID(raw: id), rejection, routeID: _stateMachineRefusingRoute(rejection, in: _stateMachinePhase(of: record)))
 }
 
 fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> ReconcileResult {
@@ -1125,16 +1166,7 @@ public typealias Input = Flow.Input
     }
     /// The identifier of the phase a snapshot holds, as the graph names it.
     public static func phase(of snapshot: Snapshot) -> Swift::String {
-        switch snapshot {
-    case .idle:
-        return "idle"
-    case .loading:
-        return "loading"
-    case .loaded:
-        return "loaded"
-    case .failed:
-        return "failed"
-    }
+        _stateMachinePhase(of: snapshot.record)
     }
     /// The receipt of an admitted proposal, or `nil` when admission rejected it.
     public static func receipt(of result: CommitResult) -> Receipt? {
@@ -1150,38 +1182,7 @@ public typealias Input = Flow.Input
         guard case .preparation(let preparation) = rejection else {
         return nil
     }
-    switch (preparation, phase) {
-    case (.begin, "idle"):
-        return "idle.begin"
-    case (.choose, "loaded"):
-        return "loaded.choose"
-    default:
-        return nil
-    }
-    }
-    /// The identifier of the router or completion edge, as the graph names it, whose authored function
-    /// refused the outcome that `deliver` left retained with `result`, preparing it from a snapshot in
-    /// `phase`, or `nil` when no authored function refused it.
-    public borrowing func rejectingRoute(of result: DeliveryResult, in phase: Swift::String) -> Swift::String? {
-        guard case .pending(let id, .reconciliationRequired) = result,
-        case .preparation(let preparation)? = pendingCompletions().first(where: { $0.id == id
-        })?.lastRejection
-    else {
-        return nil
-    }
-    return Self.rejectingRoute(of: .preparation(preparation), in: phase)
-    }
-    /// The identifier of the router or completion edge, as the graph names it, whose authored function
-    /// refused the outcome that `reconcile(id:)` left retained with `result`, preparing it from a snapshot
-    /// in `phase`, or `nil` when no authored function refused it.
-    public borrowing func rejectingRoute(of result: ReconcileResult, in phase: Swift::String) -> Swift::String? {
-        guard case .pending(let id, .reconciliationRequired) = result,
-        case .preparation(let preparation)? = pendingCompletions().first(where: { $0.id == id
-        })?.lastRejection
-    else {
-        return nil
-    }
-    return Self.rejectingRoute(of: .preparation(preparation), in: phase)
+        return _stateMachineRefusingRoute(preparation, in: phase)
     }
     /// A fresh initial payload, constructed as the schema's declared default constructs it.
     public static func defaultInitialPhase() -> InitialPhase {
@@ -1207,6 +1208,26 @@ public typealias Input = Flow.Input
     public static func receipt(of result: DiscardResult) -> Receipt? {
         if case .discarded(let receipt) = result {
         receipt
+    } else {
+        nil
+    }
+    }
+    /// The identifier of the router or completion edge, as the graph names it, whose authored function
+    /// refused the outcome in the call that returned `result`, or `nil` when that call's preparation
+    /// did not refuse it.
+    public static func rejectingRoute(of result: DeliveryResult) -> Swift::String? {
+        if case .refused(_, _, let routeID) = result {
+        routeID
+    } else {
+        nil
+    }
+    }
+    /// The identifier of the router or completion edge, as the graph names it, whose authored function
+    /// refused the outcome in the call that returned `result`, or `nil` when that call's preparation
+    /// did not refuse it.
+    public static func rejectingRoute(of result: ReconcileResult) -> Swift::String? {
+        if case .refused(_, _, let routeID) = result {
+        routeID
     } else {
         nil
     }
@@ -1308,6 +1329,8 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
             return .committed(receipt)
             case .pending(let id, let status):
             return .pending(id, status)
+            case .refused(let id, let rejection, let routeID):
+            return .refused(id, rejection, routeID: routeID)
             case .inProgress:
             return .pending(id, .preparing)
             case .notPending:
@@ -1332,7 +1355,11 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
         return .notPending
         case .claimed(let attempt):
             let preparation = _stateMachineDeliveryPreparation(attempt)
-            return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
+            let finish = ledger.finish(attempt, preparation: preparation, in: &engine)
+            if case .failure(.preparation(let rejection)) = preparation, case .pending(let raw, .reconciliationRequired) = finish {
+                return _stateMachineRefused(raw, rejection, on: attempt.snapshot)
+            }
+            return _stateMachineFinish(finish)
         }
     }
     /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
@@ -1746,7 +1773,7 @@ public func pendingCompletions() -> [PendingCompletion] {
     }
     /// Explicitly claims a fresh preparation attempt for a retained outcome.
     public func reconcile(id: PendingCompletionID) -> ReconcileResult {
-        Self.reconciled(host.reconcile(id: id.raw))
+        Self.reconciled(host.reconcileReportingRefusal(id: id.raw))
     }
     /// Revokes retained delivery with an authority-only admission.
     ///
@@ -1756,8 +1783,11 @@ public func pendingCompletions() -> [PendingCompletion] {
         Self.discarded(host.discardPending(id: id.raw))
     }
     // The raw host reports only the cases each operation can produce; the rest cannot occur.
-    private static func reconciled(_ result: StateMachine::RuntimeHostDelivery<Flow, Effect>) -> ReconcileResult {
-        switch result {
+    private static func reconciled(_ result: (delivery: StateMachine::RuntimeHostDelivery<Flow, Effect>, refusal: Host.Refusal?)) -> ReconcileResult {
+        if let refusal = result.refusal, case .pending(let id, .reconciliationRequired) = result.delivery {
+            return _stateMachineRefused(id, refusal.failure, on: refusal.snapshot)
+        }
+        switch result.delivery {
         case .committed(let record):
         return .committed(Receipt(record))
         case .pending(let id, let status):
@@ -2163,7 +2193,7 @@ public func pendingCompletions() -> [PendingCompletion] {
     }
     /// Explicitly claims a fresh preparation attempt for a retained outcome.
     public func reconcile(id: PendingCompletionID) -> ReconcileResult {
-        Self.reconciled(host.reconcile(id: id.raw))
+        Self.reconciled(host.reconcileReportingRefusal(id: id.raw))
     }
     /// Revokes retained delivery with an authority-only admission.
     ///
@@ -2173,8 +2203,11 @@ public func pendingCompletions() -> [PendingCompletion] {
         Self.discarded(host.discardPending(id: id.raw))
     }
     // The raw host reports only the cases each operation can produce; the rest cannot occur.
-    private static func reconciled(_ result: StateMachine::RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>.Delivery) -> ReconcileResult {
-        switch result {
+    private static func reconciled(_ result: (delivery: StateMachine::RuntimeSharedHost<Flow, Effect, Completion, PreparationRejection>.Delivery, refusal: Host.Refusal?)) -> ReconcileResult {
+        if let refusal = result.refusal, case .pending(let id, .reconciliationRequired) = result.delivery {
+            return _stateMachineRefused(id, refusal.failure, on: refusal.snapshot)
+        }
+        switch result.delivery {
         case .committed(let record):
         return .committed(Receipt(record))
         case .pending(let id, let status):
@@ -2580,7 +2613,7 @@ public func pendingCompletions() async -> [PendingCompletion] {
     }
     /// Explicitly claims a fresh preparation attempt for a retained outcome.
     public func reconcile(id: PendingCompletionID) async -> ReconcileResult {
-        Self.reconciled(await host.reconcile(id: id.raw))
+        Self.reconciled(await host.reconcileReportingRefusal(id: id.raw))
     }
     /// Revokes retained delivery with an authority-only admission.
     ///
@@ -2590,8 +2623,11 @@ public func pendingCompletions() async -> [PendingCompletion] {
         Self.discarded(await host.discardPending(id: id.raw))
     }
     // The raw host reports only the cases each operation can produce; the rest cannot occur.
-    private static func reconciled(_ result: StateMachine::RuntimeHostDelivery<Flow, Effect>) -> ReconcileResult {
-        switch result {
+    private static func reconciled(_ result: (delivery: StateMachine::RuntimeHostDelivery<Flow, Effect>, refusal: Host.Refusal?)) -> ReconcileResult {
+        if let refusal = result.refusal, case .pending(let id, .reconciliationRequired) = result.delivery {
+            return _stateMachineRefused(id, refusal.failure, on: refusal.snapshot)
+        }
+        switch result.delivery {
         case .committed(let record):
         return .committed(Receipt(record))
         case .pending(let id, let status):
@@ -3004,7 +3040,7 @@ public func pendingCompletions(isolation: isolated Owner = #isolation) -> [Pendi
     }
     /// Explicitly claims a fresh preparation attempt for a retained outcome.
     public func reconcile(id: PendingCompletionID, isolation: isolated Owner = #isolation) -> ReconcileResult {
-        Self.reconciled(host.reconcile(id: id.raw, isolation: isolation))
+        Self.reconciled(host.reconcileReportingRefusal(id: id.raw, isolation: isolation))
     }
     /// Revokes retained delivery with an authority-only admission.
     ///
@@ -3014,8 +3050,11 @@ public func pendingCompletions(isolation: isolated Owner = #isolation) -> [Pendi
         Self.discarded(host.discardPending(id: id.raw, isolation: isolation))
     }
     // The raw host reports only the cases each operation can produce; the rest cannot occur.
-    private static func reconciled(_ result: StateMachine::RuntimeHostDelivery<Flow, Effect>) -> ReconcileResult {
-        switch result {
+    private static func reconciled(_ result: (delivery: StateMachine::RuntimeHostDelivery<Flow, Effect>, refusal: Host.Refusal?)) -> ReconcileResult {
+        if let refusal = result.refusal, case .pending(let id, .reconciliationRequired) = result.delivery {
+            return _stateMachineRefused(id, refusal.failure, on: refusal.snapshot)
+        }
+        switch result.delivery {
         case .committed(let record):
         return .committed(Receipt(record))
         case .pending(let id, let status):

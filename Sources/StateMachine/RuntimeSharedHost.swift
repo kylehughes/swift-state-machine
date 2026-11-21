@@ -38,8 +38,14 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     fileprivate enum Report: Sendable {
         /// A retained completion whose status became `reconciliationRequired`, as its attempt captured it.
         case reconciliation(Ledger.Pending)
-        /// The retained completions after a change to them, for the registrations that change found.
-        case pending([Ledger.Pending], recipients: [PendingSubscriber], terminal: Bool)
+        /// The newest image of the retained completions not yet delivered, which the state holds.
+        case pending
+    }
+    /// The retained completions after a change to them, for the registrations that change found.
+    fileprivate struct PendingImage: Sendable {
+        let collection: [Ledger.Pending]
+        let recipients: [PendingSubscriber]
+        let terminal: Bool
     }
     // The owner's lifetime: every copy of the host shares it, and nothing else retains it. A
     // cancellation, a delivery, or a worker's termination can keep `storage` and one of its versions
@@ -98,6 +104,9 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         // The owner's reports, which every copy of the host and every host the coordinator makes for a
         // returning worker share, because they share this state.
         var reports = RuntimeReportQueue<Report>()
+        // The image the one queued `.pending` report delivers. A newer image replaces it in place, since
+        // it is for every registration still registered, and a slow reader would skip the older one.
+        var image: PendingImage?
         var isQuiescent: Bool { engine.isQuiescent && !drainerScheduled && ready.isIdle }
         /// Live snapshot and pending-completion registrations, which share one capacity.
         ///
@@ -106,20 +115,19 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         var registrations: Int {
             subscribers.filter(\.mailbox.gate.isOpen).count + pendingSubscribers.filter(\.mailbox.gate.isOpen).count
         }
+        /// Queues an image of the retained completions, replacing one not yet delivered.
+        mutating func queue(_ next: PendingImage) {
+            if image == nil { reports.append(.pending) }
+            image = next
+        }
         mutating func prune() {
             ledger.prune(in: engine)
-            ready.prune(keeping: ledger.pending.map(\.id))
+            ready.prune(keeping: ledger.pendingIDs)
         }
         mutating func retryCapacity() -> [Ledger.Pending] {
-            let results = ledger.retryCapacity(in: &engine)
+            let conflicts = ledger.retryCapacityConflicts(in: &engine)
             prune()
-            return results.compactMap { result in
-                guard case .pending(let id, .reconciliationRequired) = result,
-                    let pending = ledger.pending.first(where: { $0.id == id }),
-                    case .admission(.conflict) = pending.lastRejection
-                else { return nil }
-                return pending
-            }
+            return conflicts
         }
     }
     private actor Progress {
@@ -442,7 +450,9 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             for pending in conflicts { next.reports.append(.reconciliation(pending)) }
         }
         if next.ledger.generation != previous.value.ledger.generation, !next.pendingSubscribers.isEmpty {
-            next.reports.append(.pending(next.ledger.pending, recipients: next.pendingSubscribers, terminal: false))
+            next.queue(
+                PendingImage(collection: next.ledger.pending, recipients: next.pendingSubscribers, terminal: false)
+            )
         }
         guard storage.install(.init(next), replacing: previous) else { return false }
         if wake { scheduleDrain() }
@@ -458,23 +468,33 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     ///
     /// A delivery in progress, inside whose handler this call runs or, on another thread, beside it,
     /// delivers every report queued before it ends, so this call leaves its reports to it and returns.
+    ///
+    /// Each installation detaches every report queued so far, with the image they deliver, so the
+    /// delivery owns them and no installed version shares their storage.
     private func deliverReports() {
         var delivering = false
         while true {
             let before = storage.load()
             var after = before.value
-            guard let report = after.reports.take(continuing: delivering) else {
+            guard var taken = after.reports.takeAll(continuing: delivering) else {
                 guard delivering else { return }
                 if storage.install(.init(after), replacing: before) { return }
                 continue
             }
+            var image = after.image.take()
             guard storage.install(.init(after), replacing: before) else { continue }
+            BacklogDetachment.detached(taken.count)
             delivering = true
-            switch report {
-            case .reconciliation(let pending):
-                reconciliationRequired(pending)
-            case .pending(let image, let recipients, let terminal):
-                for recipient in recipients { recipient.mailbox.offer(image, revision: nil, terminal: terminal) }
+            while let report = taken.popFirst() {
+                switch report {
+                case .reconciliation(let pending):
+                    reconciliationRequired(pending)
+                case .pending:
+                    guard let image = image.take() else { continue }
+                    for recipient in image.recipients {
+                        recipient.mailbox.offer(image.collection, revision: nil, terminal: image.terminal)
+                    }
+                }
             }
         }
     }
@@ -566,7 +586,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             // Closing ends every pending-completion registration with the final, empty collection, after
             // every collection an earlier installation queued.
             if !after.pendingSubscribers.isEmpty {
-                after.reports.append(.pending([], recipients: after.pendingSubscribers, terminal: true))
+                after.queue(PendingImage(collection: [], recipients: after.pendingSubscribers, terminal: true))
             }
             after.pendingSubscribers = []
             let wake = processor != nil && !after.drainerScheduled
@@ -610,11 +630,23 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     }
     /// Claims exactly one fresh preparation attempt for a retained first outcome.
     public func reconcile(id: RuntimePendingID) -> Delivery { reconcile(id: id, automatic: false) }
+    /// The root a refused preparation ran on, and the typed failure it threw.
+    public typealias Refusal = (snapshot: Engine.Snapshot, failure: Failure)
+    /// Acquires one explicit reconciliation attempt as `reconcile(id:)` does, and returns with its result
+    /// the refusal its own preparation produced, when that refusal left the outcome
+    /// `reconciliationRequired`.
+    public func reconcileReportingRefusal(id: RuntimePendingID) -> (delivery: Delivery, refusal: Refusal?) {
+        var refusal: Refusal?
+        let delivery = reconcile(id: id, automatic: false, refused: { refusal = ($0, $1) })
+        guard case .pending(_, .reconciliationRequired) = delivery else { return (delivery, nil) }
+        return (delivery, refusal)
+    }
     private func reconcile(
         id: RuntimePendingID,
         automatic: Bool,
         retained: RuntimeDeliveryDecision? = nil,
-        scheduledRetry: Bool = false
+        scheduledRetry: Bool = false,
+        refused: ((Engine.Snapshot, Failure) -> Void)? = nil
     ) -> Delivery {
         // Only the first claim of a queued turn depends on the decision that queued it.
         var scheduledClaim = scheduledRetry
@@ -644,7 +676,11 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                     }
                 }
             },
-            prepare: prepare,
+            prepare: { attempt in
+                let prepared = prepare(attempt)
+                if case .failure(.preparation(let failure)) = prepared { refused?(attempt.snapshot, failure) }
+                return prepared
+            },
             finish: { attempt, preparation in
                 while true {
                     let before = storage.load()
@@ -738,16 +774,22 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             }
         }
     }
-    private func scheduleDrain() { Task { await drainTurn() } }
-    private func drainTurn() async {
+    private func scheduleDrain() { Task { await drainTurn(holding: RuntimeFIFO()) } }
+    // A turn detaches every queued batch in one installation and holds them, so taking each copies
+    // nothing that an installed version shares; each keeps its commit-queue slot until the turn takes
+    // it, in its own installation, as a batch still queued would.
+    private func drainTurn(holding held: RuntimeFIFO<Engine.Batch>) async {
         guard let processor else { return }
+        var held = held
         var count = 0
         while count < 32 {
             let before = storage.load()
             var after = before.value
-            let batches = after.engine.drain(limit: 1)
+            var detaching = held.isEmpty ? after.engine.detachQueued() : nil
+            let taken = detaching?.first ?? held.first
+            let batch = taken.map { after.engine.drain(detached: $0) } ?? after.engine.drain(limit: 1).first
             let conflicts = after.retryCapacity()
-            guard let batch = batches.first else {
+            guard let batch else {
                 let again = after.engine.hasQueuedBatches
                 after.drainerScheduled = again
                 guard install(after, replacing: before, conflicts: conflicts) else { continue }
@@ -758,6 +800,12 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             let subscribers = after.subscribers
             if batch.terminal { after.subscribers = [] }
             guard install(after, replacing: before, conflicts: conflicts) else { continue }
+            if var detached = detaching.take(), !detached.isEmpty {
+                BacklogDetachment.detached(detached.count)
+                held = RuntimeFIFO()
+                swap(&held, &detached)
+            }
+            if taken != nil { _ = held.popFirst() }
             let cancellations = batch.commands.compactMap { command -> RuntimeTicket? in
                 if case .cancel(let ticket) = command { return ticket }
                 return nil
@@ -784,9 +832,9 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             Task { await progress.changed() }
             count += 1
         }
-        Task {
+        Task { [held] in
             await Task.yield()
-            await drainTurn()
+            await drainTurn(holding: held)
         }
     }
     // Whether `pending` lost a root conflict that `policy` prepares again automatically, which is not

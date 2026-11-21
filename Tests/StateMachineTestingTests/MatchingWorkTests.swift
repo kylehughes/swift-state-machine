@@ -17,7 +17,10 @@ private actor Desk {
         for input in 0 ..< count {
             running.append(Task { _ = await driver.run(self, input) })
         }
-        while driver.startedCount < count { await Task.yield() }
+        while driver.startedCount < count {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
         let before = driver.examinedCallEntries
         var order: [Int] = []
         for _ in 0 ..< count {
@@ -42,7 +45,10 @@ private actor Desk {
                 }
             )
         }
-        while driver.waitingCount < count { await Task.yield() }
+        while driver.waitingCount < count {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
         let before = driver.examinedCallEntries
         var running: [Task<Void, Never>] = []
         for input in 0 ..< count { running.append(Task { _ = await driver.run(self, input) }) }
@@ -68,7 +74,10 @@ private actor Desk {
                     let call = try await driver.nextStarted()
                     call.succeed(call.input())
                 }
-                while driver.waitingCount == 0 { await Task.yield() }
+                while driver.waitingCount == 0 {
+                    try Task.checkCancellation()
+                    await Task.yield()
+                }
                 let running = Task { _ = await driver.run(self, input) }
                 try await waiting.value
                 await running.value
@@ -88,7 +97,10 @@ private actor Desk {
         for input in 0 ..< count {
             running.append(Task { _ = await driver.run(input) })
         }
-        while driver.startedCount < count { await Task.yield() }
+        while driver.startedCount < count {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
         let before = driver.examinedCallEntries
         var inputs: [Int] = []
         for _ in 0 ..< count {
@@ -116,7 +128,10 @@ private actor Desk {
                 }
             )
         }
-        while driver.waitingCount < count { await Task.yield() }
+        while driver.waitingCount < count {
+            try Task.checkCancellation()
+            await Task.yield()
+        }
         let before = driver.examinedCallEntries
         var running: [Task<Void, Never>] = []
         for input in 0 ..< count { running.append(Task { _ = await driver.run(input) }) }
@@ -152,7 +167,10 @@ private actor Desk {
                 call = try await driver.nextStarted()
             } else {
                 let waiting = Task { try await driver.nextStarted() }
-                while driver.waitingCount == 0 { await Task.yield() }
+                while driver.waitingCount == 0 {
+                    try Task.checkCancellation()
+                    await Task.yield()
+                }
                 running = Task { _ = await driver.run(input) }
                 call = try await waiting.value
             }

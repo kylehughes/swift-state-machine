@@ -317,7 +317,7 @@ private final class Traced: StateMachineSnapshot, Sendable {
         #expect(host.held)
         presentation = nil
         #expect(presentation == nil)
-        while host.held { await Task.yield() }
+        while host.held, !Task.isCancelled { await Task.yield() }
         let events = host.trace.all
         let freed = events.firstIndex(of: "freed")
         let destroyed = events.firstIndex(of: "destroyed 20")
@@ -551,7 +551,7 @@ private final class Named: StateMachineSnapshot, Sendable {
         let releasing = presentation?.objectWillChange.sink { presentation = nil }
         _ = try? host.send(())
         #expect(released == nil)
-        while host.held > 0 { await Task.yield() }
+        while host.held > 0, !Task.isCancelled { await Task.yield() }
         releasing?.cancel()
         let events = host.trace.all
         let freed = events.firstIndex(of: "freed 1")

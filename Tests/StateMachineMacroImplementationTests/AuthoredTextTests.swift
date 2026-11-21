@@ -191,6 +191,57 @@ struct AuthoredTextTests {
         _ = Self.diagnostics(cyclic)
     }
 
+    /// A member of a generic type is one declaration whatever the type's arguments, so its access is checked
+    /// through a specialized alias and a specialization written in place, and the generic parameters hide the
+    /// schema's types of their names inside the generic type.
+    @Test func aMemberOfASpecializedTypeNeedsItsAccess() throws {
+        let message = "Declare 'Hidden' public: the public schema 'Flow' generates public members that name it."
+        for (base, aliases) in [
+            ("Box<Swift::Int>", ""), ("N", "public typealias N = Box<Swift::Int>"),
+            ("M", "public typealias N = Box<Swift::Int>\npublic typealias M = N"),
+            ("Self.N", "public typealias N = Self.Box<Swift::Int>"), ("Flow.Box<Idle>", ""),
+            ("Box<Swift::Int>.Inner", ""),
+        ] {
+            let member = "\(base).Hidden"
+            let source = """
+                @StateMachine(mode: .shared)
+                public enum Flow: Swift::Sendable {
+                    public enum Box<T> {
+                        struct Hidden: Swift::Error {}
+                        public enum Inner { struct Hidden: Swift::Error {} }
+                    }
+                    \(aliases)
+                    public struct Idle: Swift::Sendable { public init() {} }
+                    @Initial case idle(Idle)
+                    public enum Input: Swift::Sendable { case run }
+                    @Transition(on: Input.run)
+                    static func run(_ source: Idle) throws(\(member)) -> Idle { fatalError() }
+                }
+                """
+            #expect(Self.diagnostics(source) == [message], "\(member)")
+            #expect(
+                Self.diagnostics(source.replacingOccurrences(of: "struct Hidden", with: "public struct Hidden")) == nil,
+                "\(member)"
+            )
+        }
+        // Inside `Box`, `T` is its parameter, not the schema's `T`, whose `Hidden` the spelling does not name.
+        let parameter = """
+            @StateMachine(mode: .shared)
+            public enum Flow: Swift::Sendable {
+                public enum Box<T> { public typealias Inner = T }
+                public enum T { struct Hidden: Swift::Error {} }
+                public enum Other { public struct Hidden: Swift::Error {} }
+                public typealias N = Box<Other>
+                public struct Idle: Swift::Sendable { public init() {} }
+                @Initial case idle(Idle)
+                public enum Input: Swift::Sendable { case run }
+                @Transition(on: Input.run)
+                static func run(_ source: Idle) throws(N.Inner.Hidden) -> Idle { fatalError() }
+            }
+            """
+        #expect(Self.diagnostics(parameter) == nil)
+    }
+
     // MARK: Names without backticks
 
     /// A label, an attribute's name, and a member read in an attribute's arguments are compared without
@@ -279,10 +330,12 @@ struct AuthoredTextTests {
                 public enum Problem: Swift::Error {}
                 @Initial case idle(Idle)
                 @Terminal case done(Done)
-                public enum Input { case go(Swift::Int), pick }
+                public enum Input { case go(Swift::Int), pick, start }
                 ATTRIBUTE
                 @Transition(on: Input.go)
                 static func go(_ source: Self.Idle, _ count: borrowing Swift::Int) throws(Problem) -> Idle { source }
+                @Transition(on: Input.start)
+                static func start(_ source: Idle) -> Idle { source }
                 @available(*, deprecated)
                 @Route(on: Input.pick)
                 static func pick(_ source: Idle) -> Route.Pick { .left }
@@ -341,6 +394,145 @@ struct AuthoredTextTests {
                 Self.diagnostics(refused) == [
                     "Remove '@available' and give the schema this availability instead: generated members call this function, and they have only the schema's availability."
                 ]
+            )
+        }
+    }
+
+    /// The options after `*` are read by kind, in any order, as Swift reads them.
+    ///
+    /// They are one bare `deprecated`, and at most one `message:` and one `renamed:`; anything else is
+    /// availability, which belongs on the schema.
+    @Test func deprecationOptionsAreReadInAnyOrder() throws {
+        let source = #"""
+            @StateMachine(mode: .shared)
+            public enum Flow {
+                public struct Idle {}
+                @Initial case idle(Idle)
+                public enum Input { case go, start }
+                ATTRIBUTE
+                @Transition(on: Input.go)
+                static func go(_ source: Idle) -> Idle { source }
+                @Transition(on: Input.start)
+                static func start(_ source: Idle) -> Idle { source }
+            }
+            """#
+        func orders(_ options: [String]) -> [[String]] {
+            options.isEmpty
+                ? [[]]
+                : options.indices.flatMap { index in
+                    var rest = options
+                    let first = rest.remove(at: index)
+                    return orders(rest).map { [first] + $0 }
+                }
+        }
+        let message = #"message: "Use start.""#
+        let renamed = #"renamed: "start""#
+        for options in [["deprecated", message, renamed], ["deprecated", message], ["deprecated", renamed]] {
+            for order in orders(options) {
+                let attribute = "@available(*, \(order.joined(separator: ", ")))"
+                let schema = try Self.parse(source.replacingOccurrences(of: "ATTRIBUTE", with: attribute))
+                #expect(schema.transitions.first { $0.name == "go" }?.deprecation?.attribute == attribute)
+                let text = try Generator(schema: schema).members().map(\.description).joined(separator: "\n")
+                #expect(text.contains("\(attribute) public consuming func go()"), "\(attribute)")
+                #expect(text.contains("\(attribute) public func go() -> Prepared"), "\(attribute)")
+            }
+        }
+        let availability =
+            "Remove '@available' and give the schema this availability instead: generated members call this function, and they have only the schema's availability."
+        for options in [
+            message, renamed, "\(message), \(renamed)", "deprecated, deprecated", "\(message), deprecated, \(message)",
+            "\(renamed), deprecated, \(renamed)", "unavailable, deprecated", "\(message), deprecated, obsoleted: 2",
+            "introduced: 1, deprecated", "deprecated: 2", "\(message), deprecated, noasync",
+        ] {
+            let attribute = "@available(*, \(options))"
+            #expect(
+                Self.diagnostics(source.replacingOccurrences(of: "ATTRIBUTE", with: attribute)) == [availability],
+                "\(attribute)"
+            )
+        }
+    }
+
+    /// A rename is copied onto the generated methods, where Swift's fix-it puts it in place of the called
+    /// method's name, so it must be the bare name of another edge, or router, that has a generated public
+    /// method wherever the deprecated one has; any other target is refused at its string.
+    @Test func aRenameNamesAnotherGeneratedMethod() throws {
+        let source = #"""
+            @StateMachine(mode: .shared)
+            public enum Flow {
+                public struct Idle {}
+                public struct Busy {}
+                @Initial case idle(Idle)
+                case busy(Busy)
+                public enum Input { case go(Swift::Int), next(Swift::Int), start, pick, choose }
+                @Operation(activeIn: [Busy.self])
+                public enum Load {}
+                @available(*, deprecated, renamed: "EDGE")
+                @Transition(on: Input.go)
+                static func go(_ source: Idle, _ count: Swift::Int) -> Idle { source }
+                @Transition(on: Input.next)
+                static func next(_ source: Idle, _ count: Swift::Int) -> Idle { source }
+                @Transition(on: Input.start, starts: [Load.self])
+                static func start(_ source: Idle) -> Change<Busy, Effect.Start> { fatalError() }
+                @Transition(onSuccess: Load.self)
+                static func loaded(_ source: Busy) -> Idle { Idle() }
+                @Transition(on: Input.start)
+                static func café(_ source: Busy) -> Idle { Idle() }
+                @available(*, deprecated, renamed: "ROUTER")
+                @Route(on: Input.pick)
+                static func pick(_ source: Idle) -> Route.Pick { .left }
+                @Transition(on: Input.pick)
+                static func left(_ source: Idle) -> Idle { source }
+                @Transition(on: Input.pick)
+                static func right(_ source: Idle) -> Idle { source }
+                @Route(on: Input.choose)
+                static func choose(_ source: Idle) -> Route.Choose { .up }
+                @Transition(on: Input.choose)
+                static func up(_ source: Idle) -> Idle { source }
+                @Transition(on: Input.choose)
+                static func down(_ source: Idle) -> Idle { source }
+            }
+            """#
+        func schema(edge: String = "next", router: String = "choose") -> String {
+            source.replacingOccurrences(of: "EDGE", with: edge).replacingOccurrences(of: "ROUTER", with: router)
+        }
+        // A bare name of an edge, or a router, with a public method on each wrapper the deprecated one has.
+        for edge in ["next", "café"] {
+            let text = try Generator(schema: try Self.parse(schema(edge: edge))).members().map(\.description)
+                .joined(separator: "\n")
+            #expect(text.contains(#"@available(*, deprecated, renamed: "\#(edge)") public consuming func go("#))
+            #expect(text.contains(#"@available(*, deprecated, renamed: "choose") public consuming func pick("#))
+        }
+        // Where only `Owned` is generated, a completion edge, which has its own method there, is one.
+        let owned = schema(edge: "loaded")
+            .replacingOccurrences(of: "mode: .shared", with: "mode: .shared, owners: [.owned]")
+        #expect(Self.diagnostics(owned) == nil)
+        func refusal(_ role: String) -> String {
+            "Write the bare name of the replacement \(role) in 'renamed:': the generated methods repeat this deprecation as written, so it must name another \(role) that has a generated public method wherever this one has."
+        }
+        // A qualified or labelled name, a name in backticks, which Swift refuses there, a name of no function,
+        // the function itself, a router, an edge a router chooses, an edge whose method is on `Owned` alone,
+        // and an equivalent name spelled with other scalars than the edge's.
+        for edge in [
+            "Flow.next", "next(_:)", "next(_:_:)", "Flow.next(_:_:)", "`next`", "nxt", "", " next", "go", "pick",
+            "left", "loaded", "cafe\u{301}",
+        ] {
+            let text = schema(edge: edge)
+            let site = try #require(DiagnosticAnchorTests.site(of: "\"\(edge)\"", in: text))
+            #expect(
+                DiagnosticAnchorTests.refusals(text)
+                    == [.init(message: refusal("edge"), line: site.line, column: site.column)],
+                "\(edge)"
+            )
+        }
+        for router in ["Flow.choose", "choose(_:)", "pick", "next"] {
+            let text = schema(router: router)
+            // The edge's rename is `"next"` too, before the router's.
+            let occurrence = router == "next" ? 2 : 1
+            let site = try #require(DiagnosticAnchorTests.site(of: "\"\(router)\"", occurrence: occurrence, in: text))
+            #expect(
+                DiagnosticAnchorTests.refusals(text)
+                    == [.init(message: refusal("router"), line: site.line, column: site.column)],
+                "\(router)"
             )
         }
     }

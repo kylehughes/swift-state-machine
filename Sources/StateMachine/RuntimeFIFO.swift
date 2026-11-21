@@ -14,9 +14,11 @@ nonisolated package struct RuntimeFIFO<Element> {
     package var isEmpty: Bool { head == slots.count }
     /// The number of queued elements.
     package var count: Int { slots.count - head }
-    /// The number of slots the queue stores, taken ones included, for a test of its reclamation.
-    package var storedCount: Int { slots.count }
+    /// The oldest queued element, without taking it.
+    package var first: Element? { head < slots.count ? slots[head] : nil }
     /// How many elements reclaiming taken slots has moved, which tests read as the queue's work.
+    ///
+    /// It saturates instead of overflowing.
     package private(set) var moved = 0
 
     /// Queues `element` after every element already queued.
@@ -31,7 +33,8 @@ nonisolated package struct RuntimeFIFO<Element> {
             slots.removeAll(keepingCapacity: true)
             head = 0
         } else if head >= 16, head * 2 >= slots.count {
-            moved += slots.count - head
+            let (sum, overflow) = moved.addingReportingOverflow(slots.count - head)
+            moved = overflow ? .max : sum
             slots.removeFirst(head)
             head = 0
         }
@@ -45,8 +48,10 @@ extension RuntimeFIFO: Sendable where Element: Sendable {}
 /// whether a delivery of them is in progress.
 ///
 /// An owner queues each report in the same change that makes its decision, before any callout, and
-/// delivers them through one delivery at a time, from the oldest. A call that queues a report while a
-/// delivery is in progress, from inside a handler that delivery runs or, on a `Shared` owner, from
+/// delivers them through one delivery at a time, from the oldest. A delivery takes every report queued
+/// so far at once and keeps delivering until it finds the queue empty, so a `Shared` owner detaches its
+/// backlog in one installation instead of copying it for each report. A call that queues a report while
+/// a delivery is in progress, from inside a handler that delivery runs or, on a `Shared` owner, from
 /// another thread, leaves its report to that delivery, which delivers it after every report queued
 /// before it. No report is therefore ever delivered before one queued earlier.
 nonisolated package struct RuntimeReportQueue<Report> {
@@ -57,25 +62,22 @@ nonisolated package struct RuntimeReportQueue<Report> {
     /// Creates an empty queue.
     package init() {}
 
-    /// Whether no report is queued.
-    package var isEmpty: Bool { reports.isEmpty }
-
     /// Queues `report` after every report already queued.
     package mutating func append(_ report: Report) { reports.append(report) }
 
-    /// Takes the next report for a delivery.
+    /// Takes every queued report, oldest first, for a delivery to make in that order.
     ///
     /// A call that is not `continuing` a delivery begins one only when none is in progress; otherwise
     /// it takes nothing, and the delivery in progress delivers what it would have. A delivery that
     /// finds the queue empty ends.
-    package mutating func take(continuing: Bool) -> Report? {
+    package mutating func takeAll(continuing: Bool) -> RuntimeFIFO<Report>? {
         if !continuing, isDelivering { return nil }
-        guard let report = reports.popFirst() else {
+        guard !reports.isEmpty else {
             isDelivering = false
             return nil
         }
         isDelivering = true
-        return report
+        return exchange(&reports, with: RuntimeFIFO())
     }
 }
 

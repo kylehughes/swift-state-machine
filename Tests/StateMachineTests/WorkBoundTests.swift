@@ -2,6 +2,7 @@ import Combine
 import StateMachine
 import StateMachineUI
 import Testing
+import os
 
 // Work that grows with the number of registrations or reports stays within a bound linear in what each
 // step has to handle, counted by the work the step reports rather than by the time it takes.
@@ -104,6 +105,31 @@ private actor ParkedHost: ActorStateMachineHost {
         for observation in observations { await observation.value }
         let returned = presentation.examinedRegistrationAttempts - examined
         #expect(returned <= count * 40, "\(returned)")
+        #expect(!presentation.isObserving)
+    }
+
+    // The oldest registration call stays parked while many later observations, each of a different
+    // owner, register and fail at once. The index of attempts drops their serials once the removed ones
+    // outnumber the live ones, so its storage stays bounded by the attempts still registering.
+    @Test func aParkedRegistrationDoesNotKeepEveryLaterAttemptsSerial() async throws {
+        let count = 1_024
+        let presentation = SnapshotObservableObject(Mark(revision: 0))
+        let (entered, entering) = AsyncStream<Void>.makeStream()
+        var arrivals = entered.makeAsyncIterator()
+        let parked = ParkedHost(entered: entering)
+        let first = Task { @MainActor in try? await presentation.observe(parked) }
+        _ = await arrivals.next()
+        var retained = 0
+        for _ in 0 ..< count {
+            let host = ParkedHost(entered: entering)
+            await host.release()
+            try? await presentation.observe(host)
+            _ = await arrivals.next()
+            retained = max(retained, presentation.retainedRegistrationSerials)
+        }
+        #expect(retained <= 64, "\(retained)")
+        await parked.release()
+        await first.value
         #expect(!presentation.isObserving)
     }
 
@@ -229,13 +255,157 @@ private actor ParkedHost: ActorStateMachineHost {
                 return
             }
         }
-        let before = engine.admissionWork
+        let edit = try RuntimeState<Int, Int>.prepare(on: engine.snapshot, next: -1)
+        let work = measuringEngineWork {
+            guard case .committed = engine.commit(edit) else {
+                Issue.record("Expected the edit to be admitted")
+                return
+            }
+        }
+        #expect(work <= 8 * count, "\(work)")
+    }
+
+    // A conflict batch: many retained candidates wait for queue capacity, an edit advances the root and
+    // keeps their tickets, and freeing the slot retries each once. Every retry conflicts, and finding
+    // the conflicts, with their projections, takes work linear in the candidates, at either size.
+    @Test(arguments: [128, 512]) func aConflictBatchIsFoundInLinearWork(_ count: Int) throws {
+        typealias Ledger = RuntimeDeliveryLedger<Int, Int, Int, Never>
+        let scope = RuntimeScopeID(kind: 1)
+        var engine = RuntimeState<Int, Int>(
+            0,
+            scopes: [scope],
+            limits: try .init(commits: 1, descriptors: count, executions: count),
+            recording: .commands
+        )
+        let operation = RuntimeOperation(kind: 1, scope: scope, policy: .parallel(count))
+        let starts = (0 ..< count).map { RuntimeState<Int, Int>.Start(operation, descriptor: $0) }
+        guard
+            case .committed = engine.commit(
+                try RuntimeState<Int, Int>.prepare(on: engine.snapshot, next: 0, plan: .init(starts: starts))
+            )
+        else {
+            Issue.record("Expected the starts to be admitted")
+            return
+        }
+        let works = engine.drain(limit: 1).flatMap(\.commands)
+            .compactMap { command -> RuntimeWork<Int>? in
+                if case .start(let work) = command { return work }
+                return nil
+            }
+        try #require(works.count == count)
+        // One queued emission fills the only slot, so every completion's candidate waits for capacity.
+        guard
+            case .committed = engine.commit(
+                try RuntimeState<Int, Int>
+                    .prepare(on: engine.snapshot, next: 1, plan: .init(emissions: [.init(0, position: 0)]))
+            )
+        else {
+            Issue.record("Expected the emission to be admitted")
+            return
+        }
+        var ledger = Ledger()
+        for work in works {
+            guard case .pending(let id) = ledger.retain(work.descriptor, for: work.ticket, in: &engine),
+                case .claimed(let attempt) = ledger.claim(id, in: &engine)
+            else {
+                Issue.record("Expected a retained, claimed outcome")
+                return
+            }
+            let candidate = try RuntimeState<Int, Int>
+                .prepare(
+                    on: attempt.snapshot,
+                    next: attempt.outcome,
+                    requiring: [work.ticket],
+                    plan: .init(
+                        retire: [work.ticket],
+                        emissions: [.init(attempt.outcome, position: 0)],
+                        finishingClaims: [attempt.claim]
+                    )
+                )
+            guard
+                case .pending(_, .waitingForCapacity) = ledger.finish(
+                    attempt,
+                    preparation: .success(candidate),
+                    in: &engine
+                )
+            else {
+                Issue.record("Expected the candidate to wait for capacity")
+                return
+            }
+        }
         guard case .committed = engine.commit(try RuntimeState<Int, Int>.prepare(on: engine.snapshot, next: -1)) else {
             Issue.record("Expected the edit to be admitted")
             return
         }
-        let work = engine.admissionWork - before
-        #expect(work <= 8 * count, "\(work)")
+        _ = engine.drain(limit: 1)
+        var conflicts: [Ledger.Pending] = []
+        let work = measuringEngineWork { conflicts = ledger.retryCapacityConflicts(in: &engine) }
+        #expect(conflicts.count == count)
+        #expect(conflicts.map(\.outcome) == Array(0 ..< count))
+        #expect(conflicts.allSatisfy { $0.lastRejection == .admission(.conflict) })
+        #expect(work <= 4 * count, "\(work)")
+    }
+
+    // One plan starts many works of one unkeyed parallel operation. Preparing it, admitting it, and
+    // transferring its batch each examine every start a bounded number of times, at either size.
+    @Test(arguments: [128, 512]) func aWideParallelStartBatchTakesLinearWork(_ count: Int) throws {
+        let scope = RuntimeScopeID(kind: 1)
+        var engine = RuntimeState<Int, Int>(
+            0,
+            scopes: [scope],
+            limits: try .init(commits: 1, descriptors: count, executions: count)
+        )
+        let operation = RuntimeOperation(kind: 1, scope: scope, policy: .parallel(count))
+        let plan = RuntimeState<Int, Int>.Plan(starts: (0 ..< count).map { .init(operation, descriptor: $0) })
+        var candidate: RuntimeState<Int, Int>.Candidate?
+        let preparation = try measuringEngineWork {
+            candidate = try RuntimeState<Int, Int>.prepare(on: engine.snapshot, next: 1, plan: plan)
+        }
+        let prepared = try #require(candidate)
+        let admission = measuringEngineWork {
+            guard case .committed = engine.commit(prepared) else {
+                Issue.record("Expected the starts to be admitted")
+                return
+            }
+        }
+        var started = 0
+        let transfer = measuringEngineWork {
+            for batch in engine.drain(limit: 1) {
+                for command in batch.commands { if case .start = command { started += 1 } }
+            }
+        }
+        #expect(started == count)
+        #expect(preparation <= 2 * count, "\(preparation)")
+        #expect(admission <= 8 * count, "\(admission)")
+        #expect(transfer <= 4 * count, "\(transfer)")
+        // One more start exceeds the group's limit, which admission still finds.
+        let over = try RuntimeState<Int, Int>
+            .prepare(on: engine.snapshot, next: 2, plan: .init(starts: [.init(operation, descriptor: count)]))
+        guard case .rejected(.operationPolicy(.parallelLimit), _) = engine.commit(over) else {
+            Issue.record("Expected the parallel limit to refuse another start")
+            return
+        }
+    }
+
+    // An owner keeps no count of the work its acceptances took: each commandless edit of an owner with
+    // one active scope reports the same work, however many came before it.
+    @Test func admissionWorkIsReportedPerCallAndNeverAccumulates() throws {
+        let scope = RuntimeScopeID(kind: 1)
+        var engine = RuntimeState<Int, Int>(0, scopes: [scope], limits: try .init(), recording: .commands)
+        var reports: [Int] = []
+        for revision in 1 ... 8 {
+            let edit = try RuntimeState<Int, Int>.prepare(on: engine.snapshot, next: revision)
+            reports.append(
+                measuringEngineWork {
+                    guard case .committed = engine.commit(edit) else {
+                        Issue.record("Expected edit \(revision) to be admitted")
+                        return
+                    }
+                }
+            )
+        }
+        #expect(engine.snapshot.revision == 8)
+        #expect(Set(reports).count == 1, "\(reports)")
     }
 
     // Draining a backlog of batches one at a time moves a number of queued batches linear in the
@@ -274,4 +444,18 @@ private actor ParkedHost: ActorStateMachineHost {
 private final class Box: Sendable {
     let value: Int
     init(_ value: Int) { self.value = value }
+}
+
+/// The work an owner's engine reported while `body` ran on this task.
+private func measuringEngineWork(_ body: () throws -> Void) rethrows -> Int {
+    let total = EngineTotal()
+    try EngineWork.$observe.withValue({ total.add($0) }) { try body() }
+    return total.value
+}
+
+/// A sum of reported work.
+private final class EngineTotal: Sendable {
+    private let sum = OSAllocatedUnfairLock(initialState: 0)
+    func add(_ work: Int) { sum.withLock { $0 += work } }
+    var value: Int { sum.withLock { $0 } }
 }

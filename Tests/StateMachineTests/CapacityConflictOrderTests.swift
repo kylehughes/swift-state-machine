@@ -1,5 +1,6 @@
 import Dispatch
 import StateMachine
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -123,7 +124,7 @@ private func drive(_ workers: Workers, _ work: RuntimeWork<Int>) async -> Outcom
 
 /// Holds a `Shared` owner's batch drainer inside the handler of one emission until the test lets it go.
 private final class EmissionHold: Sendable {
-    private let held = DispatchSemaphore(value: 0)
+    private let held = ThreadGate()
     private let entered = AsyncStream<Void>.makeStream()
     func hold() {
         entered.continuation.yield(())
@@ -133,12 +134,12 @@ private final class EmissionHold: Sendable {
         var iterator = entered.stream.makeAsyncIterator()
         _ = await iterator.next()
     }
-    func proceed() { held.signal() }
+    func proceed() { held.open() }
 }
 
-/// Waits, a turn at a time, until `condition` holds.
+/// Waits, a turn at a time, until `condition` holds or the waiting task is cancelled.
 @MainActor private func eventually(_ condition: @MainActor () async -> Bool) async {
-    while await !condition() { try? await Task.sleep(for: .milliseconds(1)) }
+    while await !condition(), !Task.isCancelled { try? await Task.sleep(for: .milliseconds(1)) }
 }
 
 /// Waits until `count` works have started.
@@ -201,6 +202,8 @@ private func refused(_ pending: [Ledger.Pending]) -> Bool {
     switch kind {
     case .shared:
         let emission = EmissionHold()
+        // A thrown error returns before the step that lets the drainer go.
+        defer { emission.proceed() }
         let owner = RuntimeSharedHost<Int, Int, Outcome, Refusal>(
             0,
             scopes: [RuntimeScopeID(kind: 1)],
@@ -320,11 +323,17 @@ private actor IsolatedBench {
         _ = host.commit(try startingCandidate(on: host.snapshot(isolation: self)), isolation: self)
         await awaitStarts(workers.starts, count: 4)
         await workers.return(1)
-        while !refused(host.pendingCompletions(isolation: self)) { try? await Task.sleep(for: .milliseconds(1)) }
+        while !refused(host.pendingCompletions(isolation: self)), !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
         await workers.return(2)
-        while !retainedB(host.pendingCompletions(isolation: self)) { try? await Task.sleep(for: .milliseconds(1)) }
+        while !retainedB(host.pendingCompletions(isolation: self)), !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
         await workers.return(3)
-        while !waiting(host.pendingCompletions(isolation: self)) { try? await Task.sleep(for: .milliseconds(1)) }
+        while !waiting(host.pendingCompletions(isolation: self)), !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
         _ = host.commit(try ConflictEngine.prepare(on: host.snapshot(isolation: self), next: 3), isolation: self)
         let pending = host.pendingCompletions(isolation: self)
         self.target = try id(pending, target)
@@ -405,6 +414,8 @@ struct CapacityConflictOrderTests {
         let reports = Reports()
         let preparations = Preparations()
         let emission = EmissionHold()
+        // A thrown error returns before the step that lets the drainer go.
+        defer { emission.proceed() }
         let scope = RuntimeScopeID(kind: 1)
         let owner = RuntimeSharedHost<Int, Int, Outcome, Refusal>(
             0,

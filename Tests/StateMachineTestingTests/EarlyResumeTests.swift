@@ -43,6 +43,9 @@ private func onAnotherThread(_ work: @escaping @Sendable () -> Void) {
     @available(macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, *)
     @Test func aWaitAnsweredBeforeItSuspendsTakesTheCallUnderTheQueuesLock() async {
         let steps = Steps()
+        // A wait that returns without suspending, as a cancelled one may, never runs the hook that lets
+        // the other thread stop spinning, so the test lets it go on its way out.
+        defer { steps.waiting.store(true, ordering: .relaxed) }
         // The wait holds before it suspends until another thread's call has answered it.
         let queue = CallQueue<Payload>(beforeSuspending: {
             steps.waiting.store(true, ordering: .relaxed)

@@ -219,12 +219,12 @@ private func logged(_ commands: [GeneratedTransfers.Command]) -> [String] {
         var test = ManualMachineTest(GeneratedScreen.Local())
         try test.send(.measure)
         let works = test.drainFlattenedCommands().compactMap { if case .measure(let work) = $0 { work } else { nil } }
-        guard case .pending(let id, .reconciliationRequired) = test.deliver(.measure(works[0].succeeded(-1))) else {
+        guard case .refused(let id, _, _) = test.deliver(.measure(works[0].succeeded(-1))) else {
             Issue.record("the router did not refuse a negative reading")
             return
         }
         let before = test.history.count
-        guard case .pending(_, .reconciliationRequired) = test.reconcile(id: id) else {
+        guard case .refused = test.reconcile(id: id) else {
             Issue.record("the router admitted a negative reading")
             return
         }

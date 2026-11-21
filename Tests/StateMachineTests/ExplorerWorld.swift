@@ -63,6 +63,8 @@ enum ExplorerInvariant: String, CaseIterable, Sendable {
     case propertyInvalidation = "I51"
     case distinctProjection = "I52"
     case flushBoundary = "I53"
+    case custodyAfterSettlement = "I54"
+    case retainedPayloads = "I55"
 }
 
 struct ExplorerViolation: Sendable, CustomStringConvertible {
@@ -162,6 +164,10 @@ nonisolated final class ExplorerWorld: Sendable {
         var lineageHost = 0
         /// Runs after a client value's destructor on the main thread (the `destroy` site).
         var destroyHook: (@Sendable () -> Void)?
+        /// The value whose next `revision` read runs `revisionHook` (driving: the snapshot's computed
+        /// `revision` witness, armed for the value a host hands over next).
+        var revisionTarget: Int?
+        var revisionHook: (@Sendable () -> Void)?
     }
     let state = OSAllocatedUnfairLock(initialState: State())
     /// Whether every event is also printed as it happens, for replay.
@@ -255,6 +261,17 @@ nonisolated final class ExplorerWorld: Sendable {
     func markEqualOffer(_ id: Int) { state.withLock { $0.values[id]?.equalOffer = true } }
     func useIndependentClocks() { state.withLock { $0.independentClocks = true } }
     func setDestroyHook(_ hook: (@Sendable () -> Void)?) { state.withLock { $0.destroyHook = hook } }
+    func setRevisionHook(_ hook: (@Sendable () -> Void)?) { state.withLock { $0.revisionHook = hook } }
+    /// Makes the next `revision` read of `id` run the revision hook.
+    func setRevisionTarget(_ id: Int?) { state.withLock { $0.revisionTarget = id } }
+    /// The revision hook, once, when `id` is its target.
+    func takeRevisionHook(_ id: Int) -> (@Sendable () -> Void)? {
+        state.withLock { state in
+            guard state.revisionTarget == id else { return nil }
+            state.revisionTarget = nil
+            return state.revisionHook
+        }
+    }
 
     func initialValue() -> ExplorerShot {
         let id = state.withLock { state -> Int in
@@ -495,17 +512,33 @@ nonisolated final class ExplorerWorld: Sendable {
 let explorerScalarRevisions = ProcessInfo.processInfo.environment["EXPLORER_SCALAR_REVISIONS"] == "1"
 
 /// A `Sendable` client value whose destruction the explorer checks.
+///
+/// Its `revision` is a computed witness: the read the revision hook targets runs client code first, on
+/// the main thread (driving `arm(revision, e)`). The harness reads `stamp`. A value can also hold a
+/// strong reference to the presentation until the harness sees it shown, so a presentation that keeps
+/// a value it never shows can never be released.
 nonisolated final class ExplorerShot: StateMachineSnapshot, Sendable, CustomStringConvertible {
     let id: Int
-    let revision: UInt64
+    let stamp: UInt64
     private let world: ExplorerWorld
+    private let captured = OSAllocatedUnfairLock<(any AnyObject & Sendable)?>(initialState: nil)
     init(id: Int, revision: UInt64, world: ExplorerWorld) {
         self.id = id
-        self.revision = revision
+        self.stamp = revision
         self.world = world
     }
-    deinit { world.destroyed(id, revision: revision) }
-    var description: String { "r\(revision)" }
+    deinit { world.destroyed(id, revision: stamp) }
+    var revision: UInt64 {
+        if let hook = world.takeRevisionHook(id), Thread.isMainThread { hook() }
+        return stamp
+    }
+    var description: String { "r\(stamp)" }
+    /// Holds `object` strongly until `releaseCapture()`.
+    func capture(_ object: any AnyObject & Sendable) { captured.withLock { $0 = object } }
+    func releaseCapture() {
+        let object = captured.withLock { exchange(&$0, with: nil) }
+        withExtendedLifetime(object) {}
+    }
 }
 
 /// An object associated with the presentation, so its release marks the presentation's deallocation.

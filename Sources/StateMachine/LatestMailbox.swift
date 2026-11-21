@@ -16,7 +16,7 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
         // Set once a terminal envelope is claimed or the registration is cancelled.
         var closed = false
         var registered = false
-        // Set when the owner released the lease without a terminal envelope pending or claimed.
+        // Set when the owner was released without a terminal envelope pending or claimed.
         var released = false
     }
     private let storage: OSAllocatedUnfairLock<State>

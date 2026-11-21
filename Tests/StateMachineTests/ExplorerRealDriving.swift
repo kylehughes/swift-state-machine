@@ -30,7 +30,8 @@ import StateMachineUI
         let alive: () -> Bool
         let snapshot: () -> GeneratedProfile.Snapshot?
         let isObserving: () -> Bool
-        let send: (GeneratedProfile.Input) -> UInt64?
+        /// The receipt's revision or the typed rejection, or `nil` once the presentation is gone.
+        let send: (GeneratedProfile.Input) -> Result<UInt64, GeneratedProfile.SendRejection>?
         let commit: (consuming Owner.Prepared) -> Owner.CommitResult?
         let close: () -> UInt64?
         let stop: () -> Void
@@ -92,7 +93,14 @@ import StateMachineUI
                 alive: { holder.weak != nil },
                 snapshot: { holder.weak?.snapshot },
                 isObserving: { holder.weak?.isObserving ?? false },
-                send: { input in (try? holder.weak?.send(input))?.revision },
+                send: { input in
+                    guard let presentation = holder.weak else { return nil }
+                    do throws(GeneratedProfile.SendRejection) {
+                        return .success(try presentation.send(input).revision)
+                    } catch {
+                        return .failure(error)
+                    }
+                },
                 commit: { prepared in holder.weak?.commit(prepared) },
                 close: { holder.weak?.close().revision },
                 stop: { holder.weak?.stopObserving() },
@@ -121,7 +129,14 @@ import StateMachineUI
                 alive: { holder.weak != nil },
                 snapshot: { holder.weak?.snapshot },
                 isObserving: { holder.weak?.isObserving ?? false },
-                send: { input in (try? holder.weak?.send(input))?.revision },
+                send: { input in
+                    guard let presentation = holder.weak else { return nil }
+                    do throws(GeneratedProfile.SendRejection) {
+                        return .success(try presentation.send(input).revision)
+                    } catch {
+                        return .failure(error)
+                    }
+                },
                 commit: { prepared in holder.weak?.commit(prepared) },
                 close: { holder.weak?.close().revision },
                 stop: { holder.weak?.stopObserving() },
@@ -231,7 +246,19 @@ import StateMachineUI
         case .apply, .sendCancel:
             let input: GeneratedProfile.Input = event == .apply ? .load(request) : .cancel
             let firedBefore = fired
-            guard let revision = subject.send(input) else { return }
+            let before = (owner: ownerRevision, shown: subject.snapshot()?.revision)
+            guard let result = subject.send(input) else { return }
+            guard case .success(let revision) = result else {
+                // UI-001: a rejected send changes neither the owner nor what the presentation shows.
+                guard !inHook, fired == firedBefore else { return }
+                if ownerRevision != before.owner || subject.snapshot()?.revision != before.shown {
+                    world.violate(
+                        .drivingResult,
+                        "a rejected send moved the owner from r\(before.owner ?? 0) to r\(ownerRevision ?? 0) or the shown snapshot from r\(before.shown ?? 0) to r\(subject.snapshot()?.revision ?? 0)"
+                    )
+                }
+                return
+            }
             receipts.insert(revision)
             // A callback that changed the owner during the call leaves the receipt older than the owner.
             guard !inHook, fired == firedBefore else { return }

@@ -1,7 +1,6 @@
 import SwiftDiagnostics
 import SwiftParser
 import SwiftSyntax
-import SwiftSyntaxMacros
 
 /// The lexical schema consumed by generation; semantic type relationships are compiler witnesses.
 struct Schema {
@@ -246,6 +245,8 @@ struct Schema {
         let declaresThrows: Bool
         /// The witness's call of the authored function with its parameters.
         let call: String
+        /// The contents of the `renamed:` string, with the literal a refusal of it stands at.
+        let renamed: (name: String, literal: Syntax)?
     }
 
     struct Route {
@@ -344,6 +345,8 @@ struct Schema {
     /// The ``tables`` of the schema, computed once when first read; replacing the transitions or the routes
     /// replaces the memo, so a copy that changes them never reads another's.
     var tablesMemo = TablesMemo()
+    /// Where the parser's drafts of the schema, the schema, and every copy of it count their ``work``.
+    var workCounter = WorkCounter()
 
     /// A check the expansion makes, at the schema's scope, of one conclusion the macro drew from a
     /// reading it cannot confirm, or that only the compiler can decide.
@@ -409,18 +412,24 @@ struct Schema {
 
     /// The phases in which the scope with this key stays active, in declaration order: a named
     /// scope's `@Active(in:)` phases or every phase, or the `activeIn:` phases of a private scope.
-    func scopePhases(_ key: String) -> [String] { tables.scopePhases[key] ?? [] }
+    func scopePhases(_ key: String) -> [String] {
+        workCounter.work.scopeLookups += 1
+        return tables.scopePhases[key] ?? []
+    }
 
     /// The identifier of the scope with this key: its position in ``scopeKeys``.
-    func scopeIndex(_ key: String) -> Int? { tables.scopeIndices[key] }
+    func scopeIndex(_ key: String) -> Int? {
+        workCounter.work.scopeLookups += 1
+        return tables.scopeIndices[key]
+    }
 
-    /// Whether `type` names the standard-library protocol `name`: through `Swift.` or `Swift::`, or
-    /// bare where `shadowing` does not declare it, or parenthesized.
-    static func names(_ type: TypeSyntax, _ name: String, shadowing: Set<String> = []) -> Bool {
+    /// Whether `type` names the standard-library protocol `name`: through `Swift.` or `Swift::`,
+    /// bare, or parenthesized.
+    static func names(_ type: TypeSyntax, _ name: String) -> Bool {
         let type = type.unparenthesized
         if let identifier = type.as(IdentifierTypeSyntax.self) {
             guard identifier.name.unescaped == name, identifier.genericArgumentClause == nil else { return false }
-            guard let selector = identifier.moduleSelector else { return !shadowing.contains(name) }
+            guard let selector = identifier.moduleSelector else { return true }
             return selector.moduleName.unescaped == "Swift"
         }
         guard let member = type.as(MemberTypeSyntax.self), member.genericArgumentClause == nil,
@@ -531,8 +540,7 @@ struct Schema {
 
     static func parse(
         _ declaration: EnumDeclSyntax,
-        attribute: AttributeSyntax,
-        context: some MacroExpansionContext
+        attribute: AttributeSyntax
     ) throws -> Schema {
         // Every name the parser compares comes from the declaration, so this makes every comparison exact.
         try Normalization.requireComposedNames(in: declaration)
@@ -554,6 +562,53 @@ struct Schema {
         let parser = SchemaParser()
         return try parser.parse(declaration, attribute: attribute)
     }
+}
+
+extension Schema {
+    /// The work reading, validating, and generating the schema have done, which the regression tests
+    /// bound by the size of the schema rather than by time.
+    ///
+    /// Each count is an integer that the work it counts adds to as it goes, so counting is cheap and
+    /// changes nothing the expansion generates. A count of lookups charges one for each lookup in a
+    /// table, where finding the same entry by a search would charge every entry it compared.
+    struct Work: Equatable {
+        /// The triggers functions found by name, an `Input` case or an operation, each looked up in a table.
+        var triggersFound = 0
+        /// The inputs and operations searches compared to find one by name or effect; only diagnostics search.
+        var triggersScanned = 0
+        /// The ``Tables`` built, and the phases, scopes, operations, events, edges, and routers they read.
+        var tablesBuilt = 0
+        var tabledEntries = 0
+        /// The routers found for an edge, and the candidates, choice types, and shared names looked up for
+        /// a router, each in the ``Tables``.
+        var routerLookups = 0
+        /// The source phase and trigger pairs the preparation dispatches, and the edges those dispatches read.
+        var dispatchedPairs = 0
+        var dispatchedEdges = 0
+        /// The decisions of which names throw different failures, the failures read to identify them, and
+        /// the `PreparationRejection` cases the generator names.
+        var failureAnalyses = 0
+        var failuresRead = 0
+        var rejectionCases = 0
+        /// The check plans built, the checks they were built from, and the witness functions they found by
+        /// what each checks and its message.
+        var plansBuilt = 0
+        var plannedChecks = 0
+        var planLookups = 0
+        /// The setup the joint analysis charged to its budget, and the cells of the masks it then built.
+        var jointSetupCharged = 0
+        var jointSetupBuilt = 0
+        /// The scope identifiers and active phases looked up in the ``Tables``.
+        var scopeLookups = 0
+    }
+
+    /// Holds the ``Work`` that one schema's drafts, the schema, and its copies count together.
+    final class WorkCounter {
+        var work = Work()
+    }
+
+    /// The work counted so far.
+    var work: Work { workCounter.work }
 }
 
 /// The checks the parser collects of the conclusions it draws from readings it cannot confirm, each
@@ -718,6 +773,8 @@ private struct SchemaMessage: DiagnosticMessage {
 private struct SchemaParser {
     /// The syntax of each spelling the parser stores, kept or parsed once, which the schema keeps.
     let spellings = SpellingSyntax()
+    /// Where reading the schema counts its work, which the schema it reads keeps counting.
+    let workCounter = Schema.WorkCounter()
     private func reject(_ node: some SyntaxProtocol, _ message: String) throws -> Never {
         throw DiagnosticsError(diagnostics: [Diagnostic(node: node, message: SchemaMessage(message: message))])
     }
@@ -867,12 +924,14 @@ private struct SchemaParser {
         }
         guard label != "on" else {
             let name = try caseReference(expression, in: "Input")
+            workCounter.work.triggersFound += 1
             guard let input = inputs[name] else {
                 try reject(expression, "'\(name)' is not a declared Input case.")
             }
             return (Schema.Trigger(kind: .input, name: name), input, nil)
         }
         let name = try typeReference(expression)
+        workCounter.work.triggersFound += 1
         guard let operation = operations[name] else {
             try reject(expression, "'\(name)' is not a declared @Operation namespace.")
         }
@@ -898,7 +957,12 @@ private struct SchemaParser {
     private func describe(_ trigger: Schema.Trigger, operations: [Schema.Operation]) -> String {
         guard trigger.kind != .input else { return "on: Input.\(trigger.name)" }
         guard trigger.kind != .direct else { return "a direct call" }
-        let name = operations.first { $0.effect == trigger.name }?.name ?? trigger.name
+        let name =
+            operations.first {
+                workCounter.work.triggersScanned += 1
+                return $0.effect == trigger.name
+            }?
+            .name ?? trigger.name
         return "\(trigger.kind == .success ? "onSuccess" : "onFailure"): \(name).self"
     }
 
@@ -1340,23 +1404,25 @@ private struct SchemaParser {
         return deprecation.map { Self.deprecation($0, of: function, schema: schema) }
     }
 
-    /// Whether `attribute` deprecates a function on every platform and nothing else:
-    /// `@available(*, deprecated)`, with at most one `message:` and one `renamed:` string, in either order.
+    /// Whether `attribute` deprecates a function on every platform and nothing else: `*`, then one bare
+    /// `deprecated` and at most one `message:` and one `renamed:` string, in any order, as Swift reads them.
     private static func deprecates(_ attribute: AttributeSyntax) -> Bool {
         guard attribute.builtInName == "available", case .availability(let arguments)? = attribute.arguments,
-            arguments.count >= 2
+            case .token(let platform)? = arguments.first?.argument, platform.text == "*"
         else { return false }
-        let elements = Array(arguments)
-        guard case .token(let platform) = elements[0].argument, platform.text == "*",
-            case .token(let kind) = elements[1].argument, kind.tokenKind == .keyword(.deprecated)
-        else { return false }
-        var labels: Set<String> = []
-        for element in elements.dropFirst(2) {
-            guard case .availabilityLabeledArgument(let labeled) = element.argument, case .string = labeled.value,
-                ["message", "renamed"].contains(labeled.label.text), labels.insert(labeled.label.text).inserted
-            else { return false }
+        var options: Set<String> = []
+        for element in arguments.dropFirst() {
+            let option: String
+            switch element.argument {
+            case .token(let token) where token.tokenKind == .keyword(.deprecated): option = "deprecated"
+            case .availabilityLabeledArgument(let labeled) where ["message", "renamed"].contains(labeled.label.text):
+                guard case .string = labeled.value else { return false }
+                option = labeled.label.text
+            default: return false
+            }
+            guard options.insert(option).inserted else { return false }
         }
-        return true
+        return options.contains("deprecated")
     }
 
     /// The deprecation of an authored function, with the declaration that generated code calls it through.
@@ -1375,13 +1441,20 @@ private struct SchemaParser {
         }
         let effects = function.signature.effectSpecifiers?.throwsClause?.type.map { " throws(\(spelled($0)))" } ?? ""
         let result = function.signature.returnClause.map { " -> \(spelled($0.type))" } ?? ""
+        let renamed = attribute.arguments?.as(AvailabilityArgumentListSyntax.self)?
+            .lazy.compactMap { $0.argument.as(AvailabilityLabeledArgumentSyntax.self) }
+            .first { $0.label.text == "renamed" }
+            .flatMap { $0.value.as(SimpleStringLiteralExprSyntax.self) }
         return Schema.Deprecation(
             attribute: attribute.trimmedDescription,
             declaration: "static func \(function.name.text)(\(declared.joined(separator: ", ")))\(effects)\(result)",
             declaresThrows: !effects.isEmpty,
             call: "\(function.name.text)("
                 + labels.enumerated().map { index, label in (label.map { "\($0): " } ?? "") + "argument\(index)" }
-                .joined(separator: ", ") + ")"
+                .joined(separator: ", ") + ")",
+            renamed: renamed.map { literal in
+                (literal.segments.map(\.content.text).joined(), Syntax(literal))
+            }
         )
     }
 
@@ -2637,6 +2710,10 @@ private struct SchemaParser {
                 named[edge.from, default: [:]][edge.name] = index
             }
             let byEffect = Dictionary(operations.map { ($0.effect, $0) }, uniquingKeysWith: { first, _ in first })
+            let phaseTypes = Dictionary(
+                phases.map { ($0.caseName, $0.typeName) },
+                uniquingKeysWith: { first, _ in first }
+            )
             for route in routes where !route.choices.isEmpty {
                 let branches = route.choices.compactMap { choice in named[route.from]?[choice].map { transitions[$0] } }
                 let operation = byEffect[route.trigger.name]
@@ -2669,7 +2746,7 @@ private struct SchemaParser {
                         )
                     )
                 }
-                let source = phases.first { $0.caseName == route.from }?.typeName ?? route.from
+                let source = phaseTypes[route.from] ?? route.from
                 for (index, value) in values.enumerated() {
                     if value.router == .sends, value.edges.contains(where: { $0 != .absent }) {
                         checks.require(.sharedAfterRouter(.routerSends), at: value.reference)
@@ -2713,7 +2790,8 @@ private struct SchemaParser {
             valueConformances: [],
             typeNames: typeNames,
             owners: Set(owners),
-            typeScopes: typeScopes
+            typeScopes: typeScopes,
+            workCounter: workCounter
         )
         /// Whether an authored spelling names one of the generated types `spellings` lists, however it
         /// is qualified or spaced.
@@ -2722,16 +2800,24 @@ private struct SchemaParser {
             let key = Schema.relativeKey(self.spellings.type(spelled), schema: schema)
             return spellings.contains { Schema.relativeKey(self.spellings.type($0), schema: schema) == key }
         }
+        // Each function's first edge, and the name of each operation and event by its effect, found once for
+        // every check, so checking many edges with many effects takes time linear in what they list.
+        var edgeIndices: [Int: Int] = [:]
+        for (index, edge) in transitions.enumerated() where edgeIndices[edge.declaration] == nil {
+            edgeIndices[edge.declaration] = index
+        }
+        let operationNames = Dictionary(
+            operations.map { ($0.effect, $0.name) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let eventNames = Dictionary(events.map { ($0.effect, $0.name) }, uniquingKeysWith: { first, _ in first })
         for check in effectChecks {
-            guard let edge = transitions.first(where: { $0.declaration == check.declaration }) else { continue }
+            guard let edge = edgeIndices[check.declaration].map({ transitions[$0] }) else { continue }
             let spellings = draft.effectSpellings(edge)
             let expected = draft.effectType(edge) ?? "Never"
-            let started = edge.starts.compactMap { effect in operations.first { $0.effect == effect }?.name }
-                .joined(separator: ", ")
-            let emitted = edge.emits.compactMap { effect in events.first { $0.effect == effect }?.name }
-                .joined(separator: ", ")
-            let cancelled = edge.cancels.compactMap { effect in operations.first { $0.effect == effect }?.name }
-                .joined(separator: ", ")
+            let started = edge.starts.compactMap { operationNames[$0] }.joined(separator: ", ")
+            let emitted = edge.emits.compactMap { eventNames[$0] }.joined(separator: ", ")
+            let cancelled = edge.cancels.compactMap { operationNames[$0] }.joined(separator: ", ")
             let effects = [
                 started.isEmpty ? nil : "starts \(started)", cancelled.isEmpty ? nil : "cancels \(cancelled)",
                 emitted.isEmpty ? nil : "emits \(emitted)",
@@ -2877,7 +2963,6 @@ private struct SchemaParser {
             owners: owners,
             schema: declaration.name.unescaped,
             phases: phases,
-            operations: operations,
             scopes: typeScopes,
             checks: &checks,
             throwing: throwing
@@ -2902,7 +2987,8 @@ private struct SchemaParser {
             owners: Set(owners),
             typeScopes: typeScopes,
             authoredIdentifiers: authoredIdentifiers,
-            typeChecks: checks.ordered
+            typeChecks: checks.ordered,
+            workCounter: workCounter
         )
         let reserved = Set(reservedSchema.reservedNames)
         // An operation's own types are named for it, so one can take a name the expansion already uses.
@@ -3080,8 +3166,10 @@ private struct SchemaParser {
             typeScopes: typeScopes,
             spellings: spellings,
             authoredIdentifiers: authoredIdentifiers,
-            typeChecks: checks.ordered
+            typeChecks: checks.ordered,
+            workCounter: workCounter
         )
+        try checkRenames(in: schema)
         let findings = schema.graphFindings()
         guard findings.isEmpty else {
             throw DiagnosticsError(
@@ -3100,6 +3188,49 @@ private struct SchemaParser {
         return schema
     }
 
+    /// Refuses a `renamed:` that is anything but the bare name of another edge, or of another router, whose
+    /// generated public methods include one on each wrapper where the deprecated function's method repeats
+    /// the attribute, so that Swift's fix-it at a call of a generated method names a method the caller has.
+    private func checkRenames(in schema: Schema) throws {
+        // The wrappers, `Owned` as false and `Observed` as true, on which each function has its own public
+        // method, by role and name, where overloads pool them, and by deprecated declaration.
+        let wrappers = [false, true].filter { $0 ? schema.generatesObservingOwner : schema.generates(.owned) }
+        let edges = schema.transitions.map { edge in
+            (
+                "edge", edge.name, edge.declaration, edge.deprecation,
+                wrappers.filter { schema.hasOwnMethod(edge, observed: $0) }
+            )
+        }
+        let routers = schema.routes.map { route in
+            (
+                "router", route.name, route.declaration, route.deprecation,
+                wrappers.filter { schema.hasMethod(route, observed: $0) }
+            )
+        }
+        let functions = (edges + routers).sorted { $0.2 < $1.2 }
+        var methods: [String: Set<Bool>] = [:]
+        var marked: [Int: Set<Bool>] = [:]
+        for (role, name, declaration, deprecation, own) in functions {
+            methods["\(role) \(name)", default: []].formUnion(own)
+            if deprecation != nil { marked[declaration, default: []].formUnion(own) }
+        }
+        for (role, name, declaration, deprecation, _) in functions {
+            guard let renamed = deprecation?.renamed else { continue }
+            // Names compare by their bytes, as Swift's do, rather than as equivalent text.
+            let key = "\(role) \(renamed.name)"
+            if renamed.name != name, let index = methods.index(forKey: key),
+                methods[index].key.utf8.elementsEqual(key.utf8),
+                marked[declaration, default: []].isSubset(of: methods[index].value)
+            {
+                continue
+            }
+            try reject(
+                renamed.literal,
+                "Write the bare name of the replacement \(role) in 'renamed:': the generated methods repeat this deprecation as written, so it must name another \(role) that has a generated public method wherever this one has."
+            )
+        }
+    }
+
     /// The declaration to blame for a graph finding, and what to tell its author.
     private func graphDiagnostic(
         _ finding: Schema.GraphFinding,
@@ -3109,7 +3240,13 @@ private struct SchemaParser {
         functions: [Int: FunctionDeclSyntax]
     ) -> (Syntax, String) {
         func type(_ phase: String) -> String { schema.phaseType(phase) }
-        func operation(_ effect: String) -> String { schema.operations.first { $0.effect == effect }?.name ?? effect }
+        func operation(_ effect: String) -> String {
+            schema.operations.first {
+                workCounter.work.triggersScanned += 1
+                return $0.effect == effect
+            }?
+            .name ?? effect
+        }
         switch finding {
         case .unreachablePhase(let phase):
             let entrances = schema.restorationEntrances.isEmpty ? "" : " or a phase @Restoration can restore"
@@ -3387,7 +3524,6 @@ private struct SchemaParser {
         owners: [Schema.Owner],
         schema: String,
         phases: [Schema.Phase],
-        operations: [Schema.Operation],
         scopes typeScopes: LexicalScopes,
         checks: inout TypeChecks,
         throwing: Set<String>

@@ -1,6 +1,7 @@
 import Combine
 import Dispatch
 import StateMachine
+import StateMachineTestSupport
 import Testing
 
 // A shared owner delivers to a publisher on a task of the registration's own, which can still be
@@ -67,7 +68,9 @@ struct PublisherInFlightReleaseTests {
         var owner: SharedHost? = try makeSharedHost()
         let projectedFirst = Signal()
         let reachedSecond = Signal()
-        let hold = DispatchSemaphore(value: 0)
+        let hold = ThreadGate()
+        // A thrown error returns before the step that lets the held callback go.
+        defer { hold.open() }
         let publisher = try #require(owner)
             .snapshotPublisher { snapshot -> UInt64 in
                 if snapshot.revision == 0 { projectedFirst.raise() }
@@ -93,11 +96,11 @@ struct PublisherInFlightReleaseTests {
         let deliveredAtOnce = subscriber.received
         #expect(deliveredAtOnce.isEmpty)
         // A failing run delivered the stale value; releasing the projection lets it end.
-        if !deliveredAtOnce.isEmpty { hold.signal() }
+        if !deliveredAtOnce.isEmpty { hold.open() }
         await completed.wait()
         #expect(subscriber.received.isEmpty)
         #expect(subscriber.completions == 1)
-        if deliveredAtOnce.isEmpty { hold.signal() }
+        if deliveredAtOnce.isEmpty { hold.open() }
         withExtendedLifetime(control) {}
     }
 
@@ -106,7 +109,9 @@ struct PublisherInFlightReleaseTests {
     @Test func releaseDuringTheClosedSnapshotsProjectionKeepsIt() async throws {
         var owner: SharedHost? = try makeSharedHost()
         let reachedClosed = Signal()
-        let hold = DispatchSemaphore(value: 0)
+        let hold = ThreadGate()
+        // A thrown error returns before the step that lets the held callback go.
+        defer { hold.open() }
         let publisher = try #require(owner)
             .snapshotPublisher { snapshot -> UInt64 in
                 if snapshot.isClosed {
@@ -122,7 +127,7 @@ struct PublisherInFlightReleaseTests {
         let subscriber = Unlimited(completed)
         publisher.subscribe(subscriber)
         #expect(subscriber.completions == 0)
-        hold.signal()
+        hold.open()
         await completed.wait()
         #expect(subscriber.received.last == closed.revision)
         #expect(subscriber.completions == 1)
@@ -133,7 +138,9 @@ struct PublisherInFlightReleaseTests {
     @Test func releaseWithTheClosedSnapshotPendingKeepsIt() async throws {
         var owner: SharedHost? = try makeSharedHost()
         let reachedFirst = Signal()
-        let hold = DispatchSemaphore(value: 0)
+        let hold = ThreadGate()
+        // A thrown error returns before the step that lets the held callback go.
+        defer { hold.open() }
         let publisher = try #require(owner)
             .snapshotPublisher { snapshot -> UInt64 in
                 if snapshot.revision == 0 {
@@ -149,7 +156,7 @@ struct PublisherInFlightReleaseTests {
         let subscriber = Unlimited(completed)
         publisher.subscribe(subscriber)
         #expect(subscriber.completions == 0)
-        hold.signal()
+        hold.open()
         await completed.wait()
         #expect(subscriber.received.last == closed.revision)
         #expect(subscriber.completions == 1)
@@ -161,7 +168,9 @@ struct PublisherInFlightReleaseTests {
         var owner: SharedHost? = try makeSharedHost()
         let reachedFirst = Signal()
         let finished = Signal()
-        let hold = DispatchSemaphore(value: 0)
+        let hold = ThreadGate()
+        // A thrown error returns before the step that lets the held callback go.
+        defer { hold.open() }
         let order = OrderLog()
         let token = try #require(owner)
             .subscribe(
@@ -177,7 +186,7 @@ struct PublisherInFlightReleaseTests {
             )
         await reachedFirst.wait()
         owner = nil
-        hold.signal()
+        hold.open()
         await finished.wait()
         #expect(order.entries == ["receive 0", "finish"])
         withExtendedLifetime(token) {}

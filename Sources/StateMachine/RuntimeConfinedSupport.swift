@@ -344,6 +344,31 @@ nonisolated package enum CapacityConflictPause {
     }
 }
 
+/// An observer that a test binds to count the work of an owner's engine: the scopes, operations,
+/// reservations, keys, and commands that one preparation, admission, or transfer examined.
+///
+/// Each call counts its work in a local value and reports it once, as it returns, so no count is kept
+/// in an owner's state. It runs on the calling task. It is `nil` everywhere else.
+nonisolated package enum EngineWork {
+    @TaskLocal package static var observe: (@Sendable (Int) -> Void)?
+
+    /// Reports `work` to the observer bound for the current task, if any.
+    package static func report(_ work: Int) { observe?(work) }
+}
+
+/// An observer that a test binds to count how much of a `Shared` owner's backlog each installation of
+/// its report delivery or its batch drainer detaches.
+///
+/// It runs on the delivering task, or on the batch drainer, which inherits the task-local values of the
+/// task that scheduled it. It is `nil` everywhere else.
+nonisolated package enum BacklogDetachment {
+    @TaskLocal package static var observe: (@Sendable (Int) -> Void)?
+
+    /// Reports to the observer bound for the current task, if any, that an installation detached
+    /// `count` queued reports or batches.
+    package static func detached(_ count: Int) { observe?(count) }
+}
+
 /// A pause that a test inserts into a `Shared` owner's subscriber count, after the count has loaded
 /// one version of the owner's state and before it reads that version's registrations, so other
 /// registrations can be made and ended in between.

@@ -59,6 +59,9 @@ struct ExplorerFamilies: OptionSet, Hashable, Sendable {
     /// Driving Combine: demand requested, and a subscription cancelled, off the main actor through
     /// `receive(on:)`, and a callback inside a presentation publisher's delivery decision (H10, E10).
     static let elsewhere = ExplorerFamilies(rawValue: 8_388_608)
+    /// The raw owner's pending-completion registrations behind a held report handler while further works
+    /// complete (I55).
+    static let images = ExplorerFamilies(rawValue: 16_777_216)
 }
 
 /// What one run of a sequence found.
@@ -463,7 +466,9 @@ struct ExplorerOutcome: Sendable {
                 shown: subject.held() ? subject.snapshot()?.id : nil,
                 world
             )
-            if index > 0, case .arm = sequence[index - 1], fired == firedBefore, subject.held(), pruning {
+            // An arm that the next event did not fire equals the sequence that arms after that event, unless that
+            // event is an arm too: the swapped pair would be pruned the same way, and neither order would run on.
+            if index > 0, case .arm = sequence[index - 1], !event.arms, fired == firedBefore, subject.held(), pruning {
                 redundant = true
                 break
             }
@@ -873,7 +878,9 @@ struct ExplorerOutcome: Sendable {
             .observeIsolated, .isolatedReturn, .observeActor, .actorReturn, .tokenDropAfterJob, .driverParked,
             .driverGo, .releaseInHandOff, .releaseInDelivery, .releaseNotice, .noticeGo, .register, .registerPending,
             .cancelOldest, .cancelNewest, .count, .countDuring, .refuse, .accept, .holdDrainer, .releaseDrainer, .edit,
-            .reconcile, .discard, .returnWork, .onReport, .stage, .subscribeElsewhere, .flushHeld, .createRefusing,
+            .reconcile, .discard, .returnWork, .onReport, .stage, .subscribeElsewhere, .flushHeld, .holdReport,
+            .releaseReport,
+            .completeOthers, .redeliver, .createRefusing,
             .createOccupied, .createClosed, .resume, .refuseNext, .occupy,
             .vacate, .observeUnseeded, .claim, .read, .cancelReader, .sendCancel, .ownerSend, .commitCurrent,
             .saveProposal, .commitSaved, .commitForeign, .copyOwner, .dropCopy, .releaseDrivers, .present, .stopP,
@@ -1498,11 +1505,8 @@ struct ExplorerOutcome: Sendable {
                 }
             }
             for subscriber in subscribers {
-                for value in subscriber.received where !shown.contains(value.id) {
-                    world.violate(
-                        .combineUnshown,
-                        "subscriber \(subscriber.index) received r\(value.revision), which was never shown"
-                    )
+                if let problem = explorerUnshownProblem(subscriber.index, subscriber.received, shown: shown) {
+                    world.violate(.combineUnshown, problem)
                 }
             }
         }

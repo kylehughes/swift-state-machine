@@ -56,6 +56,9 @@ private final class Feed: Sendable {
     @available(macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, *)
     @Test func anElementHandedBeforeTheReadSuspendsIsTakenUnderTheMailboxsLock() async throws {
         let steps = Steps()
+        // A read that returns without suspending, as a cancelled one may, never runs the hook that lets
+        // the other thread stop spinning, so the test lets it go on its way out.
+        defer { steps.waiting.store(true, ordering: .relaxed) }
         let feed = Feed()
         let snapshots = try feed.sequence()
         defer { snapshots.cancel() }
@@ -81,6 +84,9 @@ private final class Feed: Sendable {
     @available(macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, *)
     @Test func aReadHandedAnElementBeforeACancellationStillReturnsIt() async throws {
         let steps = Steps()
+        // A read that returns without suspending never runs the hook that lets the other thread stop
+        // spinning, so the test lets it go on its way out.
+        defer { steps.waiting.store(true, ordering: .relaxed) }
         let feed = Feed()
         let snapshots = try feed.sequence()
         var iterator = snapshots.makeAsyncIterator()

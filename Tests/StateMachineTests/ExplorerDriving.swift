@@ -48,6 +48,8 @@ import StateMachineUI
     private(set) var revisionAtSubscribe: UInt64 = 0
     /// The armable sites of this host (`sites` family).
     var site: (@MainActor (ExplorerHook) -> Void)?
+    /// Runs with each value the host is about to hand to the presentation: a delivery, a seed, a receipt.
+    var handOver: (@MainActor (ExplorerShot) -> Void)?
     /// A registration of the harness's own that holds the slot; it keeps the host alive, as another
     /// client of the owner would, until it ends.
     private var occupant: (token: MainActorSnapshotSubscription, host: ExplorerMainHost)?
@@ -110,6 +112,7 @@ import StateMachineUI
         let receipt = Receipt(snapshot: value())
         lastReceipt = receipt.snapshot.id
         site?(.hostSend)
+        handOver?(receipt.snapshot)
         return receipt
     }
     func commit(_ prepared: consuming Never) {}
@@ -130,9 +133,10 @@ import StateMachineUI
         if let registration, world.registration(registration)?.finished == true { return nil }
         if closed { return nil }
         let next = delivered()
-        let delivered = next.revision
+        let delivered = next.stamp
         revision = delivered
         guard let receive else { return nil }
+        handOver?(next)
         receive(next)
         return delivered
     }
@@ -146,7 +150,7 @@ import StateMachineUI
             refuseNext = false
             let early = world.makeValue(.hostRead(host: index), attempt: world.state.withLock { $0.latestAttempt })
             refusedOffers.insert(early.id)
-            world.note("r\(early.revision) delivered inside a refused subscribe")
+            world.note("r\(early.stamp) delivered inside a refused subscribe")
             receive(early)
             site?(.hostSubscribe)
             throw .capacityExceeded
@@ -159,7 +163,8 @@ import StateMachineUI
         self.onFinish = onFinish
         // A closed owner's state is final: a later registration's seed is its closed snapshot, at its revision.
         let seed = closed ? closedSeed(id) : delivered()
-        revision = seed.revision
+        revision = seed.stamp
+        handOver?(seed)
         receive(seed)
         if closed {
             world.hostEnded(id, finished: true)
@@ -194,7 +199,7 @@ import StateMachineUI
         var value: ExplorerShot? = delivered()
         guard let shot = value else { return }
         let valueID = shot.id
-        revision = shot.revision
+        revision = shot.stamp
         world.deliveredInCancellation(valueID)
         receive(shot)
         _ = consume shot
@@ -208,7 +213,7 @@ import StateMachineUI
         admitting = true
         let closed = delivered()
         admitting = false
-        revision = closed.revision
+        revision = closed.stamp
         // The owner is closed before any callback of its closing runs, as a real owner installs its closed state
         // before it notifies: a registration made from inside one receives the closed snapshot and finishes.
         self.closed = true
@@ -270,6 +275,8 @@ import StateMachineUI
 @MainActor struct ExplorerDrivingSubject {
     let alive: () -> Bool
     let held: () -> Bool
+    /// The presentation, while it is alive, for a client value that captures it.
+    let object: () -> (any AnyObject & Sendable)?
     let snapshot: () -> ExplorerShot?
     let isObserving: () -> Bool?
     let failure: () -> SubscriptionFailure?
@@ -296,6 +303,7 @@ import StateMachineUI
             return ExplorerDrivingSubject(
                 alive: { holder.weak != nil },
                 held: { holder.strong != nil },
+                object: { holder.weak },
                 snapshot: { holder.weak?.snapshot },
                 isObserving: { holder.weak?.isObserving },
                 failure: { holder.weak?.observationFailure },
@@ -340,6 +348,7 @@ import StateMachineUI
             return ExplorerDrivingSubject(
                 alive: { holder.weak != nil },
                 held: { holder.strong != nil },
+                object: { holder.weak },
                 snapshot: { holder.weak?.snapshot },
                 isObserving: { holder.weak?.isObserving },
                 failure: { holder.weak?.observationFailure },
@@ -460,11 +469,21 @@ import StateMachineUI
         unownedHost = nil
         self.subject = subject
         host.onCancel = { [weak self] in self?.fire(.onCancel) }
+        // The snapshot's `revision` witness runs an armed event at the presentation's first read of the
+        // next value handed over. In `chains`, a value a callback's event makes the host hand over holds
+        // the presentation strongly until the harness sees it shown: a presentation that keeps a value it
+        // never shows then can never be released (I15), beside I54's check while it is alive.
+        world.setRevisionHook { [weak self] in MainActor.assumeIsolated { self?.fire(.revision) } }
+        host.handOver = { [weak self] shot in
+            guard let self else { return }
+            if armed.contains(where: { $0.hook == .revision }) { world.setRevisionTarget(shot.id) }
+            if families.contains(.chains), inHook, let presentation = subject.object() { shot.capture(presentation) }
+        }
         if families.contains(.sites) || families.contains(.matrix) {
             host.site = { [weak self] in self?.fire($0) }
             world.setDestroyHook { [weak self] in MainActor.assumeIsolated { self?.fire(.destroy) } }
         }
-        if let shot = subject.snapshot() { lastShown = (shot.id, shot.revision) }
+        if let shot = subject.snapshot() { lastShown = (shot.id, shot.stamp) }
         shown.insert(lastShown.id)
         traces.tracksSnapshot = kind == .drivingObservation
         installed = subject.install({ [weak self] in self?.reported($0) }, { [weak self] in self?.changed($0) })
@@ -486,7 +505,7 @@ import StateMachineUI
             if shot.id != creationRead {
                 world.violate(
                     .drivingResult,
-                    "a refused creation (\(mode)) shows r\(shot.revision), not the snapshot it read at creation"
+                    "a refused creation (\(mode)) shows r\(shot.stamp), not the snapshot it read at creation"
                 )
             }
             if observingNow { world.violate(.drivingResult, "a refused creation (\(mode)) is observing") }
@@ -548,15 +567,20 @@ import StateMachineUI
         if families.contains(.chains), !armUsed, held {
             // Two arms, each of which may arm a hook from inside its callback, the same one included.
             let hooks: [ExplorerHook] = [.report, .change, .onCancel]
-            var inner: [ExplorerEvent] = [.stop, .apply, .deliver(0), .then(.deliver(0), .then(.resume, .stop))]
+            var inner: [ExplorerEvent] = [
+                .stop, .apply, .deliver(0), .then(.deliver(0), .then(.resume, .stop)), .then(.deliver(0), .stop),
+                .then(.apply, .stop),
+            ]
             if explorerHasResume { inner.append(.resume) }
             for hook in hooks {
                 for event in [ExplorerEvent.stop, .resume, .apply] { inner.append(.arm(hook, event)) }
+                // A callback that arms a second callback and then stops before it returns.
+                for event in [ExplorerEvent.resume, .apply] { inner.append(.then(.arm(hook, event), .stop)) }
             }
             for hook in hooks { for event in inner { result.append(.arm(hook, event)) } }
         }
         if families.contains(.reentrant), !families.contains(.chains), !armUsed, held {
-            var hooks: [ExplorerHook] = [.report, .change, .onCancel]
+            var hooks: [ExplorerHook] = [.report, .change, .onCancel, .revision]
             var inner: [ExplorerEvent] = [.stop, .apply, .close, .dropMain, .deliver(0), .finish(0)]
             if families.contains(.combine), subject.subscribe != nil {
                 hooks += [.subscription, .value]
@@ -715,7 +739,7 @@ import StateMachineUI
         case .apply:
             let firedBefore = fired
             guard let receipt = subject.send() else { return }
-            let revision = receipt.revision
+            let revision = receipt.stamp
             // I45: the call returns the receipt the host returned.
             if !inHook, fired == firedBefore, receipt.id != host?.lastReceipt {
                 world.violate(.drivingResult, "send returned r\(revision), not the receipt the host returned")
@@ -734,7 +758,7 @@ import StateMachineUI
             let receipt = subject.close()
             // A receipt check only where no callback made a call of its own meanwhile.
             if !inHook, fired == firedBefore, let receipt, receipt.id != host?.lastReceipt {
-                world.violate(.drivingResult, "close returned r\(receipt.revision), not the receipt the host returned")
+                world.violate(.drivingResult, "close returned r\(receipt.stamp), not the receipt the host returned")
             }
         case .resume:
             resume()
@@ -893,10 +917,10 @@ import StateMachineUI
                     "resumeObserving() returned to an open owner with isObserving \(observingNow) and failure \(subject.failure().map { "\($0)" } ?? "nil")"
                 )
             }
-            if let shot = subject.snapshot(), shot.revision < host.revisionAtSubscribe {
+            if let shot = subject.snapshot(), shot.stamp < host.revisionAtSubscribe {
                 world.violate(
                     .resumeContract,
-                    "resumeObserving() returned showing r\(shot.revision), older than r\(host.revisionAtSubscribe) it registered at"
+                    "resumeObserving() returned showing r\(shot.stamp), older than r\(host.revisionAtSubscribe) it registered at"
                 )
             }
         }
@@ -945,8 +969,7 @@ import StateMachineUI
             return
         }
         guard let shown = subject.snapshot() else { return }
-        if let problem = explorerSeedVisibleProblem(registration: live.id, seed: live.firstOffer, shown: shown.revision)
-        {
+        if let problem = explorerSeedVisibleProblem(registration: live.id, seed: live.firstOffer, shown: shown.stamp) {
             world.violate(.trueBeforeLive, problem)
         }
     }
@@ -1039,11 +1062,13 @@ import StateMachineUI
 
     private func lastShownNow() -> (id: Int, revision: UInt64) {
         guard subject.held(), let shot = subject.snapshot() else { return lastShown }
-        return (shot.id, shot.revision)
+        return (shot.id, shot.stamp)
     }
     private func boundary(topLevel: Bool) {
+        // A value shown no longer holds the presentation.
+        subject.snapshot()?.releaseCapture()
         if subject.held(), let shot = subject.snapshot() {
-            let (id, revision) = (shot.id, shot.revision)
+            let (id, revision) = (shot.id, shot.stamp)
             if id != lastShown.id {
                 if revision < lastShown.revision {
                     world.violate(.revisionRegressed, "r\(revision) shown after r\(lastShown.revision)")
@@ -1133,6 +1158,27 @@ import StateMachineUI
         for _ in 0 ..< 3 { await hop() }
         boundary(topLevel: true)
         if subject.held(), world.violations.isEmpty {
+            // I54: a value delivered to a registration whose cancellation has settled, and never shown, is
+            // released by then, while the presentation is still alive.
+            let current = subject.snapshot()?.id
+            let values = world.state.withLock { state in
+                state.values.compactMap { id, value -> ExplorerSettledValue? in
+                    guard case .delivered(let registration) = value.origin,
+                        let record = state.registrations[registration]
+                    else { return nil }
+                    return ExplorerSettledValue(
+                        id: id,
+                        revision: value.revision,
+                        registration: registration,
+                        settled: record.phase == .freed && !record.withheld,
+                        shown: value.shownAt != nil || id == current,
+                        alive: !value.destroyed
+                    )
+                }
+            }
+            if let problem = explorerSettledCustodyProblem(values) { world.violate(.custodyAfterSettlement, problem) }
+        }
+        if subject.held(), world.violations.isEmpty {
             let settled = await hop(until: { self.finalProblem() == nil }, limit: 30)
             if !settled, let problem = finalProblem() { world.violate(problem.0, problem.1) }
             boundary(topLevel: true)
@@ -1144,12 +1190,8 @@ import StateMachineUI
                 )
             }
             for subscriber in subscribers {
-                for value in subscriber.received where !shown.contains(value.id) && value.revision > lastShown.revision
-                {
-                    world.violate(
-                        .combineUnshown,
-                        "subscriber \(subscriber.index) received r\(value.revision), newer than anything shown"
-                    )
+                if let problem = explorerUnshownProblem(subscriber.index, subscriber.received, shown: shown) {
+                    world.violate(.combineUnshown, problem)
                 }
             }
         }

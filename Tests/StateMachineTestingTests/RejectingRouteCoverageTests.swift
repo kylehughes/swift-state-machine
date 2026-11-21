@@ -23,12 +23,12 @@ nonisolated private enum Payment: Sendable {
     // requiring coverage requires nothing of it.
     @Test func aRouterWithoutCandidatesCountsOnceTheOwnerDeclinesThroughIt() throws {
         var coverage = GraphCoverage(for: Payment.Local.self)
-        #expect(coverage.unexercisedRejectingRoutes.map(\.id) == ["pending.refuse"])
+        #expect(coverage.unexercisedRejectingRouters.map(\.id) == ["pending.refuse"])
         var paid = ManualMachineTest(Payment.Local())
         try paid.send(.pay)
         coverage.record(paid)
         try coverage.requireCoverage()
-        #expect(coverage.unexercisedRejectingRoutes.map(\.id) == ["pending.refuse"])
+        #expect(coverage.unexercisedRejectingRouters.map(\.id) == ["pending.refuse"])
 
         var refused = ManualMachineTest(Payment.Local())
         let reason = try refused.rejection(of: .refund)
@@ -42,7 +42,7 @@ nonisolated private enum Payment: Sendable {
         #expect(rejection.route == "pending.refuse")
         #expect(rejection.snapshot.revision == 0)
         coverage.record(refused)
-        #expect(coverage.unexercisedRejectingRoutes.isEmpty)
+        #expect(coverage.unexercisedRejectingRouters.isEmpty)
         #expect(coverage.rejectingRouteIDs == ["pending.refuse"])
     }
 

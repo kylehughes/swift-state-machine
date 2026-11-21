@@ -175,9 +175,11 @@ extension Schema {
         // Setup builds one operation-wide mask for each phase and for each edge that invalidates a scope,
         // and is charged before it allocates any, so a graph too large to explore falls back at once.
         var spent = (phases.count + transitions.count(where: { !$0.invalidates.isEmpty })) * width
+        workCounter.work.jointSetupCharged += spent
         guard spent <= budget else { return nil }
         let active = operations.map { Set($0.activeIn) }
         let startableIn = phaseNames.map { phase in active.map { $0.contains(phase) } }
+        workCounter.work.jointSetupBuilt += phases.count * operations.count
         let steps = transitions.map { edge -> Step in
             let completes: Int? =
                 edge.trigger.kind == .success || edge.trigger.kind == .failure
@@ -186,6 +188,7 @@ extension Schema {
             let startable = startableIn[to]
             var keeps = startable
             if !edge.invalidates.isEmpty {
+                workCounter.work.jointSetupBuilt += operations.count
                 let invalidated = Set(edge.invalidates)
                 for (index, operation) in operations.enumerated() where keeps[index] {
                     keeps[index] =

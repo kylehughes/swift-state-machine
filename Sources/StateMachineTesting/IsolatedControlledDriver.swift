@@ -341,6 +341,8 @@ nonisolated final class IsolatedCallQueue<Call> {
             waits.cancel(id)
         }
         predicates[id] = nil
+        // A wait that ended unanswered stays queued until the waits that ended so outnumber the live ones.
+        unanswered.reclaim(keeping: predicates.count) { waits.isWaiting($0) }
         guard answered else { return nil }
         return assigned.removeValue(forKey: id)
     }

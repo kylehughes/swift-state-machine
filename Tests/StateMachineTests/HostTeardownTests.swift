@@ -152,7 +152,7 @@ private let attachedOffMain = OSAllocatedUnfairLock(initialState: false)
         #expect(openAtCancellation.withLock { $0 } == false)
     }
 
-    // The same for a shared owner: its registrations' leases go with its state, before the coordinator
+    // The same for a shared owner: its registrations go with its state, before the coordinator
     // that runs its workers cancels them, so a publisher attached from a driver's cancellation handler
     // only finishes.
     @Test func aPublisherAttachedFromADriversCancellationDuringASharedHostsReleaseOnlyFinishes() async throws {
@@ -212,12 +212,12 @@ private final class OwnerSlot<Owner: Sendable>: Sendable {
         let current = owner.withLock { $0 }
         return try body(current!)
     }
-    /// Blocks until a destructor on the worker has dropped the owner.
-    func waitForDrop() { dropped.wait() }
-    /// Lets the worker return, and blocks until it has.
+    /// Blocks until a destructor on the worker has dropped the owner, or the waiting task is cancelled.
+    func waitForDrop() { dropped.waitUnlessCancelled() }
+    /// Lets the worker return, and blocks until it has or the waiting task is cancelled.
     func letWorkerReturn() {
         proceed.signal()
-        returned.wait()
+        returned.waitUnlessCancelled()
     }
     fileprivate func drop() {
         _ = owner.withLock { $0.take() }

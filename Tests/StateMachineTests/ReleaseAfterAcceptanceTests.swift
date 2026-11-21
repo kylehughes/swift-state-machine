@@ -122,6 +122,8 @@ struct ReleaseAfterAcceptanceTests {
     @Test func anActorHostWithALaunchedDriverNotYetStartedTearsDownOnceItHasProcessedItsBatches() async throws {
         let user = try UserID("kyle")
         let hold = DriverHold()
+        // A thrown error returns before the steps that let the held task go.
+        defer { hold.proceed() }
         var host: GeneratedProfile.ActorHost?
         let subscriber = Recorder()
         // Every batch of this owner, and so the launch of its one driver, is processed under the pause.
@@ -149,6 +151,8 @@ struct ReleaseAfterAcceptanceTests {
     @Test func aSharedOwnerWithALaunchedDriverNotYetStartedTearsDownOnceItHasProcessedItsBatches() async throws {
         let user = try UserID("kyle")
         let hold = DriverHold()
+        // A thrown error returns before the steps that let the held task go.
+        defer { hold.proceed() }
         var host: GeneratedProfile.Shared?
         let subscriber = Recorder()
         // Every batch of this owner, and so the launch of its one driver, is processed under the pause.

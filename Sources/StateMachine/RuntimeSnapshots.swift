@@ -390,10 +390,9 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             cancel(token)
         }
         /// Cancels the registration once and, for a main-actor owner, removes it before returning,
-        /// even when a release on another thread came first and queued its removal, and releases
-        /// `discarded` once the registration is removed.
-        @MainActor func releaseOnMainActor(discarding discarded: Element? = nil) {
-            if case .shared(let token)? = take(discarding: discarded) {
+        /// even when a release on another thread came first and queued its removal.
+        @MainActor func releaseOnMainActor() {
+            if case .shared(let token)? = take(discarding: nil) {
                 token.cancel { self.completeRemoval() }
             }
             removeQueued()

@@ -1,5 +1,6 @@
 import Dispatch
 import StateMachine
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -49,7 +50,7 @@ private actor HeldDrivers {
 
 /// Holds the owner's batch drainer inside the handler of one emission until the test lets it go.
 private final class EmissionHold: Sendable {
-    private let held = DispatchSemaphore(value: 0)
+    private let held = ThreadGate()
     private let entered = AsyncStream<Void>.makeStream()
     func hold() {
         entered.continuation.yield(())
@@ -59,7 +60,7 @@ private final class EmissionHold: Sendable {
         var iterator = entered.stream.makeAsyncIterator()
         _ = await iterator.next()
     }
-    func proceed() { held.signal() }
+    func proceed() { held.open() }
 }
 
 @Suite(.serialized, .parksCooperativeThread, .timeLimit(.minutes(1)))
@@ -73,6 +74,8 @@ struct ReconciliationOrderTests {
         let scope = RuntimeScopeID(kind: 1)
         let drivers = HeldDrivers()
         let emission = EmissionHold()
+        // A thrown error returns before the step that lets the drainer go.
+        defer { emission.proceed() }
         let reports = OSAllocatedUnfairLock<[String]>(initialState: [])
         let reentry = OSAllocatedUnfairLock<(@Sendable (OrderHost.Ledger.Pending) -> Void)?>(initialState: nil)
         let owner = OrderHost(

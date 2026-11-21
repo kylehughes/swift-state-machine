@@ -38,6 +38,9 @@ import os
     /// The work the presentation has spent deciding whether a registration waits for earlier ones, and
     /// adding and removing attempts, which tests read.
     package var examinedRegistrationAttempts: Int { core.examinedAttempts }
+    /// The serials and the records of removed serials that the presentation's index of attempts keeps,
+    /// which tests read.
+    package var retainedRegistrationSerials: Int { core.retainedSerials }
     // The subscribers of `presentedSnapshots`. It holds no snapshot.
     private let feed = PresentationFeed<Snapshot>()
 
@@ -353,6 +356,9 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
     /// The work the model has spent deciding whether a registration waits for earlier ones, and adding
     /// and removing attempts, which tests read.
     package var examinedRegistrationAttempts: Int { core.examinedAttempts }
+    /// The serials and the records of removed serials that the presentation's index of attempts keeps,
+    /// which tests read.
+    package var retainedRegistrationSerials: Int { core.retainedSerials }
 
     /// Creates a historical projection without subscribing or starting work.
     public init(_ initial: Snapshot, revision: @escaping @MainActor (Snapshot) -> UInt64) {
@@ -723,6 +729,8 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     /// to decide whether a registration waits and to add and remove attempts, which tests read as that
     /// work.
     var examinedAttempts: Int { registering.examined }
+    /// How many serials, and records of removed ones, the index of attempts keeps.
+    var retainedSerials: Int { registering.retained }
     // The serial of the next attempt or release record, which orders them against the waits.
     private var nextSerial: UInt64 = 0
     // The asynchronous registrations through a closure that wait for earlier attempts to settle before
@@ -1289,8 +1297,7 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     // Installs a registration for the current observation: its handle first, so a callback of the
     // first publication that stops observing cancels it, then the snapshot, then the report, which
     // follows only once that snapshot is published and if the registration is still installed then.
-    private func install(_ registration: PresentationRegistration<Snapshot>, of attempt: PresentationAttempt<Snapshot>)
-    {
+    private func install(_ registration: PresentationRegistration, of attempt: PresentationAttempt<Snapshot>) {
         let observing = attempt.generation
         switch registration {
         case .mainActor(let token):
@@ -1342,7 +1349,7 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     private func hold(
         _ snapshots: SnapshotSequence<Snapshot>,
         current: @escaping @MainActor () -> Snapshot
-    ) -> PresentationRegistration<Snapshot> where Snapshot: Sendable {
+    ) -> PresentationRegistration where Snapshot: Sendable {
         let consumer = snapshots.claim()
         return .sequence(
             HeldSequence(
@@ -2015,8 +2022,8 @@ package struct PendingReports {
     // The position of the oldest report not yet taken.
     private var start = 0
     /// The number of reports that reclaiming storage has moved so far, which tests read as the work that
-    /// reclaiming takes.
-    package private(set) var moved = 0
+    /// reclaiming takes; it saturates instead of overflowing.
+    package private(set) var moved = 0 { didSet { if moved < oldValue { moved = .max } } }
 
     package init() {}
 
@@ -2031,7 +2038,7 @@ package struct PendingReports {
         precondition(start < values.count, "No report is waiting.")
         start += 1
         guard start * 2 >= values.count else { return }
-        moved += values.count - start
+        moved &+= values.count - start
         values.removeFirst(start)
         start = 0
     }
@@ -2148,7 +2155,7 @@ private typealias PresentationRelease = @MainActor (_ done: @escaping @MainActor
 }
 
 /// The registration an owner returned to a presentation.
-@MainActor private enum PresentationRegistration<Snapshot> {
+@MainActor private enum PresentationRegistration {
     case mainActor(MainActorSnapshotSubscription)
     case isolated(IsolatedSnapshotSubscription<MainActor>)
     case sequence(HeldSequence)
@@ -2157,7 +2164,7 @@ private typealias PresentationRelease = @MainActor (_ done: @escaping @MainActor
 /// Registers one attempt of an observation synchronously, given the observation's generation.
 private typealias PresentationRegister<Snapshot> =
     @MainActor (UInt64, PresentationAttempt<Snapshot>) -> Result<
-        PresentationRegistration<Snapshot>, SubscriptionFailure
+        PresentationRegistration, SubscriptionFailure
     >
 
 /// The seed and finish that a main-actor owner delivers to one registration before it returns that
@@ -2239,38 +2246,42 @@ private typealias PresentationRegister<Snapshot> =
     private var throughClosures = SerialOrder()
     private var byOwner: [ObjectIdentifier: SerialOrder] = [:]
     /// The attempts and serial positions examined, and the serials moved, so far.
-    private(set) var examined = 0
+    ///
+    /// It saturates instead of overflowing.
+    private(set) var examined = 0 { didSet { if examined < oldValue { examined = .max } } }
 
     var isEmpty: Bool { members.isEmpty }
+    /// How many serials, and records of removed ones, the orders keep.
+    var retained: Int { ([all, throughClosures] + byOwner.values).reduce(0) { $0 + $1.retained } }
     /// The attempts, in no particular order.
     var attempts: [PresentationAttempt<Snapshot>] { Array(members.values) }
 
     /// Adds an attempt that is not yet a member.
     mutating func insert(_ attempt: PresentationAttempt<Snapshot>) {
         guard members.updateValue(attempt, forKey: ObjectIdentifier(attempt)) == nil else { return }
-        examined += all.insert(attempt.serial)
+        examined &+= all.insert(attempt.serial)
         if let owner = attempt.source {
-            examined += byOwner[owner, default: SerialOrder()].insert(attempt.serial)
+            examined &+= byOwner[owner, default: SerialOrder()].insert(attempt.serial)
         } else {
-            examined += throughClosures.insert(attempt.serial)
+            examined &+= throughClosures.insert(attempt.serial)
         }
     }
     /// Removes an attempt, if it is a member.
     mutating func remove(_ attempt: PresentationAttempt<Snapshot>) {
         guard members.removeValue(forKey: ObjectIdentifier(attempt)) != nil else { return }
-        examined += all.remove(attempt.serial)
+        examined &+= all.remove(attempt.serial)
         if let owner = attempt.source {
-            examined += byOwner[owner]?.remove(attempt.serial) ?? 0
+            examined &+= byOwner[owner]?.remove(attempt.serial) ?? 0
             if byOwner[owner]?.isEmpty == true { byOwner[owner] = nil }
         } else {
-            examined += throughClosures.remove(attempt.serial)
+            examined &+= throughClosures.remove(attempt.serial)
         }
     }
     mutating func removeAll() { self = RegisteringAttempts() }
     /// Whether a member that began before `boundary` holds a slot that a registration with `source`, or
     /// through a closure when `source` is `nil`, must wait for.
     mutating func holdsSlot(below boundary: UInt64, relatedTo source: ObjectIdentifier?) -> Bool {
-        examined += 1
+        examined &+= 1
         guard let source else { return all.first.map { $0 < boundary } ?? false }
         let owner = byOwner[source]?.first ?? .max
         let closure = throughClosures.first ?? .max
@@ -2283,7 +2294,9 @@ private typealias PresentationRegister<Snapshot> =
 /// Serials are made in ascending order, so an insertion normally appends. Removing the first serial
 /// advances a head past it and past every later serial already removed; removing any other serial
 /// records it, to be skipped when the head reaches it. The slots before the head are reclaimed once they
-/// make up half of the storage, so returning attempts oldest first, newest first, or in any order costs
+/// make up half of the storage, and the removed serials after it once they outnumber the serials still
+/// present, so a first serial that stays while many later ones come and go keeps storage proportional
+/// to the serials present. Returning attempts oldest first, newest first, or in any order costs
 /// amortized constant work each, besides a binary search. Each operation reports the positions it
 /// examined and the elements it moved.
 private struct SerialOrder {
@@ -2294,6 +2307,8 @@ private struct SerialOrder {
 
     var first: UInt64? { head < serials.count ? serials[head] : nil }
     var isEmpty: Bool { head == serials.count }
+    /// How many serials, and records of removed ones, the order keeps.
+    var retained: Int { serials.count + removed.count }
 
     /// Inserts `serial` in order and returns how many positions it examined and elements it moved.
     mutating func insert(_ serial: UInt64) -> Int {
@@ -2312,8 +2327,10 @@ private struct SerialOrder {
         guard head < serials.count else { return 1 }
         guard serials[head] == serial else {
             let (index, examined) = position(of: serial)
-            if index < serials.count, serials[index] == serial { removed.insert(serial) }
-            return examined
+            guard index < serials.count, serials[index] == serial, removed.insert(serial).inserted else {
+                return examined
+            }
+            return examined + compact()
         }
         head += 1
         var examined = 1
@@ -2322,6 +2339,16 @@ private struct SerialOrder {
             examined += 1
         }
         return examined + reclaim()
+    }
+    // Drops the removed serials once they outnumber the serials still present, and returns how many
+    // elements that moved.
+    private mutating func compact() -> Int {
+        let stored = serials.count - head
+        guard removed.count >= 16, removed.count * 2 >= stored else { return 0 }
+        serials = serials[head...].filter { !removed.contains($0) }
+        head = 0
+        removed = []
+        return stored
     }
     // Reclaims the slots before the head once they make up half of the storage, and returns how many
     // elements that moved.

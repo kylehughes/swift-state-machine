@@ -1266,6 +1266,16 @@
     "scope": "a deprecated restoration function deprecates the restoring initializers and resets with its message, and its deprecation cannot rename them"
   },
   {
+    "id": "GMT-deprecation-options",
+    "pattern": "'post\\(\\)' is deprecated: Use submit\\.",
+    "scope": "a deprecation's options after * are read by kind in any order, as Swift reads them, and the generated methods repeat the attribute as written"
+  },
+  {
+    "id": "GMT-deprecated-rename-target",
+    "pattern": "Write the bare name of the replacement edge in 'renamed:'",
+    "scope": "a rename is accepted only as the bare name of another edge with a generated method wherever the deprecated one has, so the fix-it's call compiles; a qualified or labelled target is refused at its string"
+  },
+  {
     "id": "GMT-schema-named-value",
     "pattern": "The schema name is reserved or shadowed by a direct member; choose a distinct domain name",
     "scope": "a value or method named like the schema hides nothing generated code looks up as a type, and a type of that name directly inside the schema is refused"
@@ -1274,6 +1284,11 @@
     "id": "GMT-alias-member-access",
     "pattern": "Declare 'Hidden' public: the public schema 'Flow' generates public members that name it",
     "scope": "a member named through a namespace alias needs the public schema's access, as it does through the type's own name"
+  },
+  {
+    "id": "GMT-specialized-alias-access",
+    "pattern": "Declare 'Hidden' public: the public schema 'Flow' generates public members that name it",
+    "scope": "a member of a generic type named through a specialized alias or a specialization written in place needs the public schema's access, since the arguments do not change which declaration it is"
   },
   {
     "id": "GMT-sendable-helper",

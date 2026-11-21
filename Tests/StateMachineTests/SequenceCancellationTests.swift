@@ -45,9 +45,12 @@ private struct Signal: Sendable {
 
     init() { (stream, continuation) = AsyncStream<Void>.makeStream() }
     func raise() { continuation.yield(()) }
-    func wait() async {
+    /// Returns once the event is raised, or at once when the waiting task is cancelled.
+    ///
+    /// - Returns: Whether the event was raised.
+    @discardableResult func wait() async -> Bool {
         var iterator = stream.makeAsyncIterator()
-        _ = await iterator.next()
+        return await iterator.next() != nil
     }
 }
 
@@ -249,7 +252,7 @@ private final class Registry<Element: Sendable>: Sendable {
 private final class Raised: Sendable {
     private let signal = Signal()
     func raise() { signal.raise() }
-    func wait() async { await signal.wait() }
+    @discardableResult func wait() async -> Bool { await signal.wait() }
 }
 
 @Suite(.timeLimit(.minutes(1))) struct CancellationCapacityTests {
@@ -274,12 +277,7 @@ private final class Raised: Sendable {
         let snapshots = try host.snapshots { $0.revision }
         // The main actor waits while another thread cancels, so the removal that cancellation queues
         // on it has not run when the main actor cancels.
-        let cancelled = DispatchSemaphore(value: 0)
-        runOnOwnThread {
-            snapshots.cancel()
-            cancelled.signal()
-        }
-        cancelled.wait()
+        guard runOnOwnThreadAndWait({ snapshots.cancel() }) else { return }
         #expect(host.registrations == 1)
         snapshots.cancel()
         #expect(host.registrations == 0)
@@ -289,27 +287,31 @@ private final class Raised: Sendable {
     // The first cancellation is still inside the token's cancellation when a second one finds the
     // sequence released and returns. The registration's gate, which a managed owner's admission
     // reads, closed before the first recorded the release, so it is closed when the second returns.
+    //
+    // A cancelled test lets the first cancellation go on its way out: its wait for the first to enter
+    // ends at once, and it does not cancel the sequence itself, which would make it the first canceller.
     @Test func aCancellationThatFindsTheSequenceReleasedReturnsAfterItsGateClosed() async throws {
         let gate = RuntimeRegistrationGate()
         let registry = Registry<Int>()
         let entered = Raised()
-        let proceed = DispatchSemaphore(value: 0)
+        let proceed = ThreadGate()
+        defer { proceed.open() }
         let finished = Raised()
         let snapshots = try SnapshotSequence<Int>({ $0 }) { receive, finish in
             registry.keep(receive, finish)
             return SnapshotSubscription(gate: gate) {
                 entered.raise()
-                proceed.wait()
+                proceed.waitUnlessCancelled()
             }
         }
         runOnOwnThread {
             snapshots.cancel()
             finished.raise()
         }
-        await entered.wait()
+        guard await entered.wait() else { return }
         snapshots.cancel()
         #expect(!gate.isOpen)
-        proceed.signal()
+        proceed.open()
         await finished.wait()
     }
 

@@ -363,15 +363,16 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
     /// which enters the initial phase, and with a dashed edge labeled `restored` each other restorable
     /// phase. Terminal phases have a double outline, and each edge is labeled with its name. A label
     /// escapes a quotation mark, a backslash, and `&`, one Unicode scalar at a time, and writes every line
-    /// ending as a line break, so each renders as itself. Lines follow declaration order, so equal graphs
-    /// render identical text.
+    /// ending as a line break, so each renders as itself. The graph's identifier, the graph's name, is
+    /// not a label: it is a quoted DOT identifier, whose only escape is `\"`, so `R&D` stays `R&D` and a
+    /// backslash stays a backslash. Lines follow declaration order, so equal graphs render identical text.
     public func dot() -> String {
         // Every phase is a node with an internal identifier, `p0`, `p1`, and so on, labeled with its
         // name, so no name can be read as DOT syntax or meet the entry point, whose identifier is
         // `entry`, which no phase's identifier can be.
         let states = DiagramStates(self)
         let terminals = Set(terminal)
-        var lines = ["digraph \(Self.dotString(name)) {", "    entry [shape=point];"]
+        var lines = ["digraph \(Self.dotID(name)) {", "    entry [shape=point];"]
         for (phase, state) in states.declared {
             let outline = terminals.contains(phase) ? ", peripheries=2" : ""
             lines.append("    \(state) [label=\(Self.dotString(phase))\(outline)];")
@@ -405,6 +406,28 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
             }
         }
         return label
+    }
+
+    /// A quoted DOT identifier of `text`, which DOT reads as `text` itself.
+    ///
+    /// In a quoted identifier, `\"` is the only escape and a backslash followed by a line feed is a line
+    /// continuation, which DOT removes; every other scalar, a backslash included, stands for itself, and
+    /// entities and `\n` mean something only in a label. So each quotation mark is escaped, and a
+    /// backslash that ends the text or precedes a line feed, which DOT would otherwise read as escaping
+    /// the closing quotation mark or as a continuation, is followed by a continuation of its own.
+    private static func dotID(_ text: String) -> String {
+        var quoted = "\""
+        var scalars = text.unicodeScalars.makeIterator()
+        var pending = scalars.next()
+        while let scalar = pending {
+            pending = scalars.next()
+            switch scalar {
+            case "\"": quoted += "\\\""
+            case "\\" where pending == nil || pending == "\n": quoted += "\\\\\n"
+            default: quoted.unicodeScalars.append(scalar)
+            }
+        }
+        return quoted + "\""
     }
 
     /// A quoted DOT string of `text`, which Graphviz reads, and renders as a label, as `text` itself.

@@ -1,3 +1,4 @@
+import Combine
 import Dispatch
 import Foundation
 import StateMachineTestSupport
@@ -26,6 +27,56 @@ struct ExplorerSelfCheck: Sendable {
 func explorerSeedVisibleProblem(registration: Int, seed: UInt64?, shown: UInt64) -> String? {
     guard let seed, shown < seed else { return nil }
     return "true reported for registration #\(registration) while r\(shown) is shown, older than its seed r\(seed)"
+}
+
+/// A client value delivered to a registration, as I54 reads it at quiescence.
+struct ExplorerSettledValue: Sendable {
+    let id: Int
+    let revision: UInt64
+    let registration: Int
+    /// The registration's cancellation has returned and its slot is free.
+    let settled: Bool
+    /// The presentation showed it, or shows it now.
+    let shown: Bool
+    let alive: Bool
+}
+
+/// I54 on a driving presentation: why a value of a settled registration is still alive, or `nil`.
+///
+/// Once a registration's cancellation has settled, the presentation holds none of its values that it never
+/// showed: stopping discards an unannounced value, so keeping one is custody without a purpose, and a
+/// value that captures the presentation would keep both alive.
+func explorerSettledCustodyProblem(_ values: [ExplorerSettledValue]) -> String? {
+    let kept = values.filter { $0.settled && !$0.shown && $0.alive }.sorted { $0.id < $1.id }
+    guard let first = kept.first else { return nil }
+    return
+        "r\(first.revision), never shown, of registration #\(first.registration) is still alive after its cancellation settled"
+}
+
+/// I55: why `live` payloads of completed works exceed what the owner may keep for its pending-completion
+/// registrations, `bound`, or `nil`.
+func explorerRetainedPayloadProblem(live: Int, bound: Int) -> String? {
+    live > bound ? "\(live) payloads of completed works are alive, more than the \(bound) the live work allows" : nil
+}
+
+/// I53: why `flush(through:)` of the held batch's receipt broke its boundary, or `nil`. `result` is what
+/// the flush returned so far (`nil` while it runs); `held` says whether the batch's handler is still held.
+func explorerFlushProblem(held: Bool, result: Bool?) -> String? {
+    if held {
+        return result == nil
+            ? nil : "flush(through:) of the held batch's receipt returned while its emission handler is held"
+    }
+    return result == true
+        ? nil : "flush(through:) of the held batch's receipt did not return true once the batch was processed"
+}
+
+/// I23 at quiescence: why a subscriber received a value the presentation never showed, or `nil`.
+///
+/// A presentation publishes exactly what it shows, so a received value is one the harness saw shown, whatever
+/// its revision.
+func explorerUnshownProblem(_ subscriber: Int, _ received: [(id: Int, revision: UInt64)], shown: Set<Int>) -> String? {
+    guard let value = received.first(where: { !shown.contains($0.id) }) else { return nil }
+    return "subscriber \(subscriber) received r\(value.revision), which was never shown"
 }
 
 /// I10 on a driving presentation: why a newly shown value belongs to an observation that ended first.
@@ -328,6 +379,242 @@ func explorerIngressMembershipProblem(id: Int, revision: UInt64, staged: Set<Int
     }
     check(.presentationTurnBound, "33 elements of one registration in one turn", planted: trips == 1, control: none)
 
+    // A stopped driving presentation that keeps a value of a settled registration it never showed.
+    func settled(alive: Bool, shown: Bool, settled: Bool) -> ExplorerSettledValue {
+        ExplorerSettledValue(id: 3, revision: 30, registration: 1, settled: settled, shown: shown, alive: alive)
+    }
+    check(
+        .custodyAfterSettlement,
+        "an unshown value of a stopped registration kept after its cancellation settled",
+        planted: explorerSettledCustodyProblem([settled(alive: true, shown: false, settled: true)]) != nil,
+        control: explorerSettledCustodyProblem([
+            settled(alive: false, shown: false, settled: true), settled(alive: true, shown: true, settled: true),
+            settled(alive: true, shown: false, settled: false),
+        ]) == nil
+    )
+
+    // Completed payloads kept behind a held report handler beyond one unread and one handed collection per
+    // pending registration.
+    check(
+        .retainedPayloads,
+        "every completed payload kept behind a held handler for one pending registration",
+        planted: explorerRetainedPayloadProblem(live: 4, bound: 2) != nil,
+        control: explorerRetainedPayloadProblem(live: 2, bound: 2) == nil
+    )
+
+    // Two works' reports naming one retained entry.
+    check(
+        .attemptOrder,
+        "reports of two works naming one retained entry",
+        planted: reports { log in
+            for work in [1, 2] {
+                log.offered(work: work, serial: work)
+                _ = log.prepare(work: work, accepts: false, model: 0)
+                log.left()
+            }
+            _ = log.record(work: 2, attempt: 1, serial: 2, entry: 7, requiresReconciliation: true, reason: .preparation)
+            _ = log.record(work: 1, attempt: 1, serial: 1, entry: 7, requiresReconciliation: true, reason: .preparation)
+        },
+        control: !reports { log in
+            for work in [1, 2] {
+                log.offered(work: work, serial: work)
+                _ = log.prepare(work: work, accepts: false, model: 0)
+                log.left()
+            }
+            _ = log.record(work: 2, attempt: 1, serial: 2, entry: 7, requiresReconciliation: true, reason: .preparation)
+            _ = log.record(work: 1, attempt: 1, serial: 1, entry: 8, requiresReconciliation: true, reason: .preparation)
+        }
+    )
+
+    // A flush that returns while the batch it waits for is held, or never returns once it is processed.
+    check(
+        .flushBoundary,
+        "flush(through:) returning while its batch's handler is held, and failing to return after it",
+        planted: explorerFlushProblem(held: true, result: true) != nil
+            && explorerFlushProblem(held: false, result: nil) != nil,
+        control: explorerFlushProblem(held: true, result: nil) == nil
+            && explorerFlushProblem(held: false, result: true) == nil
+    )
+
+    // A subscriber given a value the presentation never showed, below the one it shows.
+    check(
+        .combineUnshown,
+        "a subscriber receives an unshown value older than the snapshot shown",
+        planted: explorerUnshownProblem(0, [(1, 10), (4, 15), (2, 20)], shown: [1, 2]) != nil,
+        control: explorerUnshownProblem(0, [(1, 10), (2, 20)], shown: [1, 2]) == nil
+    )
+
+    // Combine protocol and delivery: a second subscription, a value before its announcement, a value beyond
+    // demand, a duplicate, and a value after cancellation.
+    func subscriber(_ world: ExplorerWorld, unlimited: Bool = false) -> ExplorerSubscriber {
+        let made = ExplorerSubscriber(index: 0, unlimited: unlimited, shownAtAttach: 0, attachedAfterRelease: false)
+        made.world = world
+        made.shownAtAttachID = nil
+        return made
+    }
+    func flagged(_ invariant: ExplorerInvariant, _ steps: (ExplorerWorld) -> Void) -> Bool {
+        let world = ExplorerWorld()
+        steps(world)
+        return world.violations.contains { $0.invariant == invariant }
+    }
+    check(
+        .subscriptionProtocol,
+        "a subscriber given two subscriptions",
+        planted: flagged(.subscriptionProtocol) { world in
+            let twice = subscriber(world)
+            twice.receive(subscription: ExplorerNullSubscription())
+            twice.receive(subscription: ExplorerNullSubscription())
+        },
+        control: !flagged(.subscriptionProtocol) { world in
+            let once = subscriber(world)
+            once.receive(subscription: ExplorerNullSubscription())
+            once.checkHandshake()
+        }
+    )
+    check(
+        .callbackOrder,
+        "a newly published value delivered before objectWillChange announced it",
+        planted: flagged(.callbackOrder) { world in
+            let early = subscriber(world, unlimited: true)
+            early.willChangeAtLastNew = 3
+            explorerCheckOrder(
+                world,
+                early,
+                world.makeValue(.applied(attempt: nil), attempt: nil),
+                willChange: 3,
+                shownNow: nil,
+                shownBefore: false
+            )
+        },
+        control: !flagged(.callbackOrder) { world in
+            let timely = subscriber(world, unlimited: true)
+            timely.willChangeAtLastNew = 3
+            explorerCheckOrder(
+                world,
+                timely,
+                world.makeValue(.applied(attempt: nil), attempt: nil),
+                willChange: 4,
+                shownNow: nil,
+                shownBefore: false
+            )
+        }
+    )
+    func delivering(
+        _ world: ExplorerWorld,
+        _ count: Int,
+        demand: Int,
+        cancelAfter: Int? = nil,
+        repeatLast: Bool = false
+    ) {
+        let limited = subscriber(world)
+        limited.receive(subscription: ExplorerNullSubscription())
+        limited.demand = demand
+        var values: [ExplorerShot] = []
+        for index in 0 ..< count {
+            if index == cancelAfter { limited.cancel() }
+            let value =
+                repeatLast && index > 0 ? values[index - 1] : world.makeValue(.applied(attempt: nil), attempt: nil)
+            values.append(value)
+            explorerCheckReceived(world, limited, value)
+        }
+    }
+    check(
+        .combineDemand,
+        "a limited subscriber given more values than it requested",
+        planted: flagged(.combineDemand) { delivering($0, 2, demand: 1) },
+        control: !flagged(.combineDemand) { delivering($0, 2, demand: 2) }
+    )
+    check(
+        .combineDuplicate,
+        "a subscriber given the same value twice",
+        planted: flagged(.combineDuplicate) { delivering($0, 2, demand: 2, repeatLast: true) },
+        control: !flagged(.combineDuplicate) { delivering($0, 2, demand: 2) }
+    )
+    check(
+        .combineAfterCancel,
+        "a value after the subscriber's cancellation returned",
+        planted: flagged(.combineAfterCancel) { delivering($0, 2, demand: 2, cancelAfter: 1) },
+        control: !flagged(.combineAfterCancel) { delivering($0, 1, demand: 2, cancelAfter: 1) }
+    )
+
+    // A value of an earlier observation published after one of a later observation, and a regression within one.
+    let order = ExplorerWorld()
+    let older = order.makeValue(.delivered(registration: 1), attempt: 1)
+    let newer = order.makeValue(.delivered(registration: 2), attempt: 2)
+    let applied = order.makeValue(.applied(attempt: 2), attempt: 2)
+    check(
+        .revisionRegressed,
+        "a value of an older observation, or a lower revision within one, published after a newer one",
+        planted: order.publicationProblem(next: older.id, previous: newer.id, strict: true) != nil
+            && order.publicationProblem(next: newer.id, previous: applied.id, strict: true) != nil,
+        control: order.publicationProblem(next: newer.id, previous: older.id, strict: true) == nil
+            && order.publicationProblem(next: applied.id, previous: newer.id, strict: true) == nil
+    )
+
+    // A subscriber's first value older than the snapshot shown when it attached; a value after the release.
+    check(
+        .combineSeed,
+        "a subscriber's first value older than the snapshot shown at its attach",
+        planted: flagged(.combineSeed) { world in
+            let first = world.makeValue(.applied(attempt: nil), attempt: nil)
+            let shown = world.makeValue(.applied(attempt: nil), attempt: nil)
+            let late = subscriber(world, unlimited: true)
+            late.shownAtAttachID = shown.id
+            explorerCheckReceived(world, late, first)
+        },
+        control: !flagged(.combineSeed) { world in
+            let shown = world.makeValue(.applied(attempt: nil), attempt: nil)
+            let timely = subscriber(world, unlimited: true)
+            timely.shownAtAttachID = shown.id
+            explorerCheckReceived(world, timely, shown)
+        }
+    )
+    check(
+        .publishedAfterRelease,
+        "a subscriber given a value after the presentation was deallocated",
+        planted: flagged(.publishedAfterRelease) { world in
+            world.state.withLock { $0.presentationGone = true }
+            explorerCheckReceived(world, subscriber(world, unlimited: true), world.makeValue(.initial, attempt: nil))
+        },
+        control: !flagged(.publishedAfterRelease) { world in
+            explorerCheckReceived(world, subscriber(world, unlimited: true), world.makeValue(.initial, attempt: nil))
+        }
+    )
+    check(
+        .combineFinish,
+        "a subscriber attached after the release given a value",
+        planted: flagged(.combineFinish) { world in
+            let late = ExplorerSubscriber(index: 0, unlimited: true, shownAtAttach: 0, attachedAfterRelease: true)
+            late.world = world
+            explorerCheckReceived(world, late, world.makeValue(.initial, attempt: nil))
+        },
+        control: !flagged(.combineFinish) { world in
+            explorerCheckReceived(world, subscriber(world, unlimited: true), world.makeValue(.initial, attempt: nil))
+        }
+    )
+
+    // An unread element of a let-go registration destroyed while its slot is still occupied.
+    func unread(freeFirst: Bool) -> Bool {
+        flagged(.unreadBeforeSlotFree) { world in
+            world.setContext(.call(attempt: 1))
+            guard let registration = world.admit(host: 0) else { return }
+            world.setContext(.spontaneous)
+            var element: ExplorerShot? = world.makeValue(.delivered(registration: registration), attempt: 1)
+            if let id = element?.id { world.offered(id, into: registration) }
+            world.letGo([1])
+            if freeFirst { world.freed(registration) }
+            _ = element
+            element = nil
+            if !freeFirst { world.freed(registration) }
+        }
+    }
+    check(
+        .unreadBeforeSlotFree,
+        "an unread element of a let-go registration released before its slot is free",
+        planted: unread(freeFirst: false),
+        control: !unread(freeFirst: true)
+    )
+
     // An invented ingress delivery.
     check(
         .ingressDelivery,
@@ -336,6 +623,12 @@ func explorerIngressMembershipProblem(id: Int, revision: UInt64, staged: Set<Int
         control: explorerIngressMembershipProblem(id: 2, revision: 20, staged: [1, 2]) == nil
     )
     return checks
+}
+
+/// A subscription that does nothing, for the self-check's subscribers.
+final class ExplorerNullSubscription: Subscription {
+    func request(_ demand: Subscribers.Demand) {}
+    func cancel() {}
 }
 
 /// Holds one client value until a worker releases it, the planted off-main release of the self-check.

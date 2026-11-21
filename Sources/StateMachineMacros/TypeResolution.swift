@@ -496,6 +496,9 @@ struct LexicalScopes {
         var members: [Int: Member] = [:]
         /// The declaration of each of ``members``, by the number of its name.
         var declarations: [Int: SyntaxIdentifier] = [:]
+        /// The scope of each generic type's members, by the number of its name, which readings never look
+        /// into and only ``namedDeclarations(_:in:)`` reads.
+        var genericMembers: [Int: Int] = [:]
     }
 
     /// The identity of an alias declaration: its scope and the number of its name.
@@ -574,6 +577,10 @@ struct LexicalScopes {
         var flattened: Int
         /// The identifier tokens whose names were looked up, each once however many readings reach it.
         var named: Int
+        /// The characters of names hashed to number them: a name a scope declares or a key holds where it
+        /// is numbered, and the name each looked-up token spells, so a long name shared by many keys is
+        /// hashed a constant number of times.
+        var keyed: Int
     }
 
     var work: Work {
@@ -586,7 +593,8 @@ struct LexicalScopes {
             hashed: cache.hashedArguments,
             walked: cache.walkedNodes,
             flattened: cache.flattenedMembers,
-            named: cache.namedTokens
+            named: cache.namedTokens,
+            keyed: cache.hashedNameCharacters
         )
     }
 
@@ -606,6 +614,7 @@ struct LexicalScopes {
 
     /// The number of `name`, numbering it when it has none.
     private mutating func number(_ name: String) -> Int {
+        cache.hashes(name)
         if let number = nameNumbers[name] { return number }
         nameNumbers[name] = names.count
         names.append(name)
@@ -614,7 +623,10 @@ struct LexicalScopes {
     }
 
     /// The number of a name some scope declares or some generic alias takes, or `nil` for any other.
-    private func number(of name: String) -> Int? { nameNumbers[name] }
+    private func number(of name: String) -> Int? {
+        cache.hashes(name)
+        return nameNumbers[name]
+    }
 
     /// The number of the name an identifier token looks up, or `nil` when no scope declares it and no
     /// generic alias takes it, found once for each token however often readings reach it, so a long name
@@ -663,31 +675,40 @@ struct LexicalScopes {
                 scopes[scope].declarations[name] = named.id
                 continue
             }
-            let nominal: (name: String, generic: Bool, block: MemberBlockSyntax, attributes: AttributeListSyntax)?
+            typealias Nominal = (
+                name: String, generic: GenericParameterClauseSyntax?, block: MemberBlockSyntax,
+                attributes: AttributeListSyntax
+            )
+            let nominal: Nominal?
             if let type = declaration.as(StructDeclSyntax.self) {
-                nominal = (type.name.lookupName, type.genericParameterClause != nil, type.memberBlock, type.attributes)
+                nominal = (type.name.lookupName, type.genericParameterClause, type.memberBlock, type.attributes)
             } else if let type = declaration.as(EnumDeclSyntax.self) {
-                nominal = (type.name.lookupName, type.genericParameterClause != nil, type.memberBlock, type.attributes)
+                nominal = (type.name.lookupName, type.genericParameterClause, type.memberBlock, type.attributes)
             } else if let type = declaration.as(ClassDeclSyntax.self) {
-                nominal = (type.name.lookupName, type.genericParameterClause != nil, type.memberBlock, type.attributes)
+                nominal = (type.name.lookupName, type.genericParameterClause, type.memberBlock, type.attributes)
             } else if let type = declaration.as(ActorDeclSyntax.self) {
-                nominal = (type.name.lookupName, type.genericParameterClause != nil, type.memberBlock, type.attributes)
+                nominal = (type.name.lookupName, type.genericParameterClause, type.memberBlock, type.attributes)
             } else {
                 nominal = nil
             }
             guard let nominal else { continue }
-            scopes[scope].declarations[number(nominal.name)] = declaration.id
-            // A generic type's members depend on its arguments, so a member of it stays unread.
-            guard !nominal.generic else {
-                scopes[scope].members[number(nominal.name)] = .type(nil, isProtocol: false)
-                continue
-            }
             let child = scopes.count
             let name = number(nominal.name)
+            scopes[scope].declarations[name] = declaration.id
             scopes.append(Scope(path: scopes[scope].path + [keyNames[name]], parent: scope))
-            scopes[scope].members[name] = .type(child, isProtocol: false)
+            // A generic type's members depend on its arguments, so readings leave them unread; which
+            // declaration a member names does not, and its generic parameters hide outer names there.
+            if let generic = nominal.generic {
+                scopes[scope].members[name] = .type(nil, isProtocol: false)
+                scopes[scope].genericMembers[name] = child
+                for parameter in generic.parameters {
+                    scopes[child].members[number(parameter.name.lookupName)] = .type(nil, isProtocol: false)
+                }
+            } else {
+                scopes[scope].members[name] = .type(child, isProtocol: false)
+            }
             add(nominal.block, to: child, isSchema: false, order: &order)
-            guard isSchema else { continue }
+            guard isSchema, nominal.generic == nil else { continue }
             // The macro declares the aliases a namespace omits as `Void`.
             let marks = { (name: String) in
                 nominal.attributes.contains { $0.as(AttributeSyntax.self).map { Schema.namesMacro($0, name) } ?? false }
@@ -728,30 +749,32 @@ struct LexicalScopes {
     /// The declarations of the schema that `type`, spelled in `scope`, names.
     ///
     /// They are each reference that name lookup resolves (``TypeQualifier/lookupReferences(in:)``),
-    /// looked up from `scope` outward, and each member of a type whose members the macro reads, such as
+    /// looked up from `scope` outward, and each member of a type the schema declares, such as
     /// `Notes.Draft`, found in that type, including a type reached through a nongeneric alias, such as
-    /// `N.Draft` where `N` names `Notes`. A name declared nowhere the macro reads, such as one outside the
-    /// schema, names none of them, and an alias's own spelling is the alias's to resolve.
+    /// `N.Draft` where `N` names `Notes`, and a generic type whatever its arguments, such as `Box<Int>.Draft`,
+    /// since they do not change which declaration the member is. A name declared nowhere the macro reads,
+    /// such as one outside the schema, names none of them, and an alias's own spelling is the alias's to
+    /// resolve.
     func namedDeclarations(_ type: TypeSyntax, in scope: Int = Self.schema) -> [SyntaxIdentifier] {
         let scope = scopes.indices.contains(scope) ? scope : Self.schema
         // An alias expands to its target where it is declared; a cycle, which Swift refuses, stops after
         // a bounded number of expansions for each member reference.
         var expansions = 0
-        /// The scope whose members a member of `member` names, when the macro reads them.
-        func members(of member: Member?, in scope: Int) -> Int? {
-            switch member {
-            case .type(let child, _)?: return child
+        /// The scope that declares the members of what scope `index` declares under `name`.
+        func members(of name: Int, in index: Int) -> Int? {
+            switch scopes[index].members[name] {
+            case .type(let child, _)?: return child ?? scopes[index].genericMembers[name]
             case .alias(let alias)? where alias.parameters.isEmpty && expansions > 0:
                 expansions -= 1
-                return members(of: alias.target, in: scope)
+                return members(of: alias.target, in: index)
             default: return nil
             }
         }
-        /// The scope whose members a reference spelled in `scope` names, when the macro reads them.
+        /// The scope that declares the members of a reference spelled in `scope`.
         func members(of type: TypeSyntax, in scope: Int) -> Int? {
             let type = type.unparenthesized
             if let identifier = type.as(IdentifierTypeSyntax.self) {
-                guard identifier.moduleSelector == nil, identifier.genericArgumentClause == nil else { return nil }
+                guard identifier.moduleSelector == nil else { return nil }
                 if identifier.name.tokenKind == .keyword(.Self) { return scope }
                 guard case .identifier = identifier.name.tokenKind else { return nil }
                 guard let name = number(of: identifier.name), case .found(let index) = lookup(name, from: scope)
@@ -759,13 +782,12 @@ struct LexicalScopes {
                     // The schema's own name, which no member may take, names the schema.
                     return identifier.name.lookupName == schemaName ? Self.schema : nil
                 }
-                return members(of: scopes[index].members[name], in: index)
+                return members(of: name, in: index)
             }
             guard let member = type.as(MemberTypeSyntax.self), member.moduleSelector == nil,
-                member.genericArgumentClause == nil, let base = members(of: member.baseType, in: scope),
-                let name = number(of: member.name)
+                let base = members(of: member.baseType, in: scope), let name = number(of: member.name)
             else { return nil }
-            return members(of: scopes[base].members[name], in: base)
+            return members(of: name, in: base)
         }
         var result: [SyntaxIdentifier] = []
         for reference in TypeQualifier.lookupReferences(in: type) {
@@ -2599,11 +2621,16 @@ private final class ReadingCache {
     private var tokenNames: [SyntaxIdentifier: Named] = [:]
     /// The number of every name a key holds, given when the name is first seen.
     private var keyNumbers: [String: Int] = [:]
-    /// How many names keys hold, for the regression tests' work counts.
-    var keyNameCount: Int { keyNumbers.count }
+
+    /// How many characters of names have been hashed to number them, for the regression tests' work counts.
+    private(set) var hashedNameCharacters = 0
+
+    /// Counts the characters of `name`, which numbering it hashes.
+    func hashes(_ name: String) { hashedNameCharacters += name.utf8.count }
 
     /// `text` as keys hold it, numbered when first seen.
     func keyName(_ text: String) -> KeyName {
+        hashes(text)
         if let number = keyNumbers[text] { return KeyName(number: number, text: text) }
         keyNumbers[text] = keyNumbers.count
         return KeyName(number: keyNumbers.count - 1, text: text)

@@ -60,18 +60,18 @@ struct ReadingCostTests {
         #expect(messages == [budgetMessage])
     }
 
-    /// Generates `source`, requiring parsing and generation to finish within two seconds.
+    /// Parses and generates `source`, returning the schema with the work its validation counted, and the
+    /// work generating its members added to that.
     ///
-    /// Generation keeps no count of its work, so the families that bound only generation, not
-    /// reading, are timed; two seconds is many times what linear generation of each takes.
-    private static func generateWithinTimeBound(_ source: String, _ check: (Schema) throws -> Void = { _ in }) throws {
-        let clock = ContinuousClock()
-        let elapsed = try clock.measure {
-            let schema = try parse(source)
-            try check(schema)
-            _ = try Generator(schema: schema).members()
-        }
-        #expect(elapsed < .seconds(2), "\(elapsed)")
+    /// The families that bound validation and generation, not reading, bound these counts, which are the
+    /// same on every machine and in every configuration.
+    private static func generated(
+        _ source: String
+    ) throws -> (schema: Schema, validated: Schema.Work, generated: Schema.Work) {
+        let schema = try parse(source)
+        let validated = schema.work
+        _ = try Generator(schema: schema).members()
+        return (schema, validated, schema.work.since(validated))
     }
 
     /// `First<X, Y> = X` with each level using its predecessor twice, through different arguments: the
@@ -575,24 +575,30 @@ struct ReadingCostTests {
     /// Whether functions of one name throw different types is decided once for the expansion, reading
     /// each function's failure once, rather than once for every `PreparationRejection` case it names, so
     /// many throwing edges of one name, from as many phases, generate in time linear in the edges.
+    ///
+    /// Validation and generation each decide once, reading each failure once, and the generator names each
+    /// edge's case a constant number of times, at 150 edges and at 300.
     @Test func manyThrowingEdgesOfOneNameGenerateInLinearTime() throws {
-        let count = 300
-        let phases = (0 ..< count).map { "struct P\($0) {}; \($0 == 0 ? "@Initial " : "")case p\($0)(P\($0))" }
-        let edges = (0 ..< count)
-            .map {
-                "@Transition(on: Input.go)\nstatic func step(_ source: P\($0)) throws(Problem\($0 % 2)) -> P\(($0 + 1) % count) { fatalError() }"
-            }
-        let source = """
-            @StateMachine(mode: .shared)
-            enum Flow {
-                struct Problem0: Error {}
-                struct Problem1: Error {}
-                \(phases.joined(separator: "\n"))
-                enum Input { case go }
-                \(edges.joined(separator: "\n"))
-            }
-            """
-        try Self.generateWithinTimeBound(source) { schema in
+        for count in [150, 300] {
+            let phases = (0 ..< count).map { "struct P\($0) {}; \($0 == 0 ? "@Initial " : "")case p\($0)(P\($0))" }
+            let edges = (0 ..< count)
+                .map {
+                    "@Transition(on: Input.go)\nstatic func step(_ source: P\($0)) throws(Problem\($0 % 2)) -> P\(($0 + 1) % count) { fatalError() }"
+                }
+            let source = """
+                @StateMachine(mode: .shared)
+                enum Flow {
+                    struct Problem0: Error {}
+                    struct Problem1: Error {}
+                    \(phases.joined(separator: "\n"))
+                    enum Input { case go }
+                    \(edges.joined(separator: "\n"))
+                }
+                """
+            let (schema, validated, generated) = try Self.generated(source)
+            #expect(validated.failureAnalyses == 1 && validated.failuresRead == count, "\(validated)")
+            #expect(generated.failureAnalyses == 1 && generated.failuresRead == count, "\(generated)")
+            #expect(generated.rejectionCases >= count && generated.rejectionCases <= 4 * count, "\(generated)")
             #expect(schema.namesThrowingDifferentFailures == ["step"])
         }
     }
@@ -600,52 +606,67 @@ struct ReadingCostTests {
     /// The dispatch finds each phase's edges and routers for each trigger once and visits only the pairs
     /// that have one, so a graph with many phases, inputs, and edges, each phase leaving through its own
     /// input, generates in time linear in its edges rather than in phases times inputs times edges.
+    ///
+    /// The preparation dispatches exactly one pair, reading one edge, for each edge, and generation finds
+    /// each edge's router a constant number of times, at 250 phases and at 500.
     @Test func manyPhasesAndInputsDispatchInLinearTime() throws {
-        let count = 500
-        let phases = (0 ..< count).map { "struct P\($0) {}; \($0 == 0 ? "@Initial " : "")case p\($0)(P\($0))" }
-        let inputs = (0 ..< count).map { "go\($0)(Swift::Int)" }.joined(separator: ", ")
-        let edges = (0 ..< count)
-            .map {
-                "@Transition(on: Input.go\($0))\nstatic func go\($0)(_ source: P\($0), _ value: Swift::Int) -> P\(($0 + 1) % count) { fatalError() }"
-            }
-        let source = """
-            @StateMachine(mode: .shared)
-            enum Flow {
-                \(phases.joined(separator: "\n"))
-                enum Input { case \(inputs) }
-                \(edges.joined(separator: "\n"))
-            }
-            """
-        try Self.generateWithinTimeBound(source)
+        for count in [250, 500] {
+            let phases = (0 ..< count).map { "struct P\($0) {}; \($0 == 0 ? "@Initial " : "")case p\($0)(P\($0))" }
+            let inputs = (0 ..< count).map { "go\($0)(Swift::Int)" }.joined(separator: ", ")
+            let edges = (0 ..< count)
+                .map {
+                    "@Transition(on: Input.go\($0))\nstatic func go\($0)(_ source: P\($0), _ value: Swift::Int) -> P\(($0 + 1) % count) { fatalError() }"
+                }
+            let source = """
+                @StateMachine(mode: .shared)
+                enum Flow {
+                    \(phases.joined(separator: "\n"))
+                    enum Input { case \(inputs) }
+                    \(edges.joined(separator: "\n"))
+                }
+                """
+            let (_, _, generated) = try Self.generated(source)
+            #expect(generated.dispatchedPairs == count && generated.dispatchedEdges == count, "\(generated)")
+            #expect(generated.routerLookups <= 8 * count && generated.tablesBuilt <= 1, "\(generated)")
+        }
     }
 
     /// One phase with many routed triggers, each choosing between two edges back to the phase: the
     /// routers' candidates, choice types, and shared names are found once for the schema, so validation and
     /// generation take time linear in the routers.
+    ///
+    /// The tables are built a constant number of times, and validation and generation each look a router's
+    /// candidates, choice type, and shared names up there a constant number of times, at 200 routers and at
+    /// 400; the preparation dispatches each trigger once, reading its two edges.
     @Test func manyRoutedTriggersOfOnePhaseDispatchInLinearTime() throws {
-        let count = 400
-        let inputs = (0 ..< count).map { "go\($0)(Swift::Int)" }.joined(separator: ", ")
-        let functions = (0 ..< count)
-            .map {
+        for count in [200, 400] {
+            let inputs = (0 ..< count).map { "go\($0)(Swift::Int)" }.joined(separator: ", ")
+            let functions = (0 ..< count)
+                .map {
+                    """
+                    @Route(on: Input.go\($0))
+                    static func pick\($0)(_ source: Idle, _ value: Swift::Int) -> Route.Pick\($0) { fatalError() }
+                    @Transition(on: Input.go\($0))
+                    static func stay\($0)(_ source: Idle, _ value: Swift::Int) -> Idle { fatalError() }
+                    @Transition(on: Input.go\($0))
+                    static func keep\($0)(_ source: Idle, _ value: Swift::Int) -> Idle { fatalError() }
+                    """
+                }
+            let source = """
+                @StateMachine(mode: .shared)
+                enum Flow {
+                    struct Idle {}
+                    @Initial case idle(Idle)
+                    enum Input { case \(inputs) }
+                    \(functions.joined(separator: "\n"))
+                }
                 """
-                @Route(on: Input.go\($0))
-                static func pick\($0)(_ source: Idle, _ value: Swift::Int) -> Route.Pick\($0) { fatalError() }
-                @Transition(on: Input.go\($0))
-                static func stay\($0)(_ source: Idle, _ value: Swift::Int) -> Idle { fatalError() }
-                @Transition(on: Input.go\($0))
-                static func keep\($0)(_ source: Idle, _ value: Swift::Int) -> Idle { fatalError() }
-                """
-            }
-        let source = """
-            @StateMachine(mode: .shared)
-            enum Flow {
-                struct Idle {}
-                @Initial case idle(Idle)
-                enum Input { case \(inputs) }
-                \(functions.joined(separator: "\n"))
-            }
-            """
-        try Self.generateWithinTimeBound(source)
+            let (_, validated, generated) = try Self.generated(source)
+            #expect(validated.tablesBuilt <= 4 && generated.tablesBuilt <= 1, "\(validated) \(generated)")
+            #expect(validated.tabledEntries <= 4 * (3 * count + 1), "\(validated)")
+            #expect(validated.routerLookups <= 16 * count && generated.routerLookups <= 48 * count, "\(generated)")
+            #expect(generated.dispatchedPairs == count && generated.dispatchedEdges == 2 * count, "\(generated)")
+        }
     }
 
     /// A key's nodes are counted as it is built, so keeping many readings whose keys are near the key

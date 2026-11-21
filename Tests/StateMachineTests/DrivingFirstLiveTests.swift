@@ -9,12 +9,32 @@ import Testing
 // it is still assigning. Stopping discards a delivery of the observation that waited for that
 // assignment, whose publication was never announced, and still shows a waiting receipt of a change made
 // through the presentation. A host of your own that calls a callback whose cancellation has returned
-// finds its snapshot released at once.
+// finds its snapshot released at once. Every waiting delivery belongs to the registration that
+// delivered it: stopping releases it once the cancellation has returned, and never takes the seed of a
+// registration resumed from a callback of that stop.
 
-/// A snapshot that carries only its revision and reports its release.
+/// A snapshot that carries its revision, can run code of its own when the revision is read, and can
+/// hold an object, as a snapshot that captures its presentation does.
 private final class Shot: StateMachineSnapshot, Sendable {
-    let revision: UInt64
-    init(_ revision: UInt64) { self.revision = revision }
+    private let stored: UInt64
+    private let onRead: (@Sendable () -> Void)?
+    let retained: (any AnyObject & Sendable)?
+    init(_ revision: UInt64, onRead: (@Sendable () -> Void)? = nil, retaining: (any AnyObject & Sendable)? = nil) {
+        stored = revision
+        self.onRead = onRead
+        retained = retaining
+    }
+    var revision: UInt64 {
+        onRead?()
+        return stored
+    }
+}
+
+/// An action that runs once, on the main actor, from whichever call reaches it first.
+@MainActor private final class Once: Sendable {
+    private var action: (() -> Void)?
+    init(_ action: @escaping () -> Void) { self.action = action }
+    func run() { exchange(&action, with: nil)?() }
 }
 
 /// A `MainActor` host of the test's own, which keeps every receive callback it was ever given.
@@ -40,6 +60,11 @@ private final class Shot: StateMachineSnapshot, Sendable {
     func advance() {
         current = Shot(current.revision + 1)
         for receive in live.values { receive(current) }
+    }
+    /// Delivers `shot` to every live registration without keeping it, as an owner that has moved on
+    /// relinquishes a snapshot it delivered.
+    func offer(_ shot: Shot) {
+        for receive in live.values { receive(shot) }
     }
     func snapshot() -> Shot { current }
     func send(_ input: Void) throws(SendRejection) -> Receipt {
@@ -311,4 +336,148 @@ extension StateMachinePresentation: DrivenPresentation where Host == ReplayHost 
         #expect(driven.snapshot() == 0)
         withExtendedLifetime(driven) {}
     }
+
+    // While revision 1 is being assigned, the owner delivers revision 2, which waits, and the
+    // presentation stops before the assignment completes. The host keeps nothing, so once the
+    // cancellation has returned nothing holds revision 2, while the presentation is still stopped.
+    @Test(arguments: DrivingPresentationKind.allCases)
+    func stoppingReleasesAWaitingDeliveryOnceTheCancellationReturned(_ kind: DrivingPresentationKind) {
+        let host = ReplayHost()
+        let driven = Driven(kind, host)
+        weak var waiting: Shot?
+        driven.arm {
+            let shot = Shot(2)
+            waiting = shot
+            host.offer(shot)
+            driven.stop()
+        }
+        host.advance()
+        #expect(driven.snapshot() == 1)
+        #expect(!driven.isObserving())
+        #expect(waiting == nil)
+        withExtendedLifetime(driven) {}
+    }
+
+    // The same schedule, where the waiting delivery holds its presentation, as a snapshot that captures
+    // the screen showing it does: releasing every other reference releases the presentation.
+    @Test(arguments: DrivingPresentationKind.allCases)
+    func aWaitingDeliveryThatHoldsItsPresentationDoesNotKeepItAlive(_ kind: DrivingPresentationKind) {
+        let host = ReplayHost()
+        weak var released: AnyObject?
+        weak var waiting: Shot?
+        do {
+            let presentation = DrivingPresentationKind.make(kind, host)
+            released = presentation.object
+            presentation.onNextChange {
+                let shot = Shot(2, retaining: presentation.object)
+                waiting = shot
+                host.offer(shot)
+                presentation.stop()
+            }
+            host.advance()
+            presentation.detach()
+        }
+        #expect(waiting == nil)
+        #expect(released == nil)
+    }
+
+    // While revision 1 is being assigned, the presentation stops. From the report of that stop, the
+    // owner advances to revision 2 and the presentation resumes, whose registration's seed waits for the
+    // assignment. The stop that already returned its cancellation never takes that seed, so the
+    // presentation reports live showing revision 2.
+    @Test(arguments: DrivingPresentationKind.allCases)
+    func aResumeFromTheReportOfAStopKeepsItsSeed(_ kind: DrivingPresentationKind) {
+        let host = ReplayHost()
+        let driven = Driven(kind, host)
+        driven.arm {
+            driven.armReport {
+                host.advance()
+                driven.resume()
+            }
+            driven.stop()
+        }
+        host.advance()
+        #expect(driven.isObserving())
+        #expect(driven.snapshot() == 2)
+        #expect(host.snapshot().revision == 2)
+        if kind == .combine { #expect(driven.shownWhenLive.last == 2) }
+    }
+
+    // A delivered snapshot whose revision, when read, stops the presentation is not shown: the
+    // registration that delivered it ended before its revision was known.
+    @Test(arguments: DrivingPresentationKind.allCases)
+    func aDeliveryWhoseRevisionStopsThePresentationIsNotShown(_ kind: DrivingPresentationKind) {
+        let host = ReplayHost()
+        let driven = Driven(kind, host)
+        let stop = Once { driven.stop() }
+        host.offer(Shot(1, onRead: { MainActor.assumeIsolated { stop.run() } }))
+        #expect(driven.snapshot() == 0)
+        #expect(!driven.isObserving())
+        driven.resume()
+        #expect(driven.isObserving())
+        #expect(driven.snapshot() == 0)
+    }
+}
+
+/// A driving presentation that a test holds only through this value, so that dropping it and
+/// `detach()` leave no reference of the test's own.
+@MainActor private struct HeldPresentation {
+    let object: AnyObject & Sendable
+    let stop: () -> Void
+    private let arm: (@escaping () -> Void) -> Void
+    private let release: () -> Void
+    fileprivate init(
+        object: AnyObject & Sendable,
+        stop: @escaping () -> Void,
+        arm: @escaping (@escaping () -> Void) -> Void,
+        release: @escaping () -> Void
+    ) {
+        self.object = object
+        self.stop = stop
+        self.arm = arm
+        self.release = release
+    }
+    /// Runs `action` once, from the announcement of the next snapshot change.
+    func onNextChange(_ action: @escaping () -> Void) { arm(action) }
+    /// Ends the observation of changes.
+    func detach() { release() }
+}
+
+extension DrivingPresentationKind {
+    /// A presentation of `host` that the returned value holds weakly but for `object`.
+    @MainActor fileprivate static func make(_ kind: DrivingPresentationKind, _ host: ReplayHost) -> HeldPresentation {
+        if kind == .observation, #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            let presentation = StateMachinePresentation(host)
+            return HeldPresentation(
+                object: presentation,
+                stop: { [weak presentation] in presentation?.stopObserving() },
+                arm: { [weak presentation] action in
+                    guard let presentation else { return }
+                    let once = Once(action)
+                    withObservationTracking {
+                        _ = presentation.snapshot
+                    } onChange: {
+                        MainActor.assumeIsolated { once.run() }
+                    }
+                },
+                release: {}
+            )
+        }
+        let presentation = StateMachineObservableObject(host)
+        let box = CancellableBox()
+        return HeldPresentation(
+            object: presentation,
+            stop: { [weak presentation] in presentation?.stopObserving() },
+            arm: { [weak presentation] action in
+                let once = Once(action)
+                box.cancellable = presentation?.objectWillChange.sink { once.run() }
+            },
+            release: { box.cancellable = nil }
+        )
+    }
+}
+
+/// The subscription of a Combine callback, which the test ends before releasing its presentation.
+@MainActor private final class CancellableBox {
+    var cancellable: AnyCancellable?
 }

@@ -39,6 +39,7 @@ struct ExplorerConfiguration: Sendable, CustomStringConvertible {
         if families.contains(.chains) { names.append("chains") }
         if families.contains(.matrix) { names.append("matrix") }
         if families.contains(.elsewhere) { names.append("elsewhere") }
+        if families.contains(.images) { names.append("images") }
         return "\(kind.rawValue) [\(names.joined(separator: "+"))] depth \(depth)\(stateHashing ? " hashed" : "")"
     }
 }
@@ -184,6 +185,8 @@ struct ExplorerReport: Sendable {
             ExplorerRealDrivingRun(configuration.kind, verbose: verbose)
         } else if configuration.kind == .freeSequence {
             ExplorerFreeSequenceRun(verbose: verbose)
+        } else if configuration.kind == .runtimeShared, configuration.families.contains(.images) {
+            ExplorerImagesRun(verbose: verbose)
         } else if configuration.kind == .runtimeShared, configuration.families.contains(.copies) {
             ExplorerCopiesRun(verbose: verbose)
         } else if configuration.kind == .runtimeShared, explorerReconciles(configuration.families, sequence) {

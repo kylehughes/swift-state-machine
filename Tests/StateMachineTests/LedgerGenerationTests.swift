@@ -1,5 +1,6 @@
 import Dispatch
 import StateMachine
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -90,6 +91,8 @@ import os
     @Test(.parksCooperativeThread) func anImageHeldBehindAHandlerNeverFollowsANewerOne() async throws {
         typealias Host = RuntimeSharedHost<Int, Int, RuntimeTicket, Refusal>
         let hold = Hold()
+        // A failed requirement returns before the step that lets the handler go.
+        defer { hold.proceed() }
         let owner = Host(
             0,
             scopes: [scope],
@@ -157,7 +160,7 @@ private final class Images: Sendable {
 
 /// Holds the thread of the first handler call that reaches it until the test lets it go.
 private final class Hold: Sendable {
-    private let held = DispatchSemaphore(value: 0)
+    private let held = ThreadGate()
     private let entered = AsyncStream<Void>.makeStream()
     private let first = OSAllocatedUnfairLock(initialState: true)
     func hold() {
@@ -169,5 +172,5 @@ private final class Hold: Sendable {
         var iterator = entered.stream.makeAsyncIterator()
         _ = await iterator.next()
     }
-    func proceed() { held.signal() }
+    func proceed() { held.open() }
 }

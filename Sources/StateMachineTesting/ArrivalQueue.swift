@@ -7,12 +7,16 @@
 /// keeps only the live elements it passed, so no later scan passes the same ended element again. The
 /// queue drops the part before its head once that part is at least half of the storage, on every exit,
 /// so waits matched first or calls matched first, and long traffic that alternates between them, cost
-/// work linear in the elements matched and storage linear in the elements still live.
+/// work linear in the elements matched and storage linear in the elements still live. Elements that end
+/// without any scan reaching them, as waits cancelled before a call starts, are dropped by `reclaim(keeping:where:)`
+/// once they outnumber the live ones.
 nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
     private var elements: [Element] = []
     private var head = 0
     /// How many elements the queue has examined, which tests read as the work of matching.
-    private(set) var examined = 0
+    ///
+    /// It saturates instead of overflowing.
+    private(set) var examined = 0 { didSet { if examined < oldValue { examined = .max } } }
 
     var isEmpty: Bool { head == elements.count }
     /// How many elements the queue stores, ended ones before the head included, which tests read as
@@ -34,7 +38,7 @@ nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
     mutating func oldest(where isLive: (Element) -> Bool) -> Element? {
         defer { dropTaken() }
         while head < elements.count {
-            examined += 1
+            examined &+= 1
             if isLive(elements[head]) { return elements[head] }
             head += 1
         }
@@ -48,7 +52,7 @@ nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
         var found: [Element] = []
         var index = head
         while index < elements.count {
-            examined += 1
+            examined &+= 1
             let element = elements[index]
             index += 1
             guard isLive(element) else { continue }
@@ -64,6 +68,16 @@ nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
         elements = found
         head = 0
         return found
+    }
+
+    /// Keeps only the elements that `isLive` accepts once the stored elements reach twice `live`, the
+    /// number still live, and 16 more, so elements that end unmatched keep storage, and the work of
+    /// dropping them, proportional to the elements still live.
+    mutating func reclaim(keeping live: Int, where isLive: (Element) -> Bool) {
+        guard elements.count >= 2 * live + 16 else { return }
+        examined &+= elements.count - head
+        elements = elements[head...].filter(isLive)
+        head = 0
     }
 
     private mutating func dropTaken() {

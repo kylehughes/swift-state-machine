@@ -97,15 +97,22 @@ A change to presentation, registration or owner-teardown behaviour updates this 
   its action returns. The harness holds this host only weakly, so the presentation's storage is its only owner.
 - **Client values.** Every snapshot is a fresh `ExplorerShot` whose destructor records its thread, the slots
   occupied then, and whether the presentation had read it (its revision closure saw it). Neither the hosts nor the
-  harness keep one. The passive revision closure captures an `ExplorerCapture` with the same checks. An associated
-  object marks the presentation's deallocation.
+  harness keep one. Its `revision` is a computed witness: the harness reads a stored stamp, and on a driving host
+  the presentation's first read of the next value the host hands over (a delivery, a seed, or a receipt) runs the
+  event armed at `revision` first. In the `chains` family a value that a callback's event makes the driving host
+  hand over holds the presentation strongly until the harness sees it shown, so a presentation that keeps a value
+  it never shows can never be released. The passive revision closure captures an `ExplorerCapture` with the same
+  checks. An associated object marks the presentation's deallocation.
 - **Revisions.** One counter for the whole run advances by 10 for each new value, so revisions are unique and
   increase in creation order. `applyBelow` uses the gaps. In the `clocks` family (E1) every host keeps a clock of
   its own instead: a host's values advance its clock by 10, and an applied value continues the clock of the host
   that admitted the newest registration. Two fresh hosts therefore both deliver revision 10, and a host observed
   after a busier one delivers a lower revision.
 - **Raw owner (R).** The `RuntimeSharedHost` slice drives one raw `RuntimeSharedHost<Int, Int, …>` through its own
-  verbs, with no presentation. The `counts` family uses subscriber capacity 3. The `reconcile` family
+  verbs, with no presentation. The `counts` family uses subscriber capacity 3. The `images` family
+  (`ExplorerImages.swift`) uses the manual completion policy, three commit slots, two descriptor and execution
+  slots, and drivers that return at once: work A's outcome is refused by every preparation and stays retained, and
+  every other work's outcome is accepted. Each payload is a client object the harness tracks by a weak identity. The `reconcile` family
   (`ExplorerReports.swift`) uses the manual completion policy, three executions, and three works running (1, 2
   and 3) on drivers the harness returns one at a time, with an emission whose handler can hold the batch drainer.
   Its preparation is revision-sensitive: an accepting outcome yields a candidate that starts two more works than are
@@ -257,7 +264,8 @@ are grouped by subject and are not contiguous.
   Observation change of `snapshot`), `onCancel` (a fake host's token action on the main thread), `revision` (P
   revision closure), `factory` (when the presentation invokes a parked closure), `subscription`
   (`receive(subscription:)`, after it requests), `value` (`receive(_:)`), `projection` (the transform of
-  `presentedSnapshots(projecting:)`, including the seed). Armed events: `stop`, `apply`, `observe(A)`,
+  `presentedSnapshots(projecting:)`, including the seed). On a driving presentation `revision` is the snapshot's
+  `revision` witness, at the presentation's first read of the next value the host hands over. Armed events: `stop`, `apply`, `observe(A)`,
   `observe(B)`, `dropMain`, `finish(A)`, `observeAsync(A)`, `followSeq(A)`, `cancelFollower`,
   `subscribe(fresh,max)`, `cancelSubscription`, `request`; D adds `close`, `deliver(A)`. A replayed script may arm
   several hooks and nest `+` (for example `arm(change,apply+stop+applyBelow)`); enumeration arms one hook with one
@@ -400,7 +408,9 @@ The labels E1 to E15 name the scenarios that the families below cover; the code'
 - **59a** `releaseDrivers` — E13: the held drivers return. The step waits until the owner runs no work, with a
   safety net. Once per sequence.
 - **60** `reconcile(k)`, `discard(k)` — E13: explicit `reconcile(id:)` or `discardPending(id:)` of work k's
-  retained completion, enabled while one is retained.
+  retained completion, enabled while one is retained. `redeliver(k)`, once per sequence while work k's completion is
+  retained: another payload under the same ticket, delivered explicitly; it must prepare nothing (I44), and every
+  later report still carries the first payload.
 - **61** `onReport(j, reconcile(k))`, `onReport(j, discard(k))` — E13/E15: inside the next report of work j's
   completion, whichever path makes it (the explicit attempt's own report, a conflict of a batch, a worker return's
   report, or the entry's own report when j = k), reconcile or discard work k once. Once per sequence.
@@ -454,8 +464,10 @@ The labels E1 to E15 name the scenarios that the families below cover; the code'
 - **72** `chains` family (E15): two arms per sequence, enumerated independently, and the inner events `arm(h2, e)`.
   Passive: `h2` in `report`, `change`, `onCancel` and `e` in `stop`, `apply`, `observe(A)`; a hook so armed fires on
   its own later run, never inside another hook's run. Driving: `h2` in `report`, `change`, `onCancel` and `e` in
-  `stop`, `resume`, `apply`, beside `deliver(A)+resume+stop`; a hook armed from inside a callback may fire inside that
-  callback's own run (a hook inside a hook, or the same hook revisited), at most two deep.
+  `stop`, `resume`, `apply`, beside `deliver(A)+resume+stop`, `deliver(A)+stop` and `apply+stop`, and a callback that
+  arms a second callback and then stops before it returns, `arm(h2, e)+stop` for `e` in `resume`, `apply`; a hook
+  armed from inside a callback may fire inside that callback's own run (a hook inside a hook, or the same hook
+  revisited), at most two deep.
 - **73** `matrix` family: an alphabet of its own. Passive: the forms `observe(A)`, `observe(B)`, `observe(M)`,
   `observe(I)`, `observeAsyncNow(A)`, `observeSeq(A)`, plus `apply`, `stop`, `dropMain`, `dropElsewhere`,
   `subscribe(fresh,max)`, the hosts' `deliver`/`finish`/`hostCancelMain`, and `turn`. The arms are `arm(h, e)` for
@@ -498,6 +510,12 @@ The labels E1 to E15 name the scenarios that the families below cover; the code'
 - **82** `stopCustody` — passive `core`, H8: `stopObserving()` with the pause bound. Inside the window between the
   discarded element's release and the removal's completion, no unread element of a removed registration may be
   alive (I34, forced).
+- **84** `registerPending`, `cancelNewest`, `holdReport`, `releaseReport`, `completeOthers`, `turn` — the raw
+  owner's `images` family: a pending-completion registration whose callback keeps nothing (at most two), the
+  newest one cancelled, an explicit `reconcile(id:)` of A on a thread of its own whose report the handler holds on
+  a gate until `releaseReport` (once per sequence), and four further works started and completed one at a time, the
+  step waiting until each is admitted and no longer retained (at most twice). Its completions run on the owner's
+  workers, which turns do not order, so the family runs in the standard and exhaustive tiers only.
 - **83** H9 is bound around every `reconcile` step. It counts the batches of two or more capacity conflicts
   reported while an `onReport` is armed, the window in which a handler of one conflict can reconcile another,
   and the count is printed at the end of a run (`EXPLORER capacity-conflict report windows reached: n`). Conflicts a
@@ -505,7 +523,7 @@ The labels E1 to E15 name the scenarios that the families below cover; the code'
 
 ### Families (alphabet slices)
 
-`matrix` (73), `chains` (72), `copies` (71), `sites` (69, with `reentrant`), `clocks` (62, with `core` and
+`matrix` (73), `chains` (72), `copies` (71), `images` (84), `sites` (69, with `reentrant`), `clocks` (62, with `core` and
 `second`; `applyBelow` off), `counts` (55–56), `reconcile` (57–61a, 79), `elsewhere` (53, driving Combine), `resume` (63–65, driving), `demand` (66,
 `ObservableObject` classes), `selection` (67, with `async`), `core` (1, 11–23 except 14 for P, and 47a for host
 A; 12, 14–16, 19–23 for D), `second` (host B), `async` (2–10), `isolated` (10a–10d), `combine` (24–28),
@@ -622,7 +640,7 @@ or that it gave up (9), is "withheld" and is not the presentation's: no ownershi
   during the attach and receives nothing. Source: `presentedSnapshots` reference.
 - **I22** Q, presentation alive: a subscriber with outstanding demand last received the snapshot shown, so no
   change is lost, the first included. Source: `presentedSnapshots` reference, UI-007.
-- **I23** Q: every value a subscriber received was shown (D: is not newer than the last shown).
+- **I23** Q: every value a subscriber received was shown, whatever its revision.
 - **I24** D: the host is destroyed on the main thread, and only once its registration's slot is free. Source:
   driving class reference, `PresentationDisposalTests`.
 - **I25** Q, presentation alive: at most one registration of the presentation holds a slot.
@@ -720,7 +738,8 @@ or that it gave up (9), is "withheld" and is not the presentation's: no ownershi
   it was read").
 - **I44** R, reconcile: every report is compared with an expectation the harness keeps itself, from the outcomes it
   offered and the preparations it saw. A report carries its completion's first delivered payload (by serial) and its
-  own retained entry, and requires reconciliation. Attempt n is reported only after n preparations, with the reason
+  own retained entry, which no other work's reports name, and requires reconciliation. A duplicate delivery of a retained
+  completion (`redeliver`) runs no preparation. Attempt n is reported only after n preparations, with the reason
   preparation n produced: a refusal, or an admission failure of a candidate. A completion's attempts are reported in
   strictly increasing order, and none is skipped unless a later preparation superseded a candidate attempt that was
   never reported. The owner delivers its reports from one queue, oldest decision first: when a handler reconciles a
@@ -789,6 +808,19 @@ or that it gave up (9), is "withheld" and is not the presentation's: no ownershi
 - **I53** R, reconcile: `flush(through:)` of the receipt of the held drainer's batch does not return while that
   batch's emission handler is held, and returns `true` once the drainer is released and the batch processed. Source:
   `RuntimeSharedHost.flush(through:)` ("Waits until … emissions, through this receipt have been processed").
+- **I54** D, Q: once a registration's cancellation has settled (its slot free), every value delivered to it that
+  the presentation never showed has been released, checked after the quiescent turns while the presentation is
+  still alive and held, so the final teardown cannot release the evidence first. Stopping discards an unannounced
+  value, so keeping one is custody without a purpose, and one that captures the presentation would keep both alive;
+  in `chains` such a value does capture it, and I15 then finds the presentation alive. Source: `stopObserving()`
+  reference, `PresentingState.md` ("Separate observation from running work"), class reference (disposal).
+- **I55** R, images: while a reconciliation handler holds the owner's report queue, the payloads of completed works
+  (admitted and no longer retained) that are still alive number at most two per pending-completion registration:
+  each registration keeps at most one collection it has not read, a newer one replacing it, and may be handed one
+  more, and with works completed one at a time each collection shows at most one of them. With no registration, or
+  once the handler returns, none stays alive. The step waits up to 200 turns for releases on the owner's workers
+  before it judges. Source: SPEC's `pendingCompletionUpdates()` contract ("with a newer collection replacing one
+  not yet read"), DELIVERY-011.
 
 ## Enumeration and pruning
 
@@ -820,19 +852,21 @@ or that it gave up (9), is "withheld" and is not the presentation's: no ownershi
   while one may still be pending.
 
 - **Idle arms** (sound). `arm(h, e)` changes only harness state. If hook `h` does not run during the event that
-  follows it, and the presentation is still held, the sequence equals the one that arms after that event, which
-  is enumerated too. The arm-first sequence is then neither extended nor reported. Replays never prune.
+  follows it, that event is not itself an arm, and the presentation is still held, the sequence equals the one that
+  arms after that event, which is enumerated too. The arm-first sequence is then neither extended nor reported. Two
+  adjacent arms are both kept, because the swapped pair would be pruned the same way. Replays never prune.
 - No other partial-order reduction: dependent events (anything that runs presentation code, enqueues ordered
   main-actor jobs, or creates values, whose revisions follow creation order) run in both orders.
 
 ## Tiers and run sizes
 
 1. **Smoke** (in the normal suite): every fully forced slice at its smoke depth, about 78 configurations and
-   54,000 sequences, about 20 seconds, beside the self-checks.
+   56,000 sequences, about 20 seconds, beside the self-checks.
 2. **Standard** (`EXPLORER_TIER=standard`): every slice of the exhaustive tier, including those that run only in
-   the deeper tiers, one step shallower and never below its smoke depth. About 1.6 million sequences over 89
-   configurations, about 19 minutes; the raw owner's `reconcile` family (a stage and two events, about 105,000
-   sequences) takes about 5 of them, and each real-owner driving class about 1.
+   the deeper tiers, one step shallower and never below its smoke depth. About 1.8 million sequences over 90
+   configurations, about 18 minutes; the raw owner's `reconcile` family (a stage and two events, about 128,000
+   sequences) takes about 3 of them, each driving class's `chains` slice with `resume` (about 191,000 sequences)
+   under 1, and each real-owner driving class about 1.
 3. **Exhaustive** (`EXPLORER_FULL=1`): every slice at its full depth. About 15 million sequences over 84
    configurations, about 2 hours. The largest are the multi-owner slice (about 2.6 million sequences and 20
    minutes per class at depth 5), the owner-forms slice (about 1.4 million and 14 minutes per class at depth 5),
@@ -858,7 +892,8 @@ its armed callbacks reached (`EXPLORER_COVERAGE=PATH`, one
 `class|form|site|interrupt|phase|attempt|registration|origin` cell per line, where `attempt` says whether the
 registration's attempt is the current one, `registration` its state, and `origin` the top-level event), and
 `Scripts/explorer-coverage.py` aggregates them by class, site and phase into the tables below, with the attempts,
-registration states and origins each phase was reached in. Regenerate them from the package root with:
+registration states and origins each phase was reached in; its `--cells PATH` also writes every distinct reached
+cell with all eight coordinates. Regenerate them from the package root with:
 
 
 ```sh
@@ -1041,18 +1076,32 @@ check that is not trusted.
 | Invariant | Planted defect |
 |---|---|
 | I1 | A client value released on a worker thread. |
+| I2 | An unread element of a let-go registration released before its slot is free. |
 | I5 | `false` reported while a let-go registration holds its slot. |
 | I10 | An unannounced seed of a stopped registration shown after the stop (the control: a receipt). |
+| I11 | A value of an older observation published after one of a newer observation; a lower revision within one. |
+| I17 | A subscriber given the same value twice. |
+| I18 | A limited subscriber given more values than it requested. |
+| I19 | A subscriber's first value older than the snapshot shown when it attached. |
+| I20 | A value after the subscriber's cancellation returned. |
+| I21 | A subscriber attached after the release given a value. |
+| I23 | A subscriber given a value the presentation never showed, older than the snapshot shown. |
 | I36 | 33 elements of one registration in one main-actor turn (also `turnBoundSelfCheck`). |
 | I37 | `true` reported while the snapshot shown is older than the live registration's seed. |
-| I44 | A later attempt reported before an earlier one; a refused attempt skipped; a later payload under the same ticket; a refusal reported as an admission failure; a handler's reconciliation reported before a report decided earlier. |
+| I39 | A subscriber given a value after the presentation was deallocated. |
+| I44 | A later attempt reported before an earlier one; a refused attempt skipped; a later payload under the same ticket; a refusal reported as an admission failure; a handler's reconciliation reported before a report decided earlier; two works' reports naming one retained entry. |
+| I47 | A subscriber given two subscriptions. |
+| I48 | A newly published value delivered before `objectWillChange` announced it. |
 | I50 | A delivered value that was never staged. |
 | I51 | An invalidation without a change, and a change without an invalidation. |
 | I52 | A sequence that ends without the closed phase; reads `A, B, A` against the history `A, B`. |
+| I53 | `flush(through:)` returning while its batch's handler is held, and failing to return once it is processed. |
+| I54 | An unshown value of a stopped registration kept after its cancellation settled. |
+| I55 | Every completed payload kept behind a held handler for one pending registration. |
 
-Untested, with no planted defect of their own: I2–I4, I6–I9, I11–I35 except I36 above, I38–I43, I45–I49, and I53.
-A check of these has been shown to find a defect only by the planted or historical defect it entered the explorer
-with.
+Untested, with no planted defect of their own: I3, I4, I6–I9, I12–I16, I22, I24–I35, I38, I40–I43, I45, I46, and
+I49. A check of these has been shown to find a defect
+only by the planted or historical defect it entered the explorer with.
 
 ## Not covered
 
@@ -1068,11 +1117,26 @@ with.
    with `expecting:`, and a pending ID used on another owner.
 6. **E15** in part: the owner-teardown slices arm no callbacks; the real-owner driving slice arms one per sequence;
    arbitrary intervening background-thread turns are not built.
-7. **Callback sites**: launch decisions (internal to the runtime, with no client callback), pending-completion
-   readers, `Hashable` witnesses (nothing hashes a client value on these paths), and the producer's yield and
-   finish of a sequence apart from the host's own calls are not armed. Emission handlers (79), an `Equatable`
-   witness (80), a buffered delivery's decision (H10), physical termination (`releaseDrivers`), selected worker
-   returns (57), and per-property invalidation (I51) are.
+7. **Callback sites**: launch decisions (internal to the runtime, with no client callback), a pending-completion
+   reader's callback (the `images` registrations keep nothing and arm nothing), a custom host's `commit`, receipt
+   properties other than the snapshot's `revision`, `Hashable` witnesses (nothing hashes a client value on these
+   paths), and the producer's yield and finish of a sequence apart from the host's own calls are not armed. Emission
+   handlers (79), an `Equatable` witness (80), a buffered delivery's decision (H10), the driving snapshot's
+   `revision` witness (29), physical termination (`releaseDrivers`), selected worker returns (57), and per-property
+   invalidation (I51) are.
 8. **Owner forms**: a truly non-main confined stream, and the passive presentations' Combine subscribers over real
    owners. The passive presentations over real `Shared`, `ActorHost`, `ActorHost(isolatedTo:)` and a non-main
    `IsolatedHost`, with teardown on its actor (74), are covered.
+9. **Reports** in part: I44 compares each report's attempt, payload, entry and reason category, not the whole
+   rejection, and does not record every decision between different works in order; the debt a nested
+   reconciliation owes is sampled from `pendingCompletions()`.
+10. **Exact results** in part: the real-owner slices compare an owner and its presentation by revision and closure,
+    not by model, and the real-owner driving slice reduces a `send` result to its revision.
+11. **Interruption matrix** attribution: a cell takes the newest ending or holding registration and the top-level
+    event, so overlapping attempts are not told apart.
+12. **Further compositions**: one owner with mixed presentation classes and registration kinds, reconciliation
+    under each real managed owner and policy, two ingress producers racing, a choice among several saved receipts
+    for `flush(through:)`, fork and restoration (E14), and a shutdown deadline raced with cancellation.
+13. **Bounded storage** beyond I55's retained payloads: copies of a backlogged report queue, a parked registration's
+    bookkeeping while later attempts finish, cancelled controlled-driver waits, and a work counter's width are
+    measured by the work tests or by none.

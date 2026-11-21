@@ -482,16 +482,21 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     private var model: Model
     private var closed = false
     private let limits: Limits
-    private var scopes: [Scope]
+    private var scopes: [Scope] { didSet { activations = Set(scopes.map(SeenActivation.init)) } }
+    // The identities of `scopes`' activations, so checking a ticket's bindings looks each one up once.
+    private var activations: Set<SeenActivation> = []
     private var keys: [KeyEntry] = []
-    private var active: [RuntimeTicket] = []
+    private var active: [RuntimeTicket] = [] {
+        didSet { operations = Set(active.map { ObjectIdentifier($0.operation) }) }
+    }
+    // The identities of `active`'s operations, so checking a ticket's activity looks it up once.
+    private var operations: Set<ObjectIdentifier> = []
     private var reservations: [Reservation] = []
     private var queue = RuntimeFIFO<Batch>()
+    // Batches a drainer detached from `queue` and has not yet taken, which still hold their slots.
+    private var detached = 0
     private var terminal: Batch?
     private var closeSnapshot: Snapshot?
-    /// How many scopes, operations, reservations, and keys admission has examined, which tests read as
-    /// its work.
-    package private(set) var admissionWork = 0
     /// How many queued batches draining has moved within the queue's storage, which tests read as its
     /// work.
     package var queueMoves: Int { queue.moved }
@@ -511,10 +516,12 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         self.limits = limits
         self.recording = recording
         var examined = 0
-        self.scopes = Self.distinctScopeKeys(scopes, examined: &examined)
+        let distinct = Self.distinctScopeKeys(scopes, examined: &examined)
             .map {
                 Scope(key: $0, activation: RuntimeIdentity())
             }
+        self.scopes = distinct
+        activations = Set(distinct.map(SeenActivation.init))
     }
 
     /// The scope keys of `keys` in order, each once, as its first occurrence places it.
@@ -576,6 +583,32 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             instance = key.instance.map(ObjectIdentifier.init)
         }
     }
+    /// The operation, scope, and resolved key that the starts of one parallel group share, in a plan or
+    /// among the active operations of one scope activation.
+    private struct StartGroup: Hashable {
+        let scope: SeenScope
+        let kind: UInt32
+        let key: ObjectIdentifier?
+        init(_ scope: RuntimeScopeID, kind: UInt32, key: RuntimeIdentity?) {
+            self.scope = SeenScope(scope)
+            self.kind = kind
+            self.key = key.map(ObjectIdentifier.init)
+        }
+    }
+    /// The operation, scope activation, and key identity that determine one admission group.
+    private struct ActiveGroup: Hashable {
+        let kind: UInt32
+        let activation: ObjectIdentifier?
+        let key: ObjectIdentifier?
+        init(kind: UInt32, activation: RuntimeIdentity?, key: RuntimeIdentity?) {
+            self.kind = kind
+            self.activation = activation.map(ObjectIdentifier.init)
+            self.key = key.map(ObjectIdentifier.init)
+        }
+        init(_ ticket: RuntimeTicket) {
+            self.init(kind: ticket.kind, activation: ticket.bindings.first?.activation, key: ticket.key)
+        }
+    }
     /// A scope activation's primitive identity: its key's, and the identity of the activation.
     private struct SeenActivation: Hashable {
         let scope: SeenScope
@@ -608,9 +641,9 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     /// Whether a historical observation belongs to this raw owner.
     public func owns(_ snapshot: Snapshot) -> Bool { snapshot.owner === owner }
     /// Whether ordinary or terminal FIFO output remains queued.
-    public var hasQueuedBatches: Bool { !queue.isEmpty || terminal != nil }
+    public var hasQueuedBatches: Bool { !queue.isEmpty || detached > 0 || terminal != nil }
     /// How many whole batches a drain would transfer, including the terminal batch.
-    public var queuedBatchCount: Int { queue.count + (terminal == nil ? 0 : 1) }
+    public var queuedBatchCount: Int { queue.count + detached + (terminal == nil ? 0 : 1) }
     /// Whether closure, FIFO transfer, and all execution/delivery obligations have settled.
     public var isQuiescent: Bool { closed && !hasQueuedBatches && reservations.isEmpty }
 
@@ -692,22 +725,27 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
                 startKeys.append(entry.identity)
             }
         }
+        // Each start joins the group of the plan's earlier starts of its operation and key, counted in one
+        // table, so a wide plan examines each start once.
+        let held = Set(scopes.map { SeenScope($0.key) })
+        var groups: [StartGroup: (policy: RuntimeOperationPolicy, count: Int)] = [:]
+        var work = scopes.count
+        defer { EngineWork.report(work) }
         for (index, start) in plan.starts.enumerated() {
-            guard scopes.contains(where: { $0.key == start.operation.scope }),
-                start.operation.dependencies.allSatisfy({ key in scopes.contains { $0.key == key } })
+            work += 1 + start.operation.dependencies.count
+            guard held.contains(SeenScope(start.operation.scope)),
+                start.operation.dependencies.allSatisfy({ held.contains(SeenScope($0)) })
             else { throw .invalidPlan }
             if case .parallel(let count) = start.operation.policy, count <= 0 { throw .invalidPlan }
+            let key = StartGroup(start.operation.scope, kind: start.operation.kind, key: startKeys[index])
             var group = 1
-            for (offset, previous) in plan.starts.prefix(index).enumerated()
-            where previous.operation.scope == start.operation.scope && previous.operation.kind == start.operation.kind
-                && startKeys[offset] === startKeys[index]
-            {
-                guard case .parallel = start.operation.policy, previous.operation.policy == start.operation.policy
-                else {
+            if let earlier = groups[key] {
+                guard case .parallel = start.operation.policy, earlier.policy == start.operation.policy else {
                     throw .invalidPlan
                 }
-                group += 1
+                group = earlier.count + 1
             }
+            groups[key] = (start.operation.policy, group)
             // A keyed operation's policy applies per key, so one key's starts in a plan stay within its limit.
             if start.key != nil, case .parallel(let limit) = start.operation.policy, group > limit {
                 throw .invalidPlan
@@ -734,13 +772,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     /// Checks current operation authority independently of the starting root revision.
     public func isActive(_ ticket: RuntimeTicket) -> Bool {
         !closed && ticket.owner === owner && ticket.incarnation === incarnation
-            && active.contains { $0.operation === ticket.operation }
-            && Self.bindingsValid(ticket, scopes: scopes)
-    }
-    private static func bindingsValid(_ ticket: RuntimeTicket, scopes: [Scope]) -> Bool {
-        ticket.bindings.allSatisfy { binding in
-            scopes.contains { $0.key == binding.scope && $0.activation === binding.activation }
-        }
+            && operations.contains(ObjectIdentifier(ticket.operation))
+            && ticket.bindings.allSatisfy { activations.contains(SeenActivation($0)) }
     }
     private func reject(_ reason: Rejection) -> Admission { .rejected(reason, current: snapshot) }
 
@@ -764,30 +797,47 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         // keys, keep an edit that leaves many operations active linear in their number; the arrays keep
         // their order, which commands follow.
         let activations = Set(candidate.scopes.map(SeenActivation.init))
-        admissionWork += candidate.scopes.count + active.count
+        var work = candidate.scopes.count + active.count
+        defer { EngineWork.report(work) }
+        let retiring = Set(plan.retire.map { ObjectIdentifier($0.operation) })
         var remaining = active.filter { ticket in
             !plan.reset && ticket.bindings.allSatisfy { activations.contains(SeenActivation($0)) }
-                && !plan.retire.contains { $0.operation === ticket.operation }
+                && !retiring.contains(ObjectIdentifier(ticket.operation))
                 && !candidate.cancellations.contains { $0.revokes(ticket) }
         }
+        // The surviving operations of each group, and the plan's starts as they join it, are kept in one
+        // table, so a wide plan examines each start and each surviving operation once.
+        var groups: [ActiveGroup: [ObjectIdentifier]] = [:]
+        if !plan.starts.isEmpty {
+            work += remaining.count
+            for ticket in remaining {
+                groups[ActiveGroup(ticket), default: []].append(ObjectIdentifier(ticket.operation))
+            }
+        }
+        let planned = Dictionary(
+            candidate.scopes.map { (SeenScope($0.key), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var replaced: Set<ObjectIdentifier> = []
         var works: [RuntimeWork<Descriptor>] = []
         for (start, key) in zip(plan.starts, candidate.startKeys) {
             // Preparation established every binding and resolved every key; admission compares identities only.
-            let scope = candidate.scopes.first { $0.key == start.operation.scope }!
-            let group = remaining.filter {
-                $0.kind == start.operation.kind && $0.bindings.first?.activation === scope.activation && $0.key === key
-            }
+            let scope = planned[SeenScope(start.operation.scope)]!
+            let group = ActiveGroup(kind: start.operation.kind, activation: scope.activation, key: key)
+            let members = groups[group, default: []]
+            work += 1 + start.operation.dependencies.count
             switch start.operation.policy {
             case .latest:
-                remaining.removeAll { ticket in group.contains { $0.operation === ticket.operation } }
+                replaced.formUnion(members)
+                groups[group] = []
             case .rejectWhenActive:
-                if !group.isEmpty { return reject(.operationPolicy(.alreadyActive)) }
+                if !members.isEmpty { return reject(.operationPolicy(.alreadyActive)) }
             case .parallel(let limit):
-                if group.count >= limit { return reject(.operationPolicy(.parallelLimit)) }
+                if members.count >= limit { return reject(.operationPolicy(.parallelLimit)) }
             }
             var bindings = [RuntimeTicket.Binding(scope: scope.key, activation: scope.activation)]
             for key in start.operation.dependencies {
-                let dependency = candidate.scopes.first { $0.key == key }!
+                let dependency = planned[SeenScope(key)]!
                 bindings.append(.init(scope: key, activation: dependency.activation))
             }
             let ticket = RuntimeTicket(
@@ -799,13 +849,18 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
                 key: key
             )
             remaining.append(ticket)
+            groups[group, default: []].append(ObjectIdentifier(ticket.operation))
             works.append(RuntimeWork(descriptor: start.descriptor, ticket: ticket))
+        }
+        if !replaced.isEmpty {
+            work += remaining.count
+            remaining.removeAll { replaced.contains(ObjectIdentifier($0.operation)) }
         }
         if revision == UInt64.max - 1 { return reject(.revisionExhausted) }
         let survivors = Set(remaining.map { ObjectIdentifier($0.operation) })
         let revoked = active.filter { !survivors.contains(ObjectIdentifier($0.operation)) }
         let revokedOperations = Set(revoked.map { ObjectIdentifier($0.operation) })
-        admissionWork += remaining.count + active.count + reservations.count
+        work += remaining.count + active.count + reservations.count
         // Retiring work whose outcome is retained settles what that work already returned, so it gets no
         // cancellation; it keeps its execution reservation until its termination is acknowledged.
         let retained =
@@ -813,12 +868,12 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             ? []
             : Set(reservations.filter { $0.delivery == .pending }.map { ObjectIdentifier($0.ticket.operation) })
         let cancelled = revoked.filter { ticket in
-            !plan.retire.contains { $0.operation === ticket.operation }
+            !retiring.contains(ObjectIdentifier(ticket.operation))
                 || !retained.contains(ObjectIdentifier(ticket.operation))
         }
         // A commandless acceptance under `.commands` recording queues nothing, so it needs no slot.
         let queues = recording == .everyAcceptance || !cancelled.isEmpty || !works.isEmpty || !plan.emissions.isEmpty
-        if queues, queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
+        if queues, queue.count + detached >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
         var prospective = reservations
         for index in prospective.indices
         where revokedOperations.contains(ObjectIdentifier(prospective[index].ticket.operation)) {
@@ -840,7 +895,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         active = remaining
         // A key that no remaining work holds leaves the table; inserting it again mints a fresh identity.
         let held = Set(remaining.compactMap { $0.key.map(ObjectIdentifier.init) })
-        admissionWork += candidate.keys.count
+        work += candidate.keys.count
         keys = candidate.keys.filter { held.contains(ObjectIdentifier($0.identity)) }
         reservations = prospective
         revision += 1
@@ -907,7 +962,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         if revision == UInt64.max - 1 { return reject(.revisionExhausted) }
         let revoked = active
         let queues = recording == .everyAcceptance || !revoked.isEmpty
-        if queues, queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
+        if queues, queue.count + detached >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
         for index in reservations.indices { reservations[index].delivery = .settled }
         reservations.removeAll { $0.releasable }
         var examined = 0
@@ -929,8 +984,11 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
 
     /// Transfers whole FIFO batches, acknowledging revoked queued starts as skipped.
+    ///
+    /// Batches detached with `detachQueued()` come first: a drainer takes them with
+    /// `drain(detached:)` before it drains again.
     public mutating func drain(limit: Int) -> [Batch] {
-        guard limit > 0 else { return [] }
+        guard limit > 0, detached == 0 else { return [] }
         var result: [Batch] = []
         while result.count < limit {
             let batch: Batch
@@ -942,26 +1000,59 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             } else {
                 break
             }
-            var commands: [Command] = []
-            for command in batch.commands {
-                if case .start(let work) = command, !isActive(work.ticket) {
-                    if let index = reservations.firstIndex(where: { $0.ticket.operation === work.ticket.operation }) {
-                        reservations[index].execution = .skipped
-                        reservations[index].delivery = .settled
-                    }
-                } else {
-                    if case .start(let work) = command,
-                        let index = reservations.firstIndex(where: { $0.ticket == work.ticket })
-                    {
-                        reservations[index].execution = .issued
-                    }
-                    commands.append(command)
-                }
-            }
-            reservations.removeAll { $0.releasable }
-            result.append(Batch(snapshot: batch.snapshot, commands: commands, terminal: batch.terminal))
+            result.append(issue(batch))
         }
         return result
+    }
+
+    /// Moves every queued ordinary batch, oldest first, to a drainer that holds them outside this
+    /// value, so a value that several versions of an owner's state share is not copied for each batch.
+    ///
+    /// Each batch keeps its commit-queue slot, and nothing about it is decided, until the drainer
+    /// takes it with `drain(detached:)`, in order, in a later change of this value.
+    package mutating func detachQueued() -> RuntimeFIFO<Batch> {
+        detached += queue.count
+        return exchange(&queue, with: RuntimeFIFO())
+    }
+
+    /// Transfers the oldest batch that `detachQueued()` moved, as ``drain(limit:)`` transfers a queued
+    /// one, freeing its slot.
+    package mutating func drain(detached batch: Batch) -> Batch {
+        detached -= 1
+        return issue(batch)
+    }
+
+    // Issues a transferred batch's commands, acknowledging revoked queued starts as skipped.
+    //
+    // Reservations are looked up by their operation's identity, in a table built once for the batch.
+    private mutating func issue(_ batch: Batch) -> Batch {
+        var commands: [Command] = []
+        var reserved: [ObjectIdentifier: Int]?
+        for command in batch.commands {
+            guard case .start(let work) = command else {
+                commands.append(command)
+                continue
+            }
+            if reserved == nil {
+                reserved = Dictionary(
+                    reservations.indices.map { (ObjectIdentifier(reservations[$0].ticket.operation), $0) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+            }
+            let index = reserved?[ObjectIdentifier(work.ticket.operation)]
+            if !isActive(work.ticket) {
+                if let index {
+                    reservations[index].execution = .skipped
+                    reservations[index].delivery = .settled
+                }
+            } else {
+                if let index, reservations[index].ticket == work.ticket { reservations[index].execution = .issued }
+                commands.append(command)
+            }
+        }
+        EngineWork.report(batch.commands.count + (reserved == nil ? 0 : reservations.count))
+        reservations.removeAll { $0.releasable }
+        return Batch(snapshot: batch.snapshot, commands: commands, terminal: batch.terminal)
     }
 
     /// Returns immutable reservation diagnostics without granting mutation authority.

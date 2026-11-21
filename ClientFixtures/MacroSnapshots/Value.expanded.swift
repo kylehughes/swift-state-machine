@@ -195,6 +195,19 @@ fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snap
     }
 }
 
+fileprivate static func _stateMachinePhase(of record: _StateMachineEngine.Snapshot) -> Swift::String {
+    switch record.model {
+    case .idle:
+        return "idle"
+    case .done:
+        return "done"
+    }
+}
+
+fileprivate static func _stateMachineRefusingRoute(_ rejection: PreparationRejection, in phase: Swift::String) -> Swift::String? {
+    nil
+}
+
 /// A sealed inert candidate consumed by admission.
 ///
 /// A plan defect found while preparing travels inside it with the snapshot it was prepared on,
@@ -385,12 +398,7 @@ internal typealias Input = Counter.Input
     }
     /// The identifier of the phase a snapshot holds, as the graph names it.
     internal static func phase(of snapshot: Snapshot) -> Swift::String {
-        switch snapshot {
-    case .idle:
-        return "idle"
-    case .done:
-        return "done"
-    }
+        _stateMachinePhase(of: snapshot.record)
     }
     /// The receipt of an admitted proposal, or `nil` when admission rejected it.
     internal static func receipt(of result: CommitResult) -> Receipt? {
@@ -403,7 +411,10 @@ internal typealias Input = Counter.Input
     /// The identifier of the router or edge, as the graph names it, whose authored function refused an
     /// input that `send` rejected from a snapshot in `phase`, or `nil` when no authored function refused it.
     internal static func rejectingRoute(of rejection: SendRejection, in phase: Swift::String) -> Swift::String? {
-        nil
+        guard case .preparation(let preparation) = rejection else {
+        return nil
+    }
+        return _stateMachineRefusingRoute(preparation, in: phase)
     }
     /// A fresh initial payload, constructed as the schema's declared default constructs it.
     internal static func defaultInitialPhase() -> InitialPhase {

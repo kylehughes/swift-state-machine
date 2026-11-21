@@ -143,7 +143,7 @@ struct StateMachineMacro: MemberMacro {
         guard !genericEnclosingType else {
             throw MacroFailure("Generic schemas, including schemas inside a generic enclosing type, are unsupported.")
         }
-        let schema = try Schema.parse(enumeration, attribute: node, context: context)
+        let schema = try Schema.parse(enumeration, attribute: node)
         if let excess = schema.sizeLimitExcess {
             throw DiagnosticsError(diagnostics: [
                 Diagnostic(node: enumeration.name, message: SizeLimitMessage(message: excess))

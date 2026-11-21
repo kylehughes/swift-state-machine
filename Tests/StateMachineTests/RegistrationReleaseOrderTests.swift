@@ -53,15 +53,8 @@ private struct Signal: Sendable {
     }
 }
 
-/// Runs `body` on another thread and returns once it has.
-private func elsewhere(_ body: @escaping @Sendable () -> Void) {
-    let done = DispatchSemaphore(value: 0)
-    runOnOwnThread {
-        body()
-        done.signal()
-    }
-    done.wait()
-}
+/// Runs `body` on another thread and returns once it has, or once the waiting task is cancelled.
+private func elsewhere(_ body: @escaping @Sendable () -> Void) { runOnOwnThreadAndWait(body) }
 
 /// A `MainActor` host of the test's own with one subscriber slot.
 ///
@@ -219,7 +212,9 @@ private func elsewhere(_ body: @escaping @Sendable () -> Void) {
         let events = Events()
         let callbacks = Later<RegisteredCallbacks>()
         let entered = DispatchSemaphore(value: 0)
-        let proceed = DispatchSemaphore(value: 0)
+        let proceed = ThreadGate()
+        // A cancelled test lets the finish's cancellation go on its way out.
+        defer { proceed.open() }
         let sequence = try SnapshotSequence<Probe> { receive, finish in
             callbacks.fill(RegisteredCallbacks(receive: receive, finish: finish))
             return SnapshotSubscription {
@@ -234,14 +229,14 @@ private func elsewhere(_ body: @escaping @Sendable () -> Void) {
             callbacks.value?.finish()
             finishing.signal()
         }
-        entered.wait()
+        guard entered.waitUnlessCancelled() else { return }
         elsewhere {
             sequence.cancel(isolation: nil)
             events.record("cancel returned")
         }
         #expect(events.all == ["cancel returned"])
-        proceed.signal()
-        finishing.wait()
+        proceed.open()
+        finishing.waitUnlessCancelled()
         #expect(events.all == ["cancel returned", "slot freed", "released"])
     }
 }

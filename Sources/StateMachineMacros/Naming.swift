@@ -1,6 +1,3 @@
-import SwiftSyntax
-import SwiftSyntaxBuilder
-
 /// The names of generated companion types, derived from the parsed schema.
 ///
 /// Validation and generation both read these, so a name the parser accepts is the name the
@@ -158,6 +155,9 @@ extension Schema {
     /// The tables of the schema's phases, operations, events, and current transitions and routes.
     var tables: Tables {
         if let tables = tablesMemo.tables { return tables }
+        workCounter.work.tablesBuilt += 1
+        workCounter.work.tabledEntries +=
+            phases.count + scopes.count + operations.count + events.count + transitions.count + routes.count
         let tables = Tables(
             phases: phases,
             scopes: scopes,
@@ -176,10 +176,16 @@ extension Schema {
 
     /// Whether every router named `name` chooses among the same edges, in any order, so the short
     /// `Route.<Router>` names one type that all of them return.
-    func sharesChoice(_ name: String) -> Bool { tables.sharedChoices.contains(name) }
+    func sharesChoice(_ name: String) -> Bool {
+        workCounter.work.routerLookups += 1
+        return tables.sharedChoices.contains(name)
+    }
 
     /// Whether `name` belongs to one router only, so the short `Route.<Router>Result` names its owned result.
-    func ownsResultName(_ name: String) -> Bool { tables.ownedResults.contains(name) }
+    func ownsResultName(_ name: String) -> Bool {
+        workCounter.work.routerLookups += 1
+        return tables.ownedResults.contains(name)
+    }
 
     /// The spelling, inside the schema, of a router's choice type.
     func choiceType(_ route: Route) -> String? {
@@ -209,14 +215,33 @@ extension Schema {
     }
 
     /// The router that selects an edge: the first with edges to choose from the edge's source on its trigger.
-    func router(of edge: Transition) -> Route? { tables.byTrigger[edge.from]?[edge.trigger] }
+    func router(of edge: Transition) -> Route? {
+        workCounter.work.routerLookups += 1
+        return tables.byTrigger[edge.from]?[edge.trigger]
+    }
+
+    /// Whether an edge's own method on `Owned` or `Observed` has the schema's access: one that no router
+    /// chooses, and on `Observed` an input edge, since delivery alone reaches a completion edge there.
+    func hasOwnMethod(_ edge: Transition, observed: Bool) -> Bool {
+        router(of: edge) == nil && (!observed || edge.trigger.kind == .input)
+    }
+
+    /// Whether a router has a method on `Owned` or `Observed`: one with edges to choose, and on `Observed`
+    /// an input router.
+    func hasMethod(_ route: Route, observed: Bool) -> Bool {
+        !route.choices.isEmpty && (!observed || route.trigger.kind == .input)
+    }
 
     /// The routers with edges to choose from `phase`, in declaration order.
-    func choosingRouters(from phase: String) -> [Route] { tables.byPhase[phase] ?? [] }
+    func choosingRouters(from phase: String) -> [Route] {
+        workCounter.work.routerLookups += 1
+        return tables.byPhase[phase] ?? []
+    }
 
     /// A router's candidate edges in the order its choices list them.
     func branches(_ route: Route) -> [Transition] {
-        (tables.candidates[route.declaration] ?? []).map { transitions[$0] }
+        workCounter.work.routerLookups += 1
+        return (tables.candidates[route.declaration] ?? []).map { transitions[$0] }
     }
 
     /// The failure type of a router's `Owned` result's `rejected` case and of its `Observed` method's
@@ -284,6 +309,7 @@ extension Schema {
     /// It reads each function's failure once, in one pass, so the expansion computes it once rather than
     /// once for every case it names.
     var namesThrowingDifferentFailures: Set<String> {
+        workCounter.work.failureAnalyses += 1
         var failures: [String: Set<FailureIdentity>] = [:]
         for function in throwingFunctions {
             failures[function.name, default: []].insert(failureKey(function.failure))
@@ -410,6 +436,8 @@ extension Schema {
         private var standardFunctions: [StandardCheck: String] = [:]
         private var standardCounts: [String: Int] = [:]
         private var stageFunctions: [String?: String] = [:]
+        /// Where finding a function counts its lookups.
+        private let counter: WorkCounter
 
         private struct StandardCheck: Hashable {
             let standard: String
@@ -430,7 +458,10 @@ extension Schema {
         /// Whether a check sorts a type by whether it is `Sendable`.
         var sortsSharing: Bool { !routedShares.isEmpty || !routedJoins.isEmpty }
 
-        init(_ checks: [TypeCheck]) {
+        init(_ checks: [TypeCheck], counter: WorkCounter) {
+            self.counter = counter
+            counter.work.plansBuilt += 1
+            counter.work.plannedChecks += checks.count
             for check in checks {
                 switch check.kind {
                 case .isStandard(let standard, let message):
@@ -460,6 +491,7 @@ extension Schema {
         /// The function that checks a type is the standard library's `standard`, reporting `message`.
         mutating func function(_ standard: String, _ message: String?) -> String {
             let check = StandardCheck(standard: standard, message: message)
+            counter.work.planLookups += 1
             if let known = standardFunctions[check] { return known }
             let base = Schema.standardNameWitness(standard)
             let count = standardCounts[standard, default: 0]
@@ -472,6 +504,7 @@ extension Schema {
 
         /// The function that rejects a probe that found `Never`, reporting `message`.
         mutating func stage(_ message: String?) -> String {
+            counter.work.planLookups += 1
             if let known = stageFunctions[message] { return known }
             let name = "_stateMachineIsNotSwiftNever" + (stages.isEmpty ? "" : "\(stages.count + 1)")
             stages.append((message, name))
@@ -518,7 +551,7 @@ extension Schema {
     }
 
     /// The witness functions the expansion declares for its checks.
-    var checkPlan: CheckPlan { CheckPlan(typeChecks) }
+    var checkPlan: CheckPlan { CheckPlan(typeChecks, counter: workCounter) }
 
     /// Whether a function takes its payload as its own, so a caller gives it up: `consuming` or `__owned`,
     /// with or without `sending`, or `sending` without an ownership. `__shared sending` lends it.
@@ -683,6 +716,9 @@ extension Schema {
             ])
             if restoration != nil { names.insert("_stateMachineRestored") }
             if resetRejects { names.insert("ResetRejection") }
+            if generates(.local) || !operations.isEmpty {
+                names.formUnion(["_stateMachinePhase", "_stateMachineRefusingRoute"])
+            }
         }
         // Deprecated functions are called through a protocol and type of the expansion's, and a deprecated
         // input edge's `Observed` method through one that is not deprecated.
@@ -700,7 +736,7 @@ extension Schema {
             names.formUnion([
                 "Completion", "PendingStatus", "PendingCompletionID", "PendingCompletion", "ReconcileResult",
                 "DiscardResult", "_StateMachineLedger", "_stateMachineFinish", "_stateMachineDeliveryPreparation",
-                "_stateMachineCompletion",
+                "_stateMachineCompletion", "_stateMachineRefused",
             ])
         }
         if generates(.local) {
@@ -763,6 +799,7 @@ extension Schema {
     /// invisible to the macro, so it keys apart from the type it names. A router's `failure:` names the
     /// common failure explicitly.
     func failureKey(_ spelling: String) -> FailureIdentity {
+        workCounter.work.failuresRead += 1
         let authored = spellingAliasTargets[spelling] ?? spelling
         let type = spellings.type(authored)
         let reading = typeScopes.resolve(type)

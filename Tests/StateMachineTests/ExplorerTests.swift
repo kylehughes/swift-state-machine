@@ -51,6 +51,7 @@ private func families(_ text: String?) -> ExplorerFamilies {
         case "chains": result.insert(.chains)
         case "matrix": result.insert(.matrix)
         case "elsewhere": result.insert(.elsewhere)
+        case "images": result.insert(.images)
         default: break
         }
     }
@@ -150,6 +151,13 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
                     depth: full ? (depths ?? tiered(6, smoke: 4)) : 4
                 )
             )
+            // Completions behind a held report handler: their admission runs on the owner's workers, which
+            // turns do not order, so the deeper tiers only.
+            if full {
+                result.append(
+                    ExplorerConfiguration(kind: kind, families: [.images], depth: depths ?? tiered(5, smoke: 3))
+                )
+            }
             continue
         }
         let depth = full ? (environment["EXPLORER_TEARDOWN_DEPTH"].flatMap(Int.init) ?? tiered(5, smoke: 3)) : 3

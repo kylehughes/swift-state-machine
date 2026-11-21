@@ -681,7 +681,6 @@ struct Generator {
     func graph() -> String {
         // Every string the graph holds is escaped, so authored text, even text that spans lines, stays
         // one literal.
-        func literal(_ text: String) -> String { StringLiteralExprSyntax(content: text).description }
         func list(_ values: [String]) -> String { "[" + values.map(literal).joined(separator: ", ") + "]" }
         func optional(_ value: String?) -> String { value.map(literal) ?? "nil" }
         // The parser keeps each spelling the graph shows on one line, as the author wrote it.
@@ -787,15 +786,14 @@ struct Generator {
     /// the only one that can commit. An unrouted `Owned` completion edge stays callable: `Owned` holds
     /// no work authority and retains no outcome, so it is the caller's only way to finish its own typestate.
     func edgeAccess(_ edge: Schema.Transition, observed: Bool) -> String {
-        if router(of: edge) != nil { return "fileprivate " }
-        return observed && edge.trigger.kind != .input ? "fileprivate " : access
+        schema.hasOwnMethod(edge, observed: observed) ? access : "fileprivate "
     }
 
     /// The input routers that become `Observed` methods: those with candidate edges.
-    var inputRouters: [Schema.Route] { schema.routes.filter { $0.trigger.kind == .input && !$0.choices.isEmpty } }
+    var inputRouters: [Schema.Route] { schema.routes.filter { schema.hasMethod($0, observed: true) } }
 
     /// The routers that become `Owned` methods: every router with candidate edges, for an input or a completion.
-    var ownedRouters: [Schema.Route] { schema.routes.filter { !$0.choices.isEmpty } }
+    var ownedRouters: [Schema.Route] { schema.routes.filter { schema.hasMethod($0, observed: false) } }
 
     /// A router's candidate edges in declaration order.
     func branches(_ route: Schema.Route) -> [Schema.Transition] { schema.branches(route) }
@@ -946,7 +944,8 @@ struct Generator {
     /// The `PreparationRejection` case of a function, named for it or, when functions of its name throw
     /// different types, for its source phase and name.
     func rejectionCase(_ name: String, from: String) -> String {
-        Schema.rejectionCase(name, from: from, distinguished: distinguishedRejections)
+        schema.workCounter.work.rejectionCases += 1
+        return Schema.rejectionCase(name, from: from, distinguished: distinguishedRejections)
     }
 
     /// The `Owned` method that runs a router and then advances through the edge it selects.
@@ -1238,6 +1237,7 @@ struct Generator {
             fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: StateMachine::RuntimeDeliveryClaim? = nil) -> Snapshot {
                 switch record.model { \(observationCases) }
             }
+            \(refusingRoute())
             /// A sealed inert candidate consumed by admission.
             ///
             /// A plan defect found while preparing travels inside it with the snapshot it was prepared on,
@@ -1347,7 +1347,7 @@ struct Generator {
                 return _stateMachinePrepare(on: record, next: .\(edge.to)(\(starts ? "change.next" : "next")),
                     effects: \(starts ? "change.effects.map(\\.effect)" : "[]"),
                     from: \(index(edge.from)), to: \(index(edge.to)), invalidates: \(scopeIndices(edge.invalidates)),
-                    requiring: \(ticket), claim: claim, edge: \(StringLiteralExprSyntax(content: "\(edge.from).\(edge.name)")))
+                    requiring: \(ticket), claim: claim, edge: \(literal("\(edge.from).\(edge.name)")))
             }
             """
     }
@@ -1789,6 +1789,8 @@ struct Generator {
         }
         let pair = DispatchIndex.Pair(from: from, trigger: trigger)
         let edges = index.edges[pair] ?? []
+        schema.workCounter.work.dispatchedPairs += 1
+        schema.workCounter.work.dispatchedEdges += edges.count
         guard let route = index.routes[pair] else {
             return edges.first.map { dispatchEdge($0, source: source, arguments: arguments($0)) }
         }
@@ -1953,6 +1955,7 @@ struct Generator {
                 case committed(Receipt)
                 /// The outcome is retained; its status says what admission is waiting for.
                 case pending(PendingCompletionID, PendingStatus)
+                \(refusedCase)
                 /// The operation's authority is inactive or its outcome was already settled.
                 case stale
                 /// The completion was issued by a different owner.
@@ -1965,6 +1968,7 @@ struct Generator {
                 case committed(Receipt)
                 /// The outcome is still retained; its status says what admission is waiting for.
                 case pending(PendingCompletionID, PendingStatus)
+                \(refusedCase)
                 /// Another attempt holds the only preparation claim.
                 case inProgress
                 /// No outcome with this identity is retained.
@@ -1978,6 +1982,10 @@ struct Generator {
                 case rejected(CommitRejection)
                 /// No outcome with this identity is retained.
                 case notPending
+            }
+            /// The refusal of the outcome retained as `id`, whose preparation from `record` threw `rejection`.
+            fileprivate static func _stateMachineRefused(_ id: StateMachine::RuntimePendingID, _ rejection: PreparationRejection, on record: _StateMachineEngine.Snapshot) -> ReconcileResult {
+                .refused(PendingCompletionID(raw: id), rejection, routeID: _stateMachineRefusingRoute(rejection, in: _stateMachinePhase(of: record)))
             }
             fileprivate static func _stateMachineFinish(_ result: _StateMachineLedger.Finish) -> ReconcileResult {
                 switch result {
@@ -2157,6 +2165,7 @@ struct Generator {
                 switch reconcile(id: id) {
                 case .committed(let receipt): return .committed(receipt)
                 case .pending(let id, let status): return .pending(id, status)
+                case .refused(let id, let rejection, let routeID): return .refused(id, rejection, routeID: routeID)
                 case .inProgress: return .pending(id, .preparing)
                 case .notPending: return .stale
                 }
@@ -2170,7 +2179,11 @@ struct Generator {
             case .notPending: return .notPending
             case .claimed(let attempt):
                 let preparation = _stateMachineDeliveryPreparation(attempt)
-                return _stateMachineFinish(ledger.finish(attempt, preparation: preparation, in: &engine))
+                let finish = ledger.finish(attempt, preparation: preparation, in: &engine)
+                if case .failure(.preparation(let rejection)) = preparation, case .pending(let raw, .reconciliationRequired) = finish {
+                    return _stateMachineRefused(raw, rejection, on: attempt.snapshot)
+                }
+                return _stateMachineFinish(finish)
             }
         }
         /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
@@ -2273,9 +2286,6 @@ struct Generator {
     /// owner's saved data and rejection are inferred from its `reset(restoring:)`. The metadata reads
     /// only values the caller already holds and constructs no authority.
     func localWitnesses() -> String {
-        let phases = schema.phases
-            .map { "case .\($0.caseName): return \(StringLiteralExprSyntax(content: $0.caseName))" }
-            .joined(separator: "\n")
         var types = [
             "Input = \(name).Input", "Snapshot = \(name).Snapshot", "Receipt = \(name).Receipt",
             "SendRejection = \(name).SendRejection", "Prepared = \(name).Prepared",
@@ -2303,6 +2313,18 @@ struct Generator {
                 \(access)static func receipt(of result: DiscardResult) -> Receipt? {
                     if case .discarded(let receipt) = result { receipt } else { nil }
                 }
+                /// The identifier of the router or completion edge, as the graph names it, whose authored function
+                /// refused the outcome in the call that returned `result`, or `nil` when that call's preparation
+                /// did not refuse it.
+                \(access)static func rejectingRoute(of result: DeliveryResult) -> Swift::String? {
+                    if case .refused(_, _, let routeID) = result { routeID } else { nil }
+                }
+                /// The identifier of the router or completion edge, as the graph names it, whose authored function
+                /// refused the outcome in the call that returned `result`, or `nil` when that call's preparation
+                /// did not refuse it.
+                \(access)static func rejectingRoute(of result: ReconcileResult) -> Swift::String? {
+                    if case .refused(_, _, let routeID) = result { routeID } else { nil }
+                }
                 """
         }
         // A declared initial default is the payload `reset()` installs, which a harness reaches through it.
@@ -2315,9 +2337,7 @@ struct Generator {
             /// The declared structure of this owner's graph.
             \(access)static var graph: StateMachine::StateMachineGraph { \(schemaReference).graph }
             /// The identifier of the phase a snapshot holds, as the graph names it.
-            \(access)static func phase(of snapshot: Snapshot) -> Swift::String {
-                switch snapshot { \(phases) }
-            }
+            \(access)static func phase(of snapshot: Snapshot) -> Swift::String { _stateMachinePhase(of: snapshot.record) }
             /// The receipt of an admitted proposal, or `nil` when admission rejected it.
             \(access)static func receipt(of result: CommitResult) -> Receipt? {
                 if case .committed(let receipt) = result { receipt } else { nil }
@@ -2327,65 +2347,60 @@ struct Generator {
             """
     }
 
-    /// A `Local` owner's witnesses that name the router or edge whose authored function refused an input,
-    /// a delivered outcome, or a reconciled one.
+    /// A `Local` owner's witness that names the router or edge whose authored function refused an input.
+    func rejectingRoute() -> String {
+        """
+        /// The identifier of the router or edge, as the graph names it, whose authored function refused an
+        /// input that `send` rejected from a snapshot in `phase`, or `nil` when no authored function refused it.
+        \(access)static func rejectingRoute(of rejection: SendRejection, in phase: Swift::String) -> Swift::String? {
+            guard case .preparation(let preparation) = rejection else { return nil }
+            return _stateMachineRefusingRoute(preparation, in: phase)
+        }
+        """
+    }
+
+    /// The `DeliveryResult` and `ReconcileResult` case of an outcome that the call's own preparation refused.
+    var refusedCase: String {
+        """
+        /// This call prepared the outcome, and its routing or an authored function refused it, so the outcome
+        /// is retained with status `reconciliationRequired`.
+        ///
+        /// `routeID` is the identifier of the router or completion edge whose authored function refused it,
+        /// as `graph` names it, or `nil` when no authored function refused it.
+        case refused(PendingCompletionID, PreparationRejection, routeID: Swift::String?)
+        """
+    }
+
+    /// The identifier of the phase a root holds, and of the router or edge whose authored function threw a
+    /// `PreparationRejection` from a phase, which a `Local` owner and every refused outcome report.
     ///
     /// Each throwing function's `PreparationRejection` case, from each phase it leaves, names that phase's
     /// router or edge of the function's name, as the graph identifies it; any other rejection names none.
-    /// A delivery or reconciliation is attributed only while its outcome waits for reconciliation, from
-    /// the preparation rejection its retained record keeps.
-    func rejectingRoute() -> String {
+    func refusingRoute() -> String {
+        guard schema.generates(.local) || hasOperations else { return "" }
+        let phases = schema.phases
+            .map { "case .\($0.caseName): return \(literal($0.caseName))" }
+            .joined(separator: "\n")
         var seen = Set<String>()
         let cases = schema.throwingFunctions
             .compactMap { function -> String? in
                 let rejection = rejectionCase(function.name, from: function.from)
                 guard seen.insert("\(rejection) \(function.from)").inserted else { return nil }
-                let phase = StringLiteralExprSyntax(content: function.from).description
-                let route = StringLiteralExprSyntax(content: "\(function.from).\(function.name)").description
+                let phase = literal(function.from)
+                let route = literal("\(function.from).\(function.name)")
                 return "case (.\(rejection), \(phase)): return \(route)"
             }
         let body =
             cases.isEmpty
             ? "nil"
-            : """
-            guard case .preparation(let preparation) = rejection else { return nil }
-            switch (preparation, phase) {
-            \(cases.joined(separator: "\n"))
-            default: return nil
-            }
-            """
-        let send = """
-            /// The identifier of the router or edge, as the graph names it, whose authored function refused an
-            /// input that `send` rejected from a snapshot in `phase`, or `nil` when no authored function refused it.
-            \(access)static func rejectingRoute(of rejection: SendRejection, in phase: Swift::String) -> Swift::String? {
-                \(body)
-            }
-            """
-        guard hasOperations else { return send }
-        // A retained outcome's last rejection is a preparation rejection, the case `send` reports, so one
-        // switch names the function for both.
-        let retained =
-            cases.isEmpty
-            ? "nil"
-            : """
-            guard case .pending(let id, .reconciliationRequired) = result,
-                case .preparation(let preparation)? = pendingCompletions().first(where: { $0.id == id })?.lastRejection
-            else { return nil }
-            return Self.rejectingRoute(of: .preparation(preparation), in: phase)
-            """
+            : (["switch (rejection, phase) {"] + cases + ["default: return nil", "}"])
+                .joined(separator: "\n")
         return """
-            \(send)
-            /// The identifier of the router or completion edge, as the graph names it, whose authored function
-            /// refused the outcome that `deliver` left retained with `result`, preparing it from a snapshot in
-            /// `phase`, or `nil` when no authored function refused it.
-            \(access)borrowing func rejectingRoute(of result: DeliveryResult, in phase: Swift::String) -> Swift::String? {
-                \(retained)
+            fileprivate static func _stateMachinePhase(of record: _StateMachineEngine.Snapshot) -> Swift::String {
+                switch record.model { \(phases) }
             }
-            /// The identifier of the router or completion edge, as the graph names it, whose authored function
-            /// refused the outcome that `reconcile(id:)` left retained with `result`, preparing it from a snapshot
-            /// in `phase`, or `nil` when no authored function refused it.
-            \(access)borrowing func rejectingRoute(of result: ReconcileResult, in phase: Swift::String) -> Swift::String? {
-                \(retained)
+            fileprivate static func _stateMachineRefusingRoute(_ rejection: PreparationRejection, in phase: Swift::String) -> Swift::String? {
+                \(body)
             }
             """
     }
@@ -2687,15 +2702,20 @@ struct Generator {
                 try \(awaiting)host.\(projected) { transform($0.map(PendingCompletion.init)) }
             }
             /// Explicitly claims a fresh preparation attempt for a retained outcome.
-            \(access)func reconcile(id: PendingCompletionID)\(asynchronous) -> ReconcileResult { Self.reconciled(\(awaiting)host.reconcile(id: id.raw)) }
+            \(access)func reconcile(id: PendingCompletionID)\(asynchronous) -> ReconcileResult {
+                Self.reconciled(\(awaiting)host.reconcileReportingRefusal(id: id.raw))
+            }
             /// Revokes retained delivery with an authority-only admission.
             ///
             /// The operation's work already returned the outcome it settles, so the commit issues no
             /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
             \(access)func discardPending(id: PendingCompletionID)\(asynchronous) -> DiscardResult { Self.discarded(\(awaiting)host.discardPending(id: id.raw)) }
             // The raw host reports only the cases each operation can produce; the rest cannot occur.
-            private static func reconciled(_ result: \(delivery)) -> ReconcileResult {
-                switch result {
+            private static func reconciled(_ result: (delivery: \(delivery), refusal: Host.Refusal?)) -> ReconcileResult {
+                if let refusal = result.refusal, case .pending(let id, .reconciliationRequired) = result.delivery {
+                    return _stateMachineRefused(id, refusal.failure, on: refusal.snapshot)
+                }
+                switch result.delivery {
                 case .committed(let record): return .committed(Receipt(record))
                 case .pending(let id, let status): return .pending(PendingCompletionID(raw: id), status)
                 case .inProgress: return .inProgress
@@ -3037,7 +3057,7 @@ struct Generator {
             }
             /// Explicitly claims a fresh preparation attempt for a retained outcome.
             \(access)func reconcile(id: PendingCompletionID, \(isolation)) -> ReconcileResult {
-                Self.reconciled(host.reconcile(id: id.raw, isolation: isolation))
+                Self.reconciled(host.reconcileReportingRefusal(id: id.raw, isolation: isolation))
             }
             /// Revokes retained delivery with an authority-only admission.
             ///
@@ -3047,8 +3067,11 @@ struct Generator {
                 Self.discarded(host.discardPending(id: id.raw, isolation: isolation))
             }
             // The raw host reports only the cases each operation can produce; the rest cannot occur.
-            private static func reconciled(_ result: StateMachine::RuntimeHostDelivery<\(name), Effect>) -> ReconcileResult {
-                switch result {
+            private static func reconciled(_ result: (delivery: StateMachine::RuntimeHostDelivery<\(name), Effect>, refusal: Host.Refusal?)) -> ReconcileResult {
+                if let refusal = result.refusal, case .pending(let id, .reconciliationRequired) = result.delivery {
+                    return _stateMachineRefused(id, refusal.failure, on: refusal.snapshot)
+                }
+                switch result.delivery {
                 case .committed(let record): return .committed(Receipt(record))
                 case .pending(let id, let status): return .pending(PendingCompletionID(raw: id), status)
                 case .inProgress: return .inProgress

@@ -174,8 +174,15 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
             }
             waiter?.continuation.resume()
         }
-        // A match left the wait's call in its entry; a cancellation removed the entry.
-        let outcome = state.withLock { $0.waits.removeValue(forKey: id) }
+        // A match left the wait's call in its entry; a cancellation removed the entry. A wait that
+        // ended unanswered stays queued until the waits that ended so outnumber the live ones.
+        let outcome = state.withLock { state in
+            let outcome = state.waits.removeValue(forKey: id)
+            var unanswered = exchange(&state.unanswered, with: ArrivalQueue())
+            defer { state.unanswered = unanswered }
+            unanswered.reclaim(keeping: state.waits.count) { state.isWaiting($0) }
+            return outcome
+        }
         guard case .answered(let call)? = outcome else { return nil }
         return call
     }

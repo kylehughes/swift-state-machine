@@ -121,13 +121,10 @@ private final class BackReference {
 /// Hands one reference to another thread, which drops it while the main actor waits.
 private func drop<Kept: Sendable>(_ kept: consuming Kept, after: @escaping @Sendable () -> Void = {}) {
     let slot = OSAllocatedUnfairLock<Kept?>(initialState: kept)
-    let dropped = DispatchSemaphore(value: 0)
-    runOnOwnThread {
+    runOnOwnThreadAndWait {
         slot.withLock { $0 = nil }
         after()
-        dropped.signal()
     }
-    dropped.wait()
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct ConfinedDisposalTests {
@@ -373,7 +370,7 @@ private func drop<Kept: Sendable>(_ kept: consuming Kept, after: @escaping @Send
         guard let held = host.take() else { return }
         await dropAfterItsJob(consume held)
         #expect(await stream.next() == nil)
-        while releases.count < 2 { await releases.wait() }
+        while releases.count < 2, !Task.isCancelled { await releases.wait() }
         #expect(releases.offMain == 0)
     }
 

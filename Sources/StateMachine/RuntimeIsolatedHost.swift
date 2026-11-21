@@ -391,11 +391,27 @@ public final class RuntimeIsolatedHost<Owner: Actor, Model, Descriptor, Outcome,
         confirm(isolation)
         return reconcile(id: id, automatic: false, isolation: isolation)
     }
+    /// The root a refused preparation ran on, and the typed failure it threw.
+    public typealias Refusal = (snapshot: Engine.Snapshot, failure: DomainFailure)
+    /// Acquires one explicit reconciliation attempt as `reconcile(id:)` does, and returns with its result
+    /// the refusal its own preparation produced, when that refusal left the outcome
+    /// `reconciliationRequired`.
+    public func reconcileReportingRefusal(
+        id: RuntimePendingID,
+        isolation: isolated Owner
+    ) -> (delivery: Delivery, refusal: Refusal?) {
+        confirm(isolation)
+        var refusal: Refusal?
+        let delivery = reconcile(id: id, automatic: false, refused: { refusal = ($0, $1) }, isolation: isolation)
+        guard case .pending(_, .reconciliationRequired) = delivery else { return (delivery, nil) }
+        return (delivery, refusal)
+    }
     private func reconcile(
         id: RuntimePendingID,
         automatic: Bool,
         retained: RuntimeDeliveryDecision? = nil,
         scheduledRetry: Bool = false,
+        refused: ((Engine.Snapshot, DomainFailure) -> Void)? = nil,
         isolation: isolated Owner
     ) -> Delivery {
         // Only the first claim of a queued turn depends on the decision that queued it.
@@ -420,7 +436,11 @@ public final class RuntimeIsolatedHost<Owner: Actor, Model, Descriptor, Outcome,
                 withExtendedLifetime(retained) {}
                 return claim
             },
-            prepare: preparation,
+            prepare: { attempt in
+                let prepared = preparation(attempt)
+                if case .failure(.preparation(let failure)) = prepared { refused?(attempt.snapshot, failure) }
+                return prepared
+            },
             finish: { attempt, candidate in
                 // The attempt's decision is captured before any callout. A callout can reconcile again,
                 // and each attempt must report its own decision once.
@@ -502,7 +522,7 @@ public final class RuntimeIsolatedHost<Owner: Actor, Model, Descriptor, Outcome,
         let result = engine.reset(model, scopes: scopes, expecting: expected)
         if case .committed = result {
             ledger.prune(in: engine)
-            ready.prune(keeping: ledger.pending.map(\.id))
+            ready.prune(keeping: ledger.pendingIDs)
             scheduleDrain(isolation)
         }
         changed()
@@ -602,14 +622,7 @@ public final class RuntimeIsolatedHost<Owner: Actor, Model, Descriptor, Outcome,
     }
     private func capacityConflicts() -> [Ledger.Pending] {
         retainDisplaceable()
-        let results = ledger.retryCapacity(in: &engine)
-        return results.compactMap { result in
-            guard case .pending(let id, .reconciliationRequired) = result,
-                let pending = ledger.pending.first(where: { $0.id == id }),
-                case .admission(.conflict) = pending.lastRejection
-            else { return nil }
-            return pending
-        }
+        return ledger.retryCapacityConflicts(in: &engine)
     }
     private func retryCapacity(_ isolation: isolated Owner) {
         handleCapacityConflicts(capacityConflicts(), isolation: isolation)
@@ -633,9 +646,9 @@ public final class RuntimeIsolatedHost<Owner: Actor, Model, Descriptor, Outcome,
     @discardableResult
     private func deliverReports() -> Bool {
         var delivering = false
-        while let pending = reports.take(continuing: delivering) {
+        while var taken = reports.takeAll(continuing: delivering) {
             delivering = true
-            reconciliationRequired(pending)
+            while let pending = taken.popFirst() { reconciliationRequired(pending) }
         }
         return !reports.isDelivering
     }
@@ -664,7 +677,7 @@ public final class RuntimeIsolatedHost<Owner: Actor, Model, Descriptor, Outcome,
     }
     private func retryTurn(_ isolation: isolated Owner) {
         _ = pruneCancelledRegistrations()
-        ready.prune(keeping: ledger.pending.map(\.id))
+        ready.prune(keeping: ledger.pendingIDs)
         let ids = ready.takeRound()
         for id in ids { _ = reconcile(id: id, automatic: true, scheduledRetry: true, isolation: isolation) }
         if ready.finishRound() {

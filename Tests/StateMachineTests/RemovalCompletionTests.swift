@@ -44,9 +44,10 @@ private final class Ledger: Sendable {
         }
         signal.raise()
     }
-    /// Returns once `count` releases have been recorded.
+    /// Returns once `count` releases have been recorded, or once the waiting task is cancelled, when
+    /// every wait for the signal returns at once.
     func wait(forReleases count: Int) async {
-        while released < count { await signal.wait() }
+        while released < count, !Task.isCancelled { await signal.wait() }
     }
 }
 
@@ -76,7 +77,7 @@ private final class WorkerSlotHost: Sendable {
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let entered = DispatchSemaphore(value: 0)
-    private let proceed = DispatchSemaphore(value: 0)
+    private let proceed = ThreadGate()
     private let returned = DispatchSemaphore(value: 0)
     private let ledger: Ledger
 
@@ -125,14 +126,16 @@ private final class WorkerSlotHost: Sendable {
             token?.cancel()
             returned.signal()
         }
-        entered.wait()
+        entered.waitUnlessCancelled()
     }
     /// Lets the cancellation in progress free the slot and return, and returns once it has.
     func finishCancelling() {
         state.withLock { $0.waits = false }
-        proceed.signal()
-        returned.wait()
+        proceed.open()
+        returned.waitUnlessCancelled()
     }
+    /// Lets a cancellation in progress free the slot without waiting for it, on a test's way out.
+    func releaseWorker() { proceed.open() }
     /// Cancels the last token on a worker and returns once that cancellation has returned.
     func cancelOnWorker() {
         let token = state.withLock { $0.token }
@@ -140,19 +143,14 @@ private final class WorkerSlotHost: Sendable {
             token?.cancel()
             returned.signal()
         }
-        returned.wait()
+        returned.waitUnlessCancelled()
     }
 }
 
 /// Hands one reference to another thread, which drops it while the main actor waits.
 private func drop<Kept: Sendable>(_ kept: consuming Kept) {
     let slot = OSAllocatedUnfairLock<Kept?>(initialState: kept)
-    let dropped = DispatchSemaphore(value: 0)
-    runOnOwnThread {
-        slot.withLock { $0 = nil }
-        dropped.signal()
-    }
-    dropped.wait()
+    runOnOwnThreadAndWait { slot.withLock { $0 = nil } }
 }
 
 /// Where the token's cancellation stands when the presentation ends the registration.
@@ -249,6 +247,8 @@ struct RemovalCase: CustomTestStringConvertible, Sendable {
         let (end, cancellation) = (removal.end, removal.cancellation)
         let ledger = Ledger()
         let host = WorkerSlotHost(ledger)
+        // A thrown error returns before the step that lets the worker's cancellation go.
+        defer { host.releaseWorker() }
         guard let presentation = Passive.make(kind) else { return }
         presentation.observe(try host.sequence(first: Shot(31, "shown", ledger)))
         // The observation's task was enqueued first, so it waits for the next element by now.
@@ -643,6 +643,11 @@ private final class WorkerSharedHost: SharedStateMachineHost {
         let ledger = Ledger()
         let a = WorkerSharedHost(ledger)
         let b = WorkerSharedHost(ledger)
+        // A thrown error returns before the steps that let the workers' cancellations go.
+        defer {
+            a.slot.releaseWorker()
+            b.slot.releaseWorker()
+        }
         var reports: [String] = []
         let record: @MainActor (Bool) -> Void = { live in
             reports.append(live ? "true" : "false, occupied \(a.slot.registrations + b.slot.registrations)")

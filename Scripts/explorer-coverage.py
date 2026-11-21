@@ -8,7 +8,9 @@ registration state are those of the observation the callback concerns, read when
 top-level event it ran under. This script reads one or more such files, sets the reached cells against the cells that
 apply to each presentation class, and prints, in Markdown, each class's reached count and its site by phase table, the
 registration states and origins each phase was reached in, the applicable cells it did not reach, and the cells that
-do not apply, grouped by reason. Run the `matrix` family for each class, each into a file of its own, then aggregate
+do not apply, grouped by reason. The tables join the attempts, registration states and origins of the cells in each
+phase; `--cells PATH` also writes every distinct reached cell with all eight coordinates, one per line, so that no
+combination is lost to that join. Run the `matrix` family for each class, each into a file of its own, then aggregate
 them:
 
     mkdir -p /tmp/state-machine-coverage
@@ -152,8 +154,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('coverage', type=Path, nargs='+', help='Files that EXPLORER_COVERAGE runs wrote')
     parser.add_argument('--output', type=Path, help='Write the Markdown here instead of to standard output')
+    parser.add_argument('--cells', type=Path, help='Also write every distinct reached cell, all eight coordinates')
     args = parser.parse_args()
-    text = report(*read_cells(args.coverage))
+    cells, details = read_cells(args.coverage)
+    text = report(cells, details)
+    if args.cells:
+        full = sorted('|'.join(cell + entry) for cell in cells for entry in details.get(cell, set()))
+        args.cells.write_text(''.join(line + '\n' for line in full))
 
     if args.output:
         args.output.write_text(text)

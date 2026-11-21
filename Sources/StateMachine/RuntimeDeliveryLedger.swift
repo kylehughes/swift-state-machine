@@ -140,17 +140,18 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
     /// The number of retained envelopes, including any claimed by preparation.
     package var pendingCount: Int { entries.count }
     /// Historical typed projections; projecting does not claim preparation.
-    public var pending: [Pending] {
-        entries.map {
-            Pending(
-                id: $0.id,
-                outcome: $0.outcome,
-                status: $0.status,
-                lastRejection: $0.reason,
-                attempts: $0.attempts,
-                decision: $0.decision
-            )
-        }
+    public var pending: [Pending] { entries.map(Self.project) }
+    /// The identities of the retained envelopes.
+    package var pendingIDs: Set<RuntimePendingID> { Set(entries.map(\.id)) }
+    private static func project(_ entry: Entry) -> Pending {
+        Pending(
+            id: entry.id,
+            outcome: entry.outcome,
+            status: entry.status,
+            lastRejection: entry.reason,
+            attempts: entry.attempts,
+            decision: entry.decision
+        )
     }
     /// Retains the first outcome together with its engine delivery disposition.
     public mutating func retain(_ outcome: Outcome, for ticket: RuntimeTicket, in engine: inout Engine) -> Retention {
@@ -245,11 +246,16 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
             return admit(terminal, index: index, in: &engine)
         }
     }
-    private mutating func admit(_ candidate: Engine.Candidate, index: Int, in engine: inout Engine) -> Finish {
+    private mutating func admit(
+        _ candidate: Engine.Candidate,
+        index: Int,
+        in engine: inout Engine,
+        pruning: Bool = true
+    ) -> Finish {
         switch engine.commit(candidate) {
         case .committed(let snapshot):
             entries.remove(at: index)
-            prune(in: engine)
+            if pruning { prune(in: engine) }
             return .committed(snapshot)
         case .rejected(let reason, _):
             guard engine.isActive(entries[index].ticket) else {
@@ -284,33 +290,59 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
     /// Marks one pure-conflict result eligible for a later bounded scheduler round.
     ///
     /// Only the decision that lost the conflict can schedule its retry. Each envelope gets at most
-    /// `turns` automatic turns that end in a conflict, the first being the one that delivered it;
+    /// `conflictRetryTurns` automatic turns that end in a conflict, the first being the one that delivered it;
     /// after the last, the envelope stays `reconciliationRequired` and the result is `exhausted`.
     /// Anything other than `scheduled` leaves the envelope unchanged.
     package mutating func scheduleRetry(
         _ id: RuntimePendingID,
-        after decision: RuntimeDeliveryDecision,
-        turns: Int = conflictRetryTurns
+        after decision: RuntimeDeliveryDecision
     ) -> RetryScheduling {
         guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].claim == nil,
             entries[index].decision.matches(decision), entries[index].status == .reconciliationRequired
         else { return .superseded }
-        guard entries[index].conflictTurns + 1 < turns else { return .exhausted }
+        guard entries[index].conflictTurns + 1 < Self.conflictRetryTurns else { return .exhausted }
         entries[index].conflictTurns += 1
         entries[index].status = .retryScheduled
         return .scheduled
     }
     /// Admission-only retry; no router or reducer is evaluated here.
-    public mutating func retryCapacity(in engine: inout Engine) -> [Finish] {
+    public mutating func retryCapacity(in engine: inout Engine) -> [Finish] { retryingCapacity(in: &engine).results }
+    /// Admission-only retry of every retained candidate, in retention order, which returns the
+    /// projection of each retried envelope that a root conflict left `reconciliationRequired`, in
+    /// retention order, as its retry left it.
+    package mutating func retryCapacityConflicts(in engine: inout Engine) -> [Pending] {
+        retryingCapacity(in: &engine).conflicts
+    }
+    private mutating func retryingCapacity(in engine: inout Engine) -> (results: [Finish], conflicts: [Pending]) {
         prune(in: engine)
-        let ids = entries.filter { $0.candidate != nil }.map(\.id)
         var results: [Finish] = []
-        for id in ids {
-            guard let index = entries.firstIndex(where: { $0.id == id }), let candidate = entries[index].candidate
-            else { continue }
-            results.append(admit(candidate, index: index, in: &engine))
+        var conflicts: [Pending] = []
+        // Each entry is visited once by each prune and once by the retry.
+        var work = 2 * entries.count
+        defer { EngineWork.report(work) }
+        // An admission removes only the entry it admits or finds revoked, so the next entry is then at
+        // the same index; pruning what a commit revoked waits until every candidate was tried.
+        var index = 0
+        while index < entries.count {
+            guard let candidate = entries[index].candidate else {
+                index += 1
+                continue
+            }
+            let id = entries[index].id
+            work += 1
+            let result = admit(candidate, index: index, in: &engine, pruning: false)
+            results.append(result)
+            guard index < entries.count, entries[index].id == id else { continue }
+            if case .pending(_, .reconciliationRequired) = result, case .admission(.conflict)? = entries[index].reason {
+                conflicts.append(Self.project(entries[index]))
+            }
+            index += 1
         }
-        return results
+        let count = entries.count
+        prune(in: engine)
+        guard entries.count != count else { return (results, conflicts) }
+        let kept = pendingIDs
+        return (results, conflicts.filter { kept.contains($0.id) })
     }
     /// Admission-only retry of one retained candidate; no router or reducer is evaluated here.
     ///
@@ -414,7 +446,7 @@ nonisolated package struct RuntimeDeliveryReadyQueue: Sendable {
         return true
     }
     /// Removes queued identities that no longer have retained envelopes.
-    package mutating func prune(keeping pending: [RuntimePendingID]) { ids.removeAll { !pending.contains($0) } }
+    package mutating func prune(keeping pending: Set<RuntimePendingID>) { ids.removeAll { !pending.contains($0) } }
     /// Whether no ready IDs or responsible scheduling turn remain.
     package var isIdle: Bool { !scheduled && ids.isEmpty }
     /// Transfers one rotating round while retaining its scheduler responsibility.

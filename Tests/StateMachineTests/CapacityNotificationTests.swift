@@ -53,7 +53,7 @@ private struct CapacityScenario: Sendable {
         close: @escaping @Sendable () async -> Void
     ) -> Task<Void, Never> {
         Task {
-            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            do { try await Task.sleep(for: .seconds(60)) } catch { return }
             await close()
             await drivers.releaseAll()
             event.finish()

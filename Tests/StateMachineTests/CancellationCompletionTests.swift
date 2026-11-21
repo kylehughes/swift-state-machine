@@ -292,7 +292,7 @@ struct PassiveCase: CustomTestStringConvertible, Sendable {
             live = { made.isObserving }
         }
         try observe()
-        while !live() { await Task.yield() }
+        while !live(), !Task.isCancelled { await Task.yield() }
         let watch = onEnd(presentation) {
             guard freeAtReport == nil else { return }
             freeAtReport = host.registrations == 0

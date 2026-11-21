@@ -2,7 +2,6 @@ import Foundation
 import SwiftDiagnostics
 import SwiftParser
 import SwiftSyntax
-import SwiftSyntaxMacroExpansion
 import Testing
 
 @testable import StateMachineMacros
@@ -67,7 +66,7 @@ struct IdentityTests {
         let declaration = try #require(syntax.statements.first?.item.as(EnumDeclSyntax.self))
         let attribute = try #require(declaration.attributes.first?.as(AttributeSyntax.self))
         do {
-            _ = try Schema.parse(declaration, attribute: attribute, context: BasicMacroExpansionContext())
+            _ = try Schema.parse(declaration, attribute: attribute)
             Issue.record("Expected the decomposed name to be refused")
         } catch let error as DiagnosticsError {
             let diagnostic = try #require(error.diagnostics.first)

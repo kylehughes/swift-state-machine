@@ -102,6 +102,30 @@ private func readDOTString(_ text: Substring) -> (String, Substring)? {
     return nil
 }
 
+/// Reads a DOT quoted identifier at the start of `text`, returning the identifier and the rest of `text`.
+///
+/// As the DOT grammar does, it reads `\"` as a quotation mark and removes a backslash and a line feed,
+/// a line continuation; every other scalar, a backslash included, stands for itself.
+private func readDOTID(_ text: Substring) -> (String, Substring)? {
+    let scalars = text.unicodeScalars
+    guard scalars.first == "\"" else { return nil }
+    var identifier = ""
+    var index = scalars.index(after: scalars.startIndex)
+    while index < scalars.endIndex {
+        let scalar = scalars[index]
+        if scalar == "\"" { return (identifier, Substring(scalars[scalars.index(after: index)...])) }
+        let next = scalars.index(after: index)
+        if scalar == "\\", next < scalars.endIndex, scalars[next] == "\"" || scalars[next] == "\n" {
+            if scalars[next] == "\"" { identifier.unicodeScalars.append("\"") }
+            index = scalars.index(after: next)
+            continue
+        }
+        identifier.unicodeScalars.append(scalar)
+        index = next
+    }
+    return nil
+}
+
 /// How DOT renders `name`: every line ending as one line break.
 private func renderedLines(_ name: String) -> String {
     var rendered = ""
@@ -237,12 +261,13 @@ extension String {
     // identifier, or to another phase's identifier stay text.
     @Test func dotStringsRenderEveryHostileName() throws {
         let graph = hostileGraph()
-        let lines = graph.dot().split(separator: "\n", omittingEmptySubsequences: false)
-        let header = try #require(lines.first)
-        #expect(header.hasPrefix("digraph "))
-        let (name, afterName) = try #require(readDOTString(header.dropFirst(8)))
+        let dot = graph.dot()
+        #expect(dot.hasPrefix("digraph "))
+        // The identifier can span a line continuation, so the lines are read after it.
+        let (name, afterName) = try #require(readDOTID(dot.dropFirst(8)[...]))
         #expect(name == graph.name)
-        #expect(afterName == " {")
+        let lines = afterName.split(separator: "\n", omittingEmptySubsequences: false)
+        #expect(lines.first == " {")
         #expect(lines[1] == "    entry [shape=point];")
         var labels: [String: String] = [:]
         var declared: [String] = []
@@ -284,6 +309,68 @@ extension String {
         #expect(named.map { labels[$0.1] } == Array(rendered.dropFirst()))
         #expect(edges.filter { $0.0 == "entry" }.map { labels[$0.1] } == Array(rendered.prefix(2)))
         #expect(!labels.keys.contains("entry"))
+    }
+
+    // The graph's identifier is not a label, so an ampersand in the graph's name is written as itself,
+    // while a phase of the same name is labeled with its entity.
+    @Test func dotWritesTheGraphIdentifierWithoutLabelEscapes() throws {
+        for name in [
+            "R&D", "&amp;", "a\"b\\c", "two\nlines", "a\\b", "a\\\\b", "a\\\"b", "trailing\\", "back\\\nslash",
+        ] {
+            let graph = StateMachineGraph(
+                name: name,
+                mode: .shared,
+                owners: [.owned],
+                initial: "R&D",
+                terminal: [],
+                restorable: [],
+                phases: [.init(id: "R&D", payload: "Void")],
+                inputs: [],
+                scopes: [],
+                operations: [],
+                events: [],
+                edges: [],
+                routers: []
+            )
+            let dot = graph.dot()
+            let (identifier, after) = try #require(readDOTID(dot.dropFirst(8)[...]), "\(dot)")
+            #expect(identifier == name)
+            #expect(after.hasPrefix(" {\n"))
+            #expect(dot.contains("    p0 [label=\"R&amp;D\"];"))
+        }
+        let ampersand = StateMachineGraph(
+            name: "R&D",
+            mode: .shared,
+            owners: [.owned],
+            initial: "a",
+            terminal: [],
+            restorable: [],
+            phases: [.init(id: "a", payload: "Void")],
+            inputs: [],
+            scopes: [],
+            operations: [],
+            events: [],
+            edges: [],
+            routers: []
+        )
+        #expect(ampersand.dot().hasPrefix("digraph \"R&D\" {\n"))
+        // A backslash stands for itself in a quoted identifier.
+        let backslash = StateMachineGraph(
+            name: "a\\b",
+            mode: .shared,
+            owners: [.owned],
+            initial: "a",
+            terminal: [],
+            restorable: [],
+            phases: [.init(id: "a", payload: "Void")],
+            inputs: [],
+            scopes: [],
+            operations: [],
+            events: [],
+            edges: [],
+            routers: []
+        )
+        #expect(backslash.dot().hasPrefix("digraph \"a\\b\" {\n"))
     }
 
     // Rendering a graph with many terminal phases finds each phase's outline in a set built once, and

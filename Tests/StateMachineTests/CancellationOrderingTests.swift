@@ -19,9 +19,12 @@ private struct Signal: Sendable {
 
     init() { (stream, continuation) = AsyncStream<Void>.makeStream() }
     func raise() { continuation.yield(()) }
-    func wait() async {
+    /// Returns once the event is raised, or at once when the waiting task is cancelled.
+    ///
+    /// - Returns: Whether the event was raised.
+    @discardableResult func wait() async -> Bool {
         var iterator = stream.makeAsyncIterator()
-        _ = await iterator.next()
+        return await iterator.next() != nil
     }
 }
 
@@ -194,13 +197,17 @@ private actor MainThreadActor {
     // The first canceller of a token is still inside its cancellation, which closes the registration's
     // gate only at its end. A second canceller that finds the cancellation taken returns after the gate
     // closed, because every call closes the gate before it reads the cancellation.
+    //
+    // A cancelled test lets the first canceller go on its way out: its wait for the first to enter ends
+    // at once, and it does not cancel the token itself, which would make it the first canceller.
     @Test func aSecondTokenCancellerReturnsAfterTheGateClosed() async {
         let gate = RuntimeRegistrationGate()
         let entered = Signal()
-        let proceed = DispatchSemaphore(value: 0)
+        let proceed = ThreadGate()
+        defer { proceed.open() }
         let token = SnapshotSubscription(gate: gate) {
             entered.raise()
-            proceed.wait()
+            proceed.waitUnlessCancelled()
             gate.close()
         }
         let finished = Signal()
@@ -208,10 +215,10 @@ private actor MainThreadActor {
             token.cancel()
             finished.raise()
         }
-        await entered.wait()
+        guard await entered.wait() else { return }
         token.cancel()
         #expect(!gate.isOpen)
-        proceed.signal()
+        proceed.open()
         await finished.wait()
     }
 

@@ -44,9 +44,10 @@ private final class Releases: Sendable {
         signal.raise()
     }
     func note(_ event: String) { state.withLock { $0.events.append(event) } }
-    /// Returns once `count` releases have been recorded.
+    /// Returns once `count` releases have been recorded, or once the waiting task is cancelled, when
+    /// every wait for the signal returns at once.
     func wait(for count: Int) async {
-        while self.count < count { await signal.wait() }
+        while self.count < count, !Task.isCancelled { await signal.wait() }
     }
 }
 
@@ -73,12 +74,7 @@ private final class Capture: Sendable {
 /// Hands one reference to another thread, which drops it while the main actor waits.
 private func drop<Kept: Sendable>(_ kept: consuming Kept) {
     let slot = OSAllocatedUnfairLock<Kept?>(initialState: kept)
-    let dropped = DispatchSemaphore(value: 0)
-    runOnOwnThread {
-        slot.withLock { $0 = nil }
-        dropped.signal()
-    }
-    dropped.wait()
+    runOnOwnThreadAndWait { slot.withLock { $0 = nil } }
 }
 
 /// A sequence of an owner of the test's own, whose token records its cancellation.

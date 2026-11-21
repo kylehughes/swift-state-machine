@@ -55,15 +55,8 @@ private final class TaskSlot: Sendable {
     func cancel() { stored.withLock { $0 }?.cancel() }
 }
 
-/// Runs `body` on another thread and returns once it has.
-private func elsewhere(_ body: @escaping @Sendable () -> Void) {
-    let done = DispatchSemaphore(value: 0)
-    runOnOwnThread {
-        body()
-        done.signal()
-    }
-    done.wait()
-}
+/// Runs `body` on another thread and returns once it has, or once the waiting task is cancelled.
+private func elsewhere(_ body: @escaping @Sendable () -> Void) { runOnOwnThreadAndWait(body) }
 
 /// A sequence of an owner of the test's own, which the test feeds element by element.
 private final class Feed: Sendable {

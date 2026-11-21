@@ -6,9 +6,9 @@ import StateMachine
 /// Coverage is bound to an owner type, so only runs of that owner count toward it: a graph of another
 /// schema, even one with identical structure, cannot be recorded. Record the history of each
 /// ``ManualMachineTest`` that a test drives, then read ``unexercisedEdges``, ``unexercisedRouters``,
-/// ``unexercisedRejectingRoutes``, and ``unvisitedPhases``, or require coverage with
-/// ``requireCoverage(excluding:fileID:filePath:line:column:)``, which also fails for every invariant a
-/// recorded run violated:
+/// ``unexercisedRejectingRouters``, and ``unvisitedPhases``, or require coverage with
+/// ``requireCoverage(excluding:includingRejectingRouters:fileID:filePath:line:column:)``, which also
+/// fails for every invariant a recorded run violated:
 ///
 /// ```swift
 /// var coverage = GraphCoverage(for: GeneratedTransfers.Local.self)
@@ -21,8 +21,9 @@ import StateMachine
 /// Every step comes from a real owner admitting a real change, and names the edge from that change's
 /// receipt, so an exercised edge is one that a test actually took, even when a router chooses between
 /// edges with the same destination. Every rejection comes from the real owner refusing an input, or a
-/// completion that `deliver` or `reconcile` prepared, and names the route the owner reports for it, so
-/// a route counts as declining only once a test saw it decline.
+/// completion that a `deliver` or `reconcile` call itself prepared, and names the route, a router or an
+/// edge, that the owner reports for that call, so a route counts as declining only once a test saw it
+/// decline.
 nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: Sendable {
     /// The graph the coverage measures: the owner's.
     public var graph: StateMachineGraph { Owner.graph }
@@ -87,10 +88,10 @@ nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: S
     /// Such a router exists only to decline an input or a completion, so no step can exercise it. An
     /// input router counts once a recorded run's ``ManualMachineTest/rejection(of:fileID:filePath:line:column:)``
     /// or failed ``ManualMachineTest/send(_:fileID:filePath:line:column:)`` made the real owner refuse an
-    /// input through it, and a completion router once a recorded run's `deliver` or `reconcile` made the
-    /// real owner refuse a completion through it, as the owner names the route that refused. An owner
-    /// that names no route for its rejections leaves every such router listed.
-    public var unexercisedRejectingRoutes: [StateMachineGraph.Router] {
+    /// input through it, and a completion router once a recorded run's `deliver` or `reconcile` prepared a
+    /// completion that the real owner refused through it, as that call's result names the route. An
+    /// owner that names no route for its rejections leaves every such router listed.
+    public var unexercisedRejectingRouters: [StateMachineGraph.Router] {
         graph.routers.filter { $0.candidates.isEmpty && !rejectingRouteIDs.contains($0.id) }
     }
 
@@ -102,16 +103,18 @@ nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: S
     /// edge and a router that leave one phase cannot share a name. A router counts as exercised once a
     /// step takes one of its candidate edges.
     ///
-    /// It requires nothing of rejections: a router that declined, or an edge or router whose function
-    /// can throw, is not required to have refused an input, and a router without candidates, which
-    /// always declines, is not required at all. Read ``unexercisedRejectingRoutes`` for the routers
-    /// without candidates that no recorded run saw decline.
+    /// By default it requires nothing of rejections: a router that declined, or an edge or router whose
+    /// function can throw, is not required to have refused an input, and a router without candidates,
+    /// which always declines, is not required at all. With `includingRejectingRouters`, it also requires
+    /// every router without candidates, except those in `excluded`, to have declined in a recorded run,
+    /// as ``unexercisedRejectingRouters`` lists them.
     ///
-    /// The failure lists each unexercised edge and router, each unvisited phase, each violation, the
-    /// number of changes made inside `withOwner` that no invariant could check, and the number of
-    /// owners replaced there.
+    /// The failure lists each unexercised edge and router, each required rejecting router that never
+    /// declined, each unvisited phase, each violation, the number of changes made inside `withOwner`
+    /// that no invariant could check, and the number of owners replaced there.
     public func requireCoverage(
         excluding excluded: Set<String> = [],
+        includingRejectingRouters: Bool = false,
         fileID: String = #fileID,
         filePath: String = #filePath,
         line: Int = #line,
@@ -119,10 +122,13 @@ nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: S
     ) throws(StateMachineTestFailure) {
         let edges = unexercisedEdges.map(\.id).filter { !excluded.contains($0) }
         let routers = unexercisedRouters.map(\.id).filter { !excluded.contains($0) }
+        let rejecting =
+            includingRejectingRouters ? unexercisedRejectingRouters.map(\.id).filter { !excluded.contains($0) } : []
         let phases = unvisitedPhases.map(\.id)
         var parts: [String] = []
         if !edges.isEmpty { parts.append("unexercised edges: " + edges.joined(separator: ", ")) }
         if !routers.isEmpty { parts.append("unexercised routers: " + routers.joined(separator: ", ")) }
+        if !rejecting.isEmpty { parts.append("unexercised rejecting routers: " + rejecting.joined(separator: ", ")) }
         if !phases.isEmpty { parts.append("unvisited phases: " + phases.joined(separator: ", ")) }
         if !violations.isEmpty { parts.append("invariant violations: " + violations.joined(separator: "; ")) }
         if unobservedChanges > 0 {

@@ -1,7 +1,6 @@
 import SwiftDiagnostics
 import SwiftParser
 import SwiftSyntax
-import SwiftSyntaxMacroExpansion
 import Testing
 
 @testable import StateMachineMacros
@@ -180,7 +179,7 @@ struct DeclarationRefusalTests {
             let declaration = try #require(syntax.statements.first?.item.as(EnumDeclSyntax.self))
             let attribute = try #require(declaration.attributes.first?.as(AttributeSyntax.self))
             do {
-                _ = try Schema.parse(declaration, attribute: attribute, context: BasicMacroExpansionContext())
+                _ = try Schema.parse(declaration, attribute: attribute)
                 return nil
             } catch let error as DiagnosticsError {
                 return error.diagnostics.map(\.message)
