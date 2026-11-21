@@ -36,8 +36,8 @@ one owner. It requires `Sendable` model data, effect descriptions, and outcomes;
 its immutable preparation and driver closures run outside the storage lock.
 Generated facades project their sealed domain types through this common host.
 
-``RuntimeMainActorHost`` and ``RuntimeActorHost`` own the value engine and
-delivery ledger directly on their actor. Their synchronous input handling can
+``RuntimeMainActorHost``, ``RuntimeActorHost``, and ``RuntimeIsolatedHost`` own
+the value engine and delivery ledger directly on their actor. Their synchronous input handling can
 read, prepare, and admit in one isolated turn. They release stored-property
 access before invoking domain functions or observation callbacks, and recheck
 the captured revision if synchronous reentry changed it. For each accepted
@@ -46,8 +46,9 @@ batch, they process start commands and advance the revision tracked by
 `MainActor` callback can delay a scheduled driver on the same actor. Releasing a
 host without closing it finishes its retained registrations without a closed
 snapshot. The `MainActor` host can retain non-`Sendable` value data within that
-actor; the native actor host requires `Sendable` data at its crossing
-boundaries.
+actor, and so can the isolated host within the actor instance it is created
+with, which it holds weakly; the native actor host requires `Sendable` data at
+its crossing boundaries.
 
 ## Define the trust boundary
 
@@ -70,7 +71,7 @@ independent owner is required.
 ## Bind operations to scope activations
 
 ``RuntimeScopeID`` combines a primitive kind with an optional retained instance
-identity. Resolve domain keys before constructing runtime plans. Removing and
+identity, and ``RuntimeKey`` carries a keyed operation's resolved key. Resolve domain keys before constructing runtime plans. Removing and
 reactivating a scope creates a new activation, even when its visible domain key
 is unchanged. A ticket from the earlier activation cannot authorize the new
 instance.
@@ -80,7 +81,7 @@ root edits preserve that authority, while a completion proposal still needs a
 fresh whole-root observation. Declare semantic dependencies explicitly; the
 runtime cannot infer them from arbitrary model fields.
 
-| Policy | Active authority in one scope activation and operation kind |
+| Policy | Active authority in one scope activation, operation kind, and key |
 | --- | --- |
 | `latest` | Revoke older members when the replacement is accepted. |
 | `rejectWhenActive` | Reject if a member would remain active after this transition's retirements and scope invalidations. |
@@ -122,18 +123,22 @@ available for explicit reconciliation. A candidate's rejected authority also
 does not discard an outcome whose own operation remains active.
 
 A raw host takes a ``RuntimeCompletionPolicy`` and a separate reconciliation
-callback. Its default, `manualOnConflict`, retains a failed attempt with its
-typed reason and passes the retained completion to the callback. `retryPure`
-permits automatic preparation after root conflicts, with at most four
-preparations per result in a scheduling turn before yielding. Choose it only
-for deterministic, side-effect-free preparation. Every automatic retry,
-immediate or scheduled, acts on the decision of the attempt that lost the
-conflict. An explicit attempt that finishes first makes a newer decision, and
-the retry neither prepares again nor replaces a candidate that waits for
-capacity. A capacity retry reuses the
-sealed candidate and does not rerun preparation. A generated owner combines the
-two raw parameters into one `CompletionPolicy` value that carries its handler
-and defaults to `.retryPure`.
+callback. Its default, ``RuntimeCompletionPolicy/manual``, retains a failed
+attempt with its typed reason and passes the retained completion to the
+callback. ``RuntimeCompletionPolicy/retry`` permits automatic preparation after
+root conflicts, with at most four preparations per result in a scheduling turn
+before yielding, and at most sixteen turns that end in a conflict before the
+result parks for explicit reconciliation. Choose it only for deterministic,
+side-effect-free preparation. Every automatic retry, immediate or scheduled,
+acts on the decision of the attempt that lost the conflict. An explicit attempt
+that finishes first makes a newer decision, and the retry neither prepares
+again nor replaces a candidate that waits for capacity. A capacity retry reuses
+the sealed candidate and does not rerun preparation. A generated owner combines
+the two raw parameters into one `CompletionPolicy` value that carries its
+optional handler. It defaults to `.retry` unless one of the schema's
+completions can refuse its outcome, as
+[Settle completions that do not commit](<doc:HostingAGraph#Settle-completions-that-do-not-commit>)
+describes.
 
 Managed defaults allow 256 queued batches, 64 effect descriptions per plan, 256
 execution reservations, and 128 subscriptions. Use

@@ -43,8 +43,8 @@ does not promise that its revision is still current. Preparing from it reads
 that captured value and creates a noncopyable proposal without starting work.
 
 Commit consumes the proposal and checks its owner, incarnation, authority, and
-whole-root revision. The raw runtime changes its incarnation when it resets an
-owner, so proposals from before the reset can no longer be committed. A
+whole-root revision. An owner changes its incarnation when it resets, so
+proposals from before the reset can no longer be committed. A
 rejection returns the current observation so the caller can make a new
 decision. A defective effect plan travels inside the proposal and is reported by
 `commit` as a rejection, never as a silent success. Copying an observation does

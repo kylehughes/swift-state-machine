@@ -17,57 +17,113 @@ effects it describes. The runtime decides whether a hosted proposal, or the
 result of work a transition started, still has authority to change the model.
 
 Start with <doc:DeclaringAGraph>, which builds a graph one declaration at a
-time. <doc:Ownership> explains the owners it generates, <doc:Persistence>
-restores saved data into a graph, and <doc:TestingAGraph> tests each of them.
-The raw runtime that generated owners rely on is advanced material at the end.
+time and explains the structural checks every graph passes. <doc:HostingAGraph>
+chooses an owner and drives it, <doc:ObservingState> reads its snapshots as they
+change, and <doc:RunningEffectsYourself> executes the work of `Owned` and
+`Local` owners by hand. <doc:Persistence> restores saved data into a graph, and
+<doc:TestingAGraph> tests each part of it with the companion
+`StateMachineTesting` library. The raw runtime that generated owners rely on is
+advanced material at the end.
 
 ## Topics
 
-### Declaring a graph
+### Essentials
 
 - <doc:DeclaringAGraph>
+- <doc:HostingAGraph>
+- <doc:ObservingState>
+- <doc:RunningEffectsYourself>
+- <doc:Ownership>
 
-### The macros
+### Declaring a graph
 
 - ``StateMachine(mode:)``
+- ``StateMachine(mode:owners:)``
+- ``StateMachineMode``
+- ``StateMachineOwner``
 - ``Initial()``
-- ``Transition(on:invalidates:starts:)``
-- ``Transition(onSuccess:invalidates:starts:)``
-- ``Transition(onFailure:invalidates:starts:)``
-- ``Operation(scope:requires:activeIn:admission:)``
+- ``Terminal()``
+
+### Declaring transitions
+
+- ``Transition(on:invalidates:starts:cancels:emits:)``
+- ``Transition(from:on:invalidates:starts:cancels:emits:)``
+- ``Transition(onSuccess:invalidates:starts:cancels:emits:)``
+- ``Transition(onFailure:invalidates:starts:cancels:emits:)``
+- ``Transition(invalidates:starts:cancels:emits:)``
+- ``Transition(from:invalidates:starts:cancels:emits:)``
 - ``Route(on:)``
+- ``Route(on:failure:)``
 - ``Route(onSuccess:)``
 - ``Route(onFailure:)``
-- ``Restoration(allows:)``
-- ``StateMachineMode``
-- ``StateMachineAdmission``
-
-### Owners, edges, and observation
-
-- <doc:Ownership>
 - ``Change``
 - ``Advance``
+
+### Declaring operations, scopes, and events
+
+- ``Operation(requires:activeIn:admission:)``
+- ``Operation(scope:requires:admission:)``
+- ``StateMachineAdmission``
+- ``Active(in:)``
+- ``Event()``
+
+### Exporting a graph
+
+- <doc:ExportingAGraph>
+- ``StateMachineGraph``
+
+### Admitting changes
+
 - ``PlanRejection``
 - ``CommitRejection``
 - ``StateMachineSnapshot``
 - ``StateMachineReceipt``
-- ``MainActorStateMachineHost``
+
+### Observing owners
+
+- ``ObservableMainActorHost``
 - ``SnapshotSequence``
 - ``MainActorSnapshotSequence``
+- ``IsolatedSnapshotSequence``
+- ``SnapshotPublisher``
 - ``SnapshotSubscription``
 - ``MainActorSnapshotSubscription``
+- ``IsolatedSnapshotSubscription``
 - ``SubscriptionFailure``
 
-### Limits, delivery, and shutdown
+### Executing work and settling delivery
+
+- ``OperationRequest``
+- ``KeyedOperationRequest``
+- ``ExecutionDisposition``
+- ``AcknowledgmentResult``
+- ``PendingStatus``
+- ``FlushResult``
+- ``ShutdownDiagnostics``
+
+### Bounding capacity
 
 - ``Limits``
 - ``ManagedConfiguration``
-- ``PendingStatus``
-- ``ShutdownDiagnostics``
+
+### Owner protocols
+
+- ``MainActorStateMachineHost``
+- ``SharedStateMachineHost``
+- ``ActorStateMachineHost``
+- ``IsolatedStateMachineHost``
+- ``LocalStateMachine``
+- ``DrainingLocalStateMachine``
+- ``DeliveringLocalStateMachine``
+- ``DefaultingLocalStateMachine``
+- ``RestoringLocalStateMachine``
+- ``LocalCommandBatch``
 
 ### Restoring saved data
 
 - <doc:Persistence>
+- ``Restoration(allows:)``
+- ``Restoration(only:)``
 
 ### Testing a graph
 
@@ -84,12 +140,14 @@ The raw runtime that generated owners rely on is advanced material at the end.
 - ``RuntimeOperation``
 - ``RuntimeOperationPolicy``
 - ``RuntimeScopeID``
+- ``RuntimeKey``
 - ``RuntimeIdentity``
 - ``RuntimeWork``
 - ``RuntimeTicket``
 - ``RuntimeSharedHost``
 - ``RuntimeMainActorHost``
 - ``RuntimeActorHost``
+- ``RuntimeIsolatedHost``
 - ``RuntimeDeliveryLedger``
 - ``RuntimeDeliveryClaim``
 - ``RuntimeCompletionPolicy``

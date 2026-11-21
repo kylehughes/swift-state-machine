@@ -5,7 +5,7 @@ Persist validated model data and create new authority when it is restored.
 A saved value is ordinary data. It carries no live ticket, observation
 provenance, prepared transition, or task, so restoring it never resumes work.
 The schema declares how saved data becomes a phase, and every owner except
-`Owned` can then be created from it with fresh authority at revision zero.
+`Owned` can then be created from it, or reset into it, with fresh authority.
 
 This article builds on one graph. A download is idle, running, or finished. Its
 saved form, `Archive`, is its own `Codable` enum, so the application chooses
@@ -34,7 +34,7 @@ nonisolated enum Download: Sendable {
 
     @Initial case idle(Idle)
     case running(Running)
-    case finished(Finished)
+    @Terminal case finished(Finished)
 
     enum Input: Sendable { case start, resume, cancel }
 
@@ -85,11 +85,14 @@ nonisolated enum Download: Sendable {
 A function marked `@Restoration` takes the saved data as its one unlabeled
 parameter, which can be any type the application defines. It returns the
 generated `Restoration` enum, and it may use typed `throws` to reject the data.
-Declaring it gives `Local`, `Shared`, `ActorHost`, and `MainActorHost` an
-`init(restoring:)` that mirrors the ordinary initializer, takes the saved data
-in place of the initial payload, and throws exactly when the function does.
-A managed owner's `init(restoring:)` also has the form with one driver closure
-per operation:
+Declaring it gives `Local`, `Shared`, `ActorHost`, `MainActorHost`, and
+`IsolatedHost` an `init(restoring:)` that mirrors the ordinary initializer,
+takes the saved data in place of the initial payload, and throws exactly when
+the function does. A function that takes the saved data as `sending` receives it
+transferred: every `init(restoring:)` and `Local`'s restoring resets take it as
+`sending` too, as ``RestoringLocalStateMachine`` does for every `Local`. A
+managed owner's `init(restoring:)` also has the form with one driver closure per
+operation:
 
 ```swift
 func restoreDownload(
@@ -99,8 +102,9 @@ func restoreDownload(
 }
 ```
 
-The restored owner starts at revision zero and starts no tasks. An observation,
-completion, or proposal from any other owner cannot authorize work on it.
+The restored owner starts at revision zero and starts no tasks, exactly as a
+fresh owner that starts in the restored phase. An observation, completion, or
+proposal from any other owner cannot authorize work on it.
 
 ### Choose which phases restore
 
@@ -127,6 +131,17 @@ author decides whether the archive still restores into it. A phase in which no
 operation is active may be listed as well. Listing it pins it, so a later
 operation that becomes active there leaves it restorable and the validator keeps
 compiling.
+
+`@Restoration(only:)` names the restorable phases exactly instead. Its
+`Restoration` has one case for each listed phase and no other, whether or not an
+operation may be active in it, so changing where operations run never changes
+the phases an archive can name. A validator declared as
+`@Restoration(only: [Idle.self, Finished.self])` cannot return `.running`, and
+it cannot return a resting phase that the list leaves out.
+
+A phase that restoration can enter is an entrance to the graph, like the
+initial phase, so the macro's graph checks treat it as reachable with no work
+running.
 
 ## Fork an owner
 
@@ -157,10 +172,45 @@ from the original owner cannot authorize work on the fork, so a presentation
 for the fork is a new presentation: it starts a new revision history rather
 than continuing the original's.
 
-A generated owner has no in-place reset. To start over, restore or construct a
-new owner and retire the old one with `close()` and `shutdown()`. A revoked
-driver can still be running until it cooperatively finishes, because resetting
-data does not establish physical termination.
+## Reset an owner from saved data
+
+`reset(restoring:)` validates saved data and replaces an existing owner's model
+with the phase it restores, in a fresh incarnation. The owner keeps its
+identity and subscribers, so a presentation that observes it shows the restored
+state, and its revision advances rather than starting over. Every outstanding
+operation is revoked, with its cancellation in the reset's batch, and every
+retained completion is dropped, so a late result is stale. When the validator
+throws, the reset throws `ResetRejection`, with `.restoration(_:)` for the
+validator's failure and `.commit(_:)` for the owner's refusal; a validator that
+cannot fail makes the reset throw `CommitRejection` alone:
+
+```swift
+func reload(_ download: Download.Shared, from archive: Download.Archive) {
+    do {
+        let receipt = try download.reset(restoring: archive)
+        print("Reloaded at revision \(receipt.revision)")
+    } catch {
+        switch error {
+        case .restoration(let rejection):
+            print("The archive is invalid: \(rejection)")
+        case .commit(let rejection):
+            print("The owner refused the reset: \(rejection)")
+        }
+    }
+}
+```
+
+The owner refuses a reset once it is closed, when no ordinary revision remains,
+and when it must queue a batch while its commit queue is full: a managed host
+queues every reset, and a `Local` queues one only to cancel revoked work. A revoked driver can still be running until
+it cooperatively finishes, because resetting data does not establish physical
+termination, so its execution keeps counting in `runningCount` until it ends.
+`reset(restoring:expecting:)` restores the same way only while the owner still
+holds the root of the snapshot passed as `expecting:`, for a reload that a user
+confirmed against what they saw, and otherwise throws `.commit(.conflict)` or
+another refusal and changes nothing. `reset(to:)` resets into a fresh initial
+payload in the same way, as
+[Start over with reset](<doc:HostingAGraph#Start-over-with-reset>) describes.
 
 ## Encode and decode an archive
 
