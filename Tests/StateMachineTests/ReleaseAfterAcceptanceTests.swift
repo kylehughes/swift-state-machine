@@ -2,6 +2,7 @@ import Combine
 import Dispatch
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -193,11 +194,10 @@ struct ReleaseAfterAcceptanceTests {
             paused.withLock { $0 = true }
             MainActor.assumeIsolated { holder.publisher?.subscribe(subscriber) }
             let dropped = DispatchSemaphore(value: 0)
-            DispatchQueue.global()
-                .async {
-                    owner.withLock { $0 = nil }
-                    dropped.signal()
-                }
+            runOnOwnThread {
+                owner.withLock { $0 = nil }
+                dropped.signal()
+            }
             dropped.wait()
         }
         try HandOffPause.$afterTaking.withValue(pause) {

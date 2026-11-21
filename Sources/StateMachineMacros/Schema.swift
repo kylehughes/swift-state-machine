@@ -7,16 +7,22 @@ import SwiftSyntaxMacros
 struct Schema {
     struct Phase {
         let caseName: String
+        /// The name of the payload type the schema declares, however the case spells it.
         let typeName: String
+        /// The payload's spelling as the graph shows it: the case's own text, which means what it means
+        /// inside the schema.
+        let payloadSpelling: String
         /// Whether the phase is marked `@Terminal`.
         let isTerminal: Bool
     }
 
     struct Case {
         let caseName: String
-        /// The payload's spelling as the author wrote it, on one line as the graph shows it, which means what
+        /// The payload's spelling as the graph shows it (``Schema/displaySpelling(_:)``), which means what
         /// it means inside the enum that declares the case: the schema for a phase, `Input` for an input.
         let payloadType: String?
+        /// The payload's authored syntax, which every reading of its meaning uses.
+        let payload: TypeSyntax?
         /// The declared default construction, spelled through the schema's alias so it resolves in every
         /// generated owner.
         var defaultValue: String?
@@ -220,6 +226,26 @@ struct Schema {
         var takesRequest: Bool { requestType != nil }
         /// Whether the authored function takes the source payload.
         var takesSource: Bool { sourceType != nil }
+        /// The authored function's deprecation.
+        var deprecation: Deprecation?
+    }
+
+    /// The deprecation of an authored edge, router, or restoration function, which each generated public
+    /// member named for the function repeats.
+    ///
+    /// Generated code that is not itself deprecated calls the function through a requirement of a protocol
+    /// the expansion declares, which a deprecated member of a type it declares witnesses, so the call draws
+    /// no deprecation warning.
+    struct Deprecation {
+        /// The authored attribute, `@available(*, deprecated)` with any `message:` and `renamed:`, as written.
+        let attribute: String
+        /// The function's declaration with numbered parameters and `Self` spelled as the schema, as the
+        /// requirement and its witness declare it.
+        let declaration: String
+        /// Whether the function declares `throws`.
+        let declaresThrows: Bool
+        /// The witness's call of the authored function with its parameters.
+        let call: String
     }
 
     struct Route {
@@ -250,6 +276,8 @@ struct Schema {
 
         /// Whether a completion router takes its operation's request.
         var takesRequest: Bool { requestType != nil }
+        /// The authored function's deprecation.
+        var deprecation: Deprecation?
     }
 
     /// The authored function that validates saved data into a restorable phase.
@@ -265,6 +293,8 @@ struct Schema {
         let allows: [String]
         /// The phase cases listed in `only:`, which are exactly the restorable phases.
         let only: [String]?
+        /// The authored function's deprecation.
+        var deprecation: Deprecation?
 
         /// The saved data as a generated parameter declares it: its passing convention, then its type.
         ///
@@ -456,39 +486,26 @@ struct Schema {
     /// type reference that is not a member of another and names no module, and each custom attribute's name.
     static func freeNames(_ spelling: TypeSyntax) -> Set<String> {
         var result = Set<String>()
-        for token in spelling.tokens(viewMode: .sourceAccurate) {
-            guard case .identifier = token.tokenKind,
-                let reference = token.parent?.as(IdentifierTypeSyntax.self), reference.name.id == token.id,
-                reference.moduleSelector == nil, TypeQualifier.resolvesByLookup(reference)
-            else { continue }
-            result.insert(token.lookupName)
+        for reference in TypeQualifier.lookupReferences(in: spelling) {
+            guard case .identifier = reference.name.tokenKind else { continue }
+            result.insert(reference.name.lookupName)
         }
         return result
     }
 
-    /// A type spelling on one line, as graph metadata shows it.
+    /// A type spelling as graph metadata shows it: the author's tokens in order, exactly as written,
+    /// with one space between two tokens wherever whitespace, a line break, or a comment separated them,
+    /// and nothing else.
     ///
-    /// It is the authored tokens without comments, separated by one space wherever the author separated
-    /// them, except inside brackets, read from the author's syntax, so a spelling the graph shows is never
-    /// parsed again: parsing nested brackets takes time that doubles with each level.
+    /// It is read from the author's syntax, so a spelling the graph shows is never parsed again: parsing
+    /// nested brackets takes time that doubles with each level.
     static func displaySpelling(_ type: some SyntaxProtocol) -> String {
         var result = ""
-        // Whether the previous token opens a bracket, and whether trivia follows it.
-        var opens = true
-        var spaced = false
+        var separated = false
         for token in type.tokens(viewMode: .sourceAccurate) {
-            let closes: Bool
-            switch token.tokenKind {
-            case .rightParen, .rightSquare, .rightAngle, .comma, .colon: closes = true
-            default: closes = false
-            }
-            if !opens, !closes, spaced || token.leadingTriviaLength.utf8Length > 0 { result += " " }
+            if !result.isEmpty, separated || token.leadingTriviaLength.utf8Length > 0 { result += " " }
             result += token.text
-            switch token.tokenKind {
-            case .leftParen, .leftSquare, .leftAngle: opens = true
-            default: opens = false
-            }
-            spaced = token.trailingTriviaLength.utf8Length > 0
+            separated = token.trailingTriviaLength.utf8Length > 0
         }
         return result
     }
@@ -627,11 +644,10 @@ enum TypeQualifier {
 
     /// The spelling of `type` with its references to `Self` and `names` qualified with `owner`.
     static func qualify(_ type: TypeSyntax, owner: String, names: Set<String>) -> String {
+        let references = Set(lookupReferences(in: type).map(\.name.id))
         var result = ""
         for token in type.tokens(viewMode: .sourceAccurate) {
-            guard let reference = token.parent?.as(IdentifierTypeSyntax.self), reference.name.id == token.id,
-                reference.moduleSelector == nil, resolvesByLookup(reference)
-            else {
+            guard references.contains(token.id) else {
                 result += token.description
                 continue
             }
@@ -649,9 +665,27 @@ enum TypeQualifier {
         return result
     }
 
+    /// The references in `type` that unqualified name lookup resolves, in source order.
+    ///
+    /// They are each type named without a module selector outside an attribute, and the name of each
+    /// custom attribute, such as a global actor. A built-in attribute's name such as `Sendable` in
+    /// `@Sendable`, an attribute's arguments, a label, a specifier, a member after a period, and a name
+    /// after a module selector are not among them.
+    ///
+    /// Every reader that asks which declarations a spelling's names may bind takes them from here.
+    static func lookupReferences(in type: some SyntaxProtocol) -> [IdentifierTypeSyntax] {
+        type.tokens(viewMode: .sourceAccurate)
+            .compactMap { token in
+                guard let reference = token.parent?.as(IdentifierTypeSyntax.self), reference.name.id == token.id,
+                    reference.moduleSelector == nil, resolvesByLookup(reference)
+                else { return nil }
+                return reference
+            }
+    }
+
     /// Whether name lookup resolves the reference: a type anywhere outside an attribute, or the name
     /// of a custom attribute; an attribute's arguments and a built-in attribute's name are not.
-    static func resolvesByLookup(_ reference: IdentifierTypeSyntax) -> Bool {
+    private static func resolvesByLookup(_ reference: IdentifierTypeSyntax) -> Bool {
         var node = reference.parent
         var child = Syntax(reference)
         while let current = node {
@@ -1125,7 +1159,7 @@ private struct SchemaParser {
                     if let modifier = parameter.modifiers.first {
                         try reject(modifier, "Declare the payload as its type alone, without modifiers.")
                     }
-                    if let label = parameter.firstName, label.text != "_" {
+                    if let label = parameter.firstName, label.tokenKind != .wildcard {
                         try reject(
                             label,
                             defaultable
@@ -1153,7 +1187,8 @@ private struct SchemaParser {
                         // The spelling is the author's, and means what it means inside this enum, where
                         // Swift resolves it, members of the enum's extensions included; generated code
                         // never repeats it elsewhere.
-                        payloadType: parameters?.first.map { Schema.displaySpelling($0.type.unparenthesized) },
+                        payloadType: parameters?.first.map { Schema.displaySpelling($0.type) },
+                        payload: parameters?.first?.type,
                         defaultValue: defaultValue
                     )
                 )
@@ -1183,7 +1218,7 @@ private struct SchemaParser {
     private func admission(_ expression: ExprSyntax) throws -> Schema.Admission {
         if let call = expression.as(FunctionCallExprSyntax.self) {
             guard try member(call.calledExpression) == "parallel", call.arguments.count == 1,
-                let argument = call.arguments.first, argument.label?.text == "limit",
+                let argument = call.arguments.first, argument.label?.unescaped == "limit",
                 let limit = argument.expression.integerLiteralValue, limit > 0,
                 call.trailingClosure == nil, call.additionalTrailingClosures.isEmpty
             else {
@@ -1198,11 +1233,18 @@ private struct SchemaParser {
         }
     }
 
-    /// Checks the shape shared by authored functions; `role` names them in the throws diagnostic.
+    /// Checks the shape shared by authored functions, and returns the function's deprecation, if any.
+    ///
+    /// `role` names the functions in the throws diagnostic.
     ///
     /// Every parameter is unlabeled, except that a transition or router may label one `request:`, which
     /// its trigger then decides it may take.
-    private func validateFunction(_ function: FunctionDeclSyntax, role: String, allowsRequest: Bool = false) throws {
+    private func validateFunction(
+        _ function: FunctionDeclSyntax,
+        role: String,
+        allowsRequest: Bool = false,
+        schema: String
+    ) throws -> Schema.Deprecation? {
         // The refusal stands at the first offending token in source order: the `func` keyword of a function
         // that is not static, its generic parameters, a parameter's label, ellipsis, or default, `async`, or
         // its `where` clause.
@@ -1212,7 +1254,7 @@ private struct SchemaParser {
             }
             if let generic = function.genericParameterClause { return Syntax(generic) }
             for parameter in function.signature.parameterClause.parameters {
-                if parameter.firstName.text != "_", !(allowsRequest && Self.takesRequest(parameter)) {
+                if parameter.firstName.tokenKind != .wildcard, !(allowsRequest && Self.takesRequest(parameter)) {
                     return Syntax(parameter.firstName)
                 }
                 if let ellipsis = parameter.ellipsis { return Syntax(ellipsis) }
@@ -1244,21 +1286,33 @@ private struct SchemaParser {
         }
         // Generated code calls the function from nonisolated code, from every owner's isolation, and from members
         // that have only the schema's availability. An attribute could isolate the function to a global actor,
-        // narrow its availability, deprecate it, which a warnings-as-errors build of the generated call refuses,
-        // or change how a call is checked, so only this macro's markers and Swift's attributes that change none
-        // of that are allowed, whatever an attribute's capitalization.
+        // narrow its availability, or change how a call is checked, so only this macro's markers, Swift's
+        // attributes that change none of that, and one deprecation for every platform are allowed, whatever an
+        // attribute's capitalization.
         // An attribute inside `#if` was refused with the schema's members.
+        var deprecation: AttributeSyntax?
         for case .attribute(let attribute) in function.attributes {
             if ["Transition", "Route", "Restoration"].contains(where: { Schema.namesMacro(attribute, $0) }) {
                 continue
             }
-            let identifier = attribute.attributeName.as(IdentifierTypeSyntax.self)
             let name =
-                attribute.attributeName.as(MemberTypeSyntax.self)?.name.unescaped ?? identifier?.name.unescaped ?? ""
-            // Swift's own attributes are spelled bare, without backticks.
-            if let identifier, identifier.moduleSelector == nil, identifier.genericArgumentClause == nil,
-                Self.permittedFunctionAttributes.contains(identifier.name.text)
-            {
+                attribute.attributeName.as(MemberTypeSyntax.self)?.name.unescaped
+                ?? attribute.attributeName.as(IdentifierTypeSyntax.self)?.name.unescaped ?? ""
+            if let builtIn = attribute.builtInName, Self.permittedFunctionAttributes.contains(builtIn) { continue }
+            if deprecation == nil, Self.deprecates(attribute) {
+                // A restoration's generated entry points are `init(restoring:)` and `reset(restoring:)`,
+                // which keep their names, so no rename of the function applies to them.
+                if !allowsRequest, case .availability(let arguments)? = attribute.arguments,
+                    let renamed = arguments.first(where: {
+                        $0.argument.as(AvailabilityLabeledArgumentSyntax.self)?.label.text == "renamed"
+                    })
+                {
+                    try reject(
+                        renamed,
+                        "Remove 'renamed:': the restoring initializers and resets this deprecation marks keep their names; describe the replacement with 'message:'."
+                    )
+                }
+                deprecation = attribute
                 continue
             }
             if ["available", "backDeployed"].contains(name) {
@@ -1269,7 +1323,7 @@ private struct SchemaParser {
             }
             try reject(
                 attribute,
-                "Remove '@\(name)': generated code calls this function from nonisolated code and from every owner, so it takes only Swift's @discardableResult, @inlinable, @inline, and @usableFromInline, and no attribute that may isolate it to a global actor such as MainActor."
+                "Remove '@\(name)': generated code calls this function from nonisolated code and from every owner, so it takes only Swift's @discardableResult, @inlinable, @inline, @usableFromInline, and @available(*, deprecated), and no attribute that may isolate it to a global actor such as MainActor."
             )
         }
         // A modifier other than its access, `static`, and `nonisolated` would change how generated code
@@ -1283,6 +1337,52 @@ private struct SchemaParser {
                 "Remove '\(modifier.trimmedDescription)': an authored function is static, with an access modifier and nonisolated as its only other modifiers."
             )
         }
+        return deprecation.map { Self.deprecation($0, of: function, schema: schema) }
+    }
+
+    /// Whether `attribute` deprecates a function on every platform and nothing else:
+    /// `@available(*, deprecated)`, with at most one `message:` and one `renamed:` string, in either order.
+    private static func deprecates(_ attribute: AttributeSyntax) -> Bool {
+        guard attribute.builtInName == "available", case .availability(let arguments)? = attribute.arguments,
+            arguments.count >= 2
+        else { return false }
+        let elements = Array(arguments)
+        guard case .token(let platform) = elements[0].argument, platform.text == "*",
+            case .token(let kind) = elements[1].argument, kind.tokenKind == .keyword(.deprecated)
+        else { return false }
+        var labels: Set<String> = []
+        for element in elements.dropFirst(2) {
+            guard case .availabilityLabeledArgument(let labeled) = element.argument, case .string = labeled.value,
+                ["message", "renamed"].contains(labeled.label.text), labels.insert(labeled.label.text).inserted
+            else { return false }
+        }
+        return true
+    }
+
+    /// The deprecation of an authored function, with the declaration that generated code calls it through.
+    private static func deprecation(
+        _ attribute: AttributeSyntax,
+        of function: FunctionDeclSyntax,
+        schema: String
+    ) -> Schema.Deprecation {
+        // `Self` names the schema where the function is written, and the protocol and the type the
+        // expansion declares for it are other types, so the declaration spells the schema by its name.
+        func spelled(_ type: TypeSyntax) -> String { TypeQualifier.qualify(type.trimmed, owner: schema, names: []) }
+        let parameters = function.signature.parameterClause.parameters.enumerated()
+        let labels = parameters.map { $0.element.firstName.tokenKind == .wildcard ? nil : $0.element.firstName.text }
+        let declared = parameters.map { index, parameter in
+            "\(labels[index] ?? "_") argument\(index): \(spelled(parameter.type))"
+        }
+        let effects = function.signature.effectSpecifiers?.throwsClause?.type.map { " throws(\(spelled($0)))" } ?? ""
+        let result = function.signature.returnClause.map { " -> \(spelled($0.type))" } ?? ""
+        return Schema.Deprecation(
+            attribute: attribute.trimmedDescription,
+            declaration: "static func \(function.name.text)(\(declared.joined(separator: ", ")))\(effects)\(result)",
+            declaresThrows: !effects.isEmpty,
+            call: "\(function.name.text)("
+                + labels.enumerated().map { index, label in (label.map { "\($0): " } ?? "") + "argument\(index)" }
+                .joined(separator: ", ") + ")"
+        )
     }
 
     /// The attributes of Swift that an authored function may carry: none changes its isolation, its
@@ -1478,8 +1578,8 @@ private struct SchemaParser {
             payloadNodes[caseName].map(Syntax.init) ?? Syntax(declaration.name)
         }
         let phases = try rootCases.map { value -> Schema.Phase in
-            guard let spelling = value.payloadType,
-                case let type = payloadName(spellings.type(spelling), schema: declaration.name.unescaped),
+            guard let spelling = value.payloadType, let payload = value.payload,
+                case let type = payloadName(payload.unparenthesized, schema: declaration.name.unescaped),
                 identifier(type), nominalNames.contains(type), !["Input", "Effect", "Scope"].contains(type)
             else {
                 try reject(
@@ -1490,6 +1590,7 @@ private struct SchemaParser {
             return Schema.Phase(
                 caseName: value.caseName,
                 typeName: type,
+                payloadSpelling: spelling,
                 isTerminal: terminalCases.contains(value.caseName)
             )
         }
@@ -2000,7 +2101,12 @@ private struct SchemaParser {
                     "@Route requires hosted observations and is unavailable in .ownedOnly; select consuming edges in the caller."
                 )
             }
-            try validateFunction(function, role: isRoute ? "Routers" : "Transitions", allowsRequest: true)
+            let deprecation = try validateFunction(
+                function,
+                role: isRoute ? "Routers" : "Transitions",
+                allowsRequest: true,
+                schema: declaration.name.unescaped
+            )
             let metadata = try arguments(
                 attribute,
                 required: [],
@@ -2265,7 +2371,8 @@ private struct SchemaParser {
                         choices: [],
                         declaration: position,
                         requestType: requestType,
-                        requestConvention: request?.convention ?? ""
+                        requestConvention: request?.convention ?? "",
+                        deprecation: deprecation
                     )
                 )
                 routeResults[position] = result
@@ -2439,7 +2546,8 @@ private struct SchemaParser {
                         declaration: position,
                         sources: sources,
                         requestType: requestType,
-                        requestConvention: request?.convention ?? ""
+                        requestConvention: request?.convention ?? "",
+                        deprecation: deprecation
                     )
                 )
             }
@@ -2464,7 +2572,8 @@ private struct SchemaParser {
                 choices: choices,
                 declaration: route.declaration,
                 requestType: route.requestType,
-                requestConvention: route.requestConvention
+                requestConvention: route.requestConvention,
+                deprecation: route.deprecation
             )
         }
         // A router with no edge to choose can only reject, so it throws: a throws clause the macro reads
@@ -2804,14 +2913,16 @@ private struct SchemaParser {
                 "Operation '\(taken.operation)' would generate the type '\(taken.name)', which the expansion already declares for this schema's owners; rename the operation."
             )
         }
+        // Generated code names the schema's types through the schema's name, which a direct member type or
+        // alias of that name would capture; a value of that name is not looked up where a type is.
         guard
             !Set(reservedSchema.schemaNameReservations)
                 .contains(declaration.name.unescaped),
-            !declaredNames.contains(declaration.name.unescaped)
+            !typeNames.contains(declaration.name.unescaped)
         else {
             // The member that shadows the name, or the schema's name when the expansion reserves it.
             let shadowing =
-                declaredNames.contains(declaration.name.unescaped)
+                typeNames.contains(declaration.name.unescaped)
                 ? anchor(for: declaration.name.unescaped, in: declaration) : Syntax(declaration.name)
             try reject(
                 shadowing,
@@ -3341,7 +3452,7 @@ private struct SchemaParser {
             members.compactMap({ $0.decl.as(FunctionDeclSyntax.self) })
                 .filter({ $0.name.unescaped == function.name.unescaped }).count == 1
         else { try reject(function.name, "A @Restoration function cannot be overloaded.") }
-        try validateFunction(function, role: "Restoration functions")
+        let deprecation = try validateFunction(function, role: "Restoration functions", schema: schema)
         let parameters = function.signature.parameterClause.parameters
         guard parameters.count == 1, let parameter = parameters.first else {
             try reject(
@@ -3371,7 +3482,8 @@ private struct SchemaParser {
                 throwing: throwing
             ),
             allows: allows,
-            only: only
+            only: only,
+            deprecation: deprecation
         )
     }
 
@@ -3466,7 +3578,7 @@ private struct SchemaParser {
                 attributes.append(element.trimmedDescription)
                 continue
             }
-            switch attribute.attributeName.trimmedDescription {
+            switch attribute.builtInName {
             case "escaping": conventions.append("@escaping")
             case "noescape": continue
             case "autoclosure":

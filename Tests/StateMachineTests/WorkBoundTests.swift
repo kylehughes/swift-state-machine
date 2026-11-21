@@ -77,7 +77,11 @@ private actor ParkedHost: ActorStateMachineHost {
     // asks whether it must wait. None of them is related to the next, and the presentation finds that
     // without examining them: each observation examines a few attempts and serial positions, not every
     // earlier attempt, which would add up to about half the square of their number.
-    @Test func observingManyOwnersWithParkedRegistrationsExaminesAFewAttemptsEach() async {
+    //
+    // The registration calls then return, oldest first or newest first, and removing each returned
+    // attempt examines and moves a few serials, not every later one.
+    @Test(arguments: [false, true])
+    func observingManyOwnersWithParkedRegistrationsExaminesAFewAttemptsEach(newestFirst: Bool) async {
         let count = 400
         let presentation = SnapshotObservableObject(Mark(revision: 0))
         let (entered, entering) = AsyncStream<Void>.makeStream()
@@ -92,8 +96,14 @@ private actor ParkedHost: ActorStateMachineHost {
         }
         let examined = presentation.examinedRegistrationAttempts
         #expect(examined <= count * 40, "\(examined)")
-        for host in hosts { await host.release() }
+        for host in newestFirst ? hosts.reversed() : hosts {
+            await host.release()
+            // Each call returns and its attempt is removed before the next host is released.
+            await Task.yield()
+        }
         for observation in observations { await observation.value }
+        let returned = presentation.examinedRegistrationAttempts - examined
+        #expect(returned <= count * 40, "\(returned)")
         #expect(!presentation.isObserving)
     }
 
@@ -165,4 +175,103 @@ private actor ParkedHost: ActorStateMachineHost {
         #expect(queue.count == 0)
         #expect(queue.moved < count, "\(queue.moved)")
     }
+
+    // A transition into a phase with many scopes activates each once and removes as many others, in
+    // one pass over the edits and one over the scopes held, rather than a scan of both for each edit.
+    @Test func editingManyScopesExaminesEachOnce() throws {
+        let count = 2_000
+        let held = (0 ..< count).map { RuntimeScopeID(kind: UInt32($0 + 1)) }
+        let activated = (0 ..< count).map { _ in RuntimeScopeID(kind: 0, instance: RuntimeIdentity()) }
+        let edits =
+            activated.map { RuntimeState<Int, Int>.ScopeEdit.activate($0) }
+            + held.prefix(count / 2).map { .remove($0) }
+        var examined = 0
+        let result = try #require(
+            RuntimeState<Int, Int>.applying(edits, to: held, key: { $0 }, activating: { $0 }, examined: &examined)
+        )
+        #expect(result == Array(held.suffix(count / 2)) + activated)
+        #expect(examined == edits.count + held.count)
+        var repeated = 0
+        #expect(
+            RuntimeState<Int, Int>
+                .applying(
+                    [.activate(held[0]), .remove(held[0])],
+                    to: held,
+                    key: { $0 },
+                    activating: { $0 },
+                    examined: &repeated
+                ) == nil
+        )
+        let engine = RuntimeState<Int, Int>(0, scopes: held, limits: try .init())
+        _ = try RuntimeState<Int, Int>.prepare(on: engine.snapshot, next: 1, plan: .init(scopes: edits))
+    }
+
+    // With many operations active, an edit that keeps every scope and ticket examines each operation,
+    // reservation, and key a few times, not each operation against every other.
+    @Test func anUnrelatedEditWithManyActiveOperationsIsLinear() throws {
+        let count = 1_000
+        let scope = RuntimeScopeID(kind: 1)
+        var engine = RuntimeState<Int, Int>(
+            0,
+            scopes: [scope],
+            limits: try .init(commits: count + 1, descriptors: 1, executions: count)
+        )
+        let operation = RuntimeOperation(kind: 1, scope: scope, policy: .parallel(count))
+        for index in 0 ..< count {
+            let candidate = try RuntimeState<Int, Int>
+                .prepare(
+                    on: engine.snapshot,
+                    next: index,
+                    plan: .init(starts: [.init(operation, descriptor: index, key: RuntimeKey(index))])
+                )
+            guard case .committed = engine.commit(candidate) else {
+                Issue.record("Expected start \(index) to be admitted")
+                return
+            }
+        }
+        let before = engine.admissionWork
+        guard case .committed = engine.commit(try RuntimeState<Int, Int>.prepare(on: engine.snapshot, next: -1)) else {
+            Issue.record("Expected the edit to be admitted")
+            return
+        }
+        let work = engine.admissionWork - before
+        #expect(work <= 8 * count, "\(work)")
+    }
+
+    // Draining a backlog of batches one at a time moves a number of queued batches linear in the
+    // backlog, and releases each batch's snapshot once it is transferred.
+    @Test func drainingABacklogMovesALinearNumberOfBatches() throws {
+        let count = 4_000
+        var engine = RuntimeState<Box, Int>(Box(-1), limits: try .init(commits: count))
+        weak var first: Box?
+        for index in 0 ..< count {
+            let box = Box(index)
+            if index == 0 { first = box }
+            let candidate = try RuntimeState<Box, Int>
+                .prepare(
+                    on: engine.snapshot,
+                    next: box,
+                    plan: .init(emissions: [.init(index, position: 0)])
+                )
+            guard case .committed = engine.commit(candidate) else {
+                Issue.record("Expected edit \(index) to be admitted")
+                return
+            }
+        }
+        var drained: [Int] = []
+        for _ in 0 ..< count {
+            for batch in engine.drain(limit: 1) {
+                for command in batch.commands { if case .emit(let value) = command { drained.append(value) } }
+            }
+            if drained.count == 1 { #expect(first == nil) }
+        }
+        #expect(drained == Array(0 ..< count))
+        #expect(engine.queueMoves <= count, "\(engine.queueMoves)")
+    }
+}
+
+/// A model whose release a test observes.
+private final class Box: Sendable {
+    let value: Int
+    init(_ value: Int) { self.value = value }
 }

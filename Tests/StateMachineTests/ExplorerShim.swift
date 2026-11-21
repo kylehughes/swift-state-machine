@@ -1,4 +1,5 @@
 import Combine
+import Dispatch
 import StateMachine
 import StateMachineUI
 
@@ -147,4 +148,30 @@ func explorerDropAfterItsJob<Kept: Sendable>(_ kept: consuming Kept) async {
     _ transform: @escaping @MainActor (ExplorerShot) -> ExplorerShot
 ) {
     presentation.presentedSnapshots(projecting: transform).subscribe(subscriber)
+}
+/// Whether the tree has the presentation publisher's delivery-decision pause (H10).
+let explorerHasPresentationDeliveryPause = true
+/// Runs `body` with H10 bound: a presentation publisher's delivery of a buffered value scheduled inside it runs
+/// `pause` between the two reads that decide it.
+@MainActor func explorerWithPresentationDeliveryPause<Result>(
+    _ pause: @escaping @Sendable () -> Void,
+    _ body: () async -> Result
+) async -> Result {
+    await PresentationDeliveryPause.$betweenReads.withValue(pause) { await body() }
+}
+/// Attaches `subscriber` to `presentedSnapshots` through `receive(on: queue)`, so its values, and the demand it
+/// returns from each, cross to `queue`: Combine requests that demand of the presentation's subscription there.
+@MainActor func explorerSubscribeElsewhere<Host: MainActorStateMachineHost>(
+    _ presentation: StateMachineObservableObject<Host>,
+    _ subscriber: ExplorerElsewhereSubscriber,
+    on queue: DispatchQueue,
+    once: Bool
+) where Host.Snapshot == ExplorerShot {
+    // Only the revision crosses to the queue: a client value stays the presentation's, released on the main actor.
+    let revisions = presentation.presentedSnapshots.map(\.revision).receive(on: queue)
+    if once {
+        revisions.prefix(1).subscribe(subscriber)
+    } else {
+        revisions.subscribe(subscriber)
+    }
 }

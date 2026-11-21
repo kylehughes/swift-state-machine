@@ -355,3 +355,15 @@ nonisolated package enum CountReadPause {
     /// Runs the pause bound for the current task, if any.
     package static func reached() { afterLoading?() }
 }
+
+/// A pause that a test inserts into a read of a `Sendable` snapshot sequence that waits, after the read
+/// has installed its continuation and before it suspends, so another thread can hand it an element
+/// first.
+///
+/// It runs on the reading task. It is `nil` everywhere else.
+nonisolated package enum SnapshotWaitPause {
+    @TaskLocal package static var beforeSuspending: (@Sendable () -> Void)?
+
+    /// Runs the pause bound for the current task, if any.
+    package static func reached() { beforeSuspending?() }
+}

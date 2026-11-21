@@ -1,6 +1,7 @@
 import Dispatch
 import Foundation
 import StateMachine
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -121,12 +122,11 @@ private final class BackReference {
 private func drop<Kept: Sendable>(_ kept: consuming Kept, after: @escaping @Sendable () -> Void = {}) {
     let slot = OSAllocatedUnfairLock<Kept?>(initialState: kept)
     let dropped = DispatchSemaphore(value: 0)
-    DispatchQueue.global()
-        .async {
-            slot.withLock { $0 = nil }
-            after()
-            dropped.signal()
-        }
+    runOnOwnThread {
+        slot.withLock { $0 = nil }
+        after()
+        dropped.signal()
+    }
     dropped.wait()
 }
 

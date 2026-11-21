@@ -38,6 +38,9 @@ import StateMachineUI
         let drop: () -> Void
         let dropElsewhere: () -> Bool
         let subscribe: ((ExplorerRevisionRecorder) -> Void)?
+        /// Installs the `isObserving` report and the snapshot change callbacks; the result keeps them.
+        let install:
+            (_ report: @escaping @MainActor () -> Void, _ change: @escaping @MainActor () -> Void) -> [AnyObject]
     }
 
     let kind: ExplorerPassiveKind
@@ -53,6 +56,18 @@ import StateMachineUI
     private var closed = false
     private var turns = 0
     private var recorders: [ExplorerRevisionRecorder] = []
+    // Reentry (E15) and I10 on a real owner: the armed callback, the revisions of changes admitted through the
+    // presentation (receipts, which a stop does not discard), and the newest revision the presentation could
+    // still show when it stopped: what it showed, or what a change callback had announced.
+    private var installed: [AnyObject] = []
+    private var armed: (ExplorerHook, ExplorerEvent)?
+    private var armUsed = false
+    private var inHook = false
+    private var receipts: Set<UInt64> = []
+    private var stoppedAt: UInt64?
+    private var announced: UInt64?
+    private var lastShown: UInt64 = 0
+    private var fired = 0
 
     init?(_ kind: ExplorerPassiveKind, verbose: Bool = false) {
         self.kind = kind
@@ -90,6 +105,12 @@ import StateMachineUI
                 subscribe: { recorder in
                     holder.weak?.presentedSnapshots.map { (shot: GeneratedProfile.Snapshot) in shot.revision }
                         .subscribe(recorder)
+                },
+                install: { report, change in
+                    guard let presentation = holder.weak else { return [] }
+                    let reports = presentation.$isObserving.dropFirst().sink { _ in report() }
+                    let changes = presentation.objectWillChange.sink { _ in change() }
+                    return [ExplorerKeep((reports, changes))]
                 }
             )
         case .realDrivingObservation:
@@ -110,7 +131,17 @@ import StateMachineUI
                 },
                 drop: { holder.dropMain() },
                 dropElsewhere: { holder.dropElsewhere() },
-                subscribe: nil
+                subscribe: nil,
+                install: { report, change in
+                    let installed = ExplorerKeep(())
+                    explorerTrack({ [weak presentation = holder.weak] in presentation?.isObserving }, installed) { _ in
+                        report()
+                    }
+                    explorerTrack({ [weak presentation = holder.weak] in presentation?.snapshot.revision }, installed) {
+                        _ in change()
+                    }
+                    return [installed]
+                }
             )
         default:
             return nil
@@ -127,10 +158,30 @@ import StateMachineUI
         }
         if owner != nil { result += [.ownerSend, .resetOwner] }
         if turns < 2 { result.append(.turn) }
+        if subject.held(), !armUsed {
+            let resume: [ExplorerEvent] = explorerHasResume ? [.resume, .then(.ownerSend, .then(.resume, .stop))] : []
+            for event in [ExplorerEvent.stop] + resume { result.append(.arm(.change, event)) }
+            for event in [ExplorerEvent.stop] + resume.prefix(1) { result.append(.arm(.report, event)) }
+        }
         return result
     }
 
+    private func fire(_ hook: ExplorerHook) {
+        guard !inHook, let (armedHook, event) = armed, armedHook == hook else { return }
+        armed = nil
+        fired += 1
+        // The value whose publication this callback announces is the owner's at most.
+        if hook == .change { announced = ownerRevision }
+        inHook = true
+        world.note("hook \(hook.rawValue) runs \(event)")
+        perform(now: event)
+        inHook = false
+        boundary()
+    }
+
     func run(_ sequence: [ExplorerEvent]) async -> ExplorerOutcome {
+        installed = subject.install({ [weak self] in self?.fire(.report) }, { [weak self] in self?.fire(.change) })
+        lastShown = subject.snapshot()?.revision ?? 0
         var enabledAfter = sequence.isEmpty ? enabled() : []
         for (index, event) in sequence.enumerated() {
             world.note("step \(index + 1): \(event)")
@@ -162,10 +213,28 @@ import StateMachineUI
     }
 
     private func perform(_ event: ExplorerEvent) async {
+        if event == .turn {
+            await Task { @MainActor in }.value
+            return
+        }
+        perform(now: event)
+    }
+
+    private func perform(now event: ExplorerEvent) {
         switch event {
+        case .then(let first, let second):
+            perform(now: first)
+            perform(now: second)
+        case .arm(let hook, let inner):
+            armed = (hook, inner)
+            armUsed = true
         case .apply, .sendCancel:
             let input: GeneratedProfile.Input = event == .apply ? .load(request) : .cancel
+            let firedBefore = fired
             guard let revision = subject.send(input) else { return }
+            receipts.insert(revision)
+            // A callback that changed the owner during the call leaves the receipt older than the owner.
+            guard !inHook, fired == firedBefore else { return }
             // The owner's receipt, shown in the same turn.
             if revision != ownerRevision {
                 world.violate(.drivingResult, "send returned r\(revision) while the owner is at r\(ownerRevision ?? 0)")
@@ -194,6 +263,7 @@ import StateMachineUI
             keptBeforeReset = false
             if stale {
                 guard let result = subject.commit(prepared) else { return }
+                if case .rejected(_, let snapshot) = result { receipts.insert(snapshot.revision) }
                 if case .committed = result {
                     world.violate(.drivingResult, "a proposal kept from before the owner's reset was committed")
                 }
@@ -203,6 +273,7 @@ import StateMachineUI
         case .commitForeign:
             guard let prepared = proposal(from: foreign.snapshot()) else { return }
             guard let result = subject.commit(prepared) else { return }
+            if case .rejected(_, let snapshot) = result { receipts.insert(snapshot.revision) }
             guard case .rejected(.foreignOwner, _) = result else {
                 world.violate(.drivingResult, "a proposal of another owner was not rejected as foreign: \(result)")
                 return
@@ -210,6 +281,7 @@ import StateMachineUI
         case .close:
             closed = true
             guard let revision = subject.close() else { return }
+            receipts.insert(revision)
             if revision != ownerRevision {
                 world.violate(
                     .drivingResult,
@@ -217,9 +289,11 @@ import StateMachineUI
                 )
             }
         case .stop:
+            stoppedAt = max(subject.snapshot()?.revision ?? 0, announced ?? 0)
             subject.stop()
         case .resume:
             let before = subject.snapshot()?.revision
+            let firedBefore = fired
             do throws(SubscriptionFailure) {
                 try subject.resume()
             } catch {
@@ -228,6 +302,8 @@ import StateMachineUI
                 }
                 return
             }
+            stoppedAt = nil
+            guard !inHook, fired == firedBefore else { return }
             if closed, subject.isObserving() {
                 world.violate(.resumeContract, "resumeObserving() after close() is observing")
             }
@@ -242,8 +318,6 @@ import StateMachineUI
             subject.drop()
         case .dropElsewhere:
             if !subject.dropElsewhere() { world.violate(.stuck, "release on a worker never returned") }
-        case .turn:
-            await Task { @MainActor in }.value
         default:
             break
         }
@@ -254,10 +328,15 @@ import StateMachineUI
     private func check(commit prepared: consuming Owner.Prepared, madeAt: UInt64, what: String) {
         let current = ownerRevision
         let wasClosed = closed
+        let firedBefore = fired
         guard let result = subject.commit(prepared) else { return }
+        // A callback that changed the owner during the call leaves the result older than the owner.
+        let unchanged = !inHook && fired == firedBefore
         switch result {
         case .committed(let receipt):
+            receipts.insert(receipt.revision)
             if wasClosed { world.violate(.drivingResult, "\(what) was committed after close()") }
+            guard unchanged else { return }
             if madeAt != current {
                 world.violate(
                     .drivingResult,
@@ -271,6 +350,9 @@ import StateMachineUI
                 )
             }
         case .rejected(let reason, let snapshot):
+            // The rejection's snapshot is what the presentation's own call returned, not an observation value.
+            receipts.insert(snapshot.revision)
+            guard unchanged else { return }
             if wasClosed, reason != .closed {
                 world.violate(.drivingResult, "\(what) after close() was rejected as \(reason), not closed")
             }
@@ -288,6 +370,17 @@ import StateMachineUI
     // once the turns have run (`settled`).
     private func boundary(settled: Bool = false) {
         guard subject.held(), let shown = subject.snapshot()?.revision, let ownerRevision else { return }
+        // I10: once stopped, a revision first shown is a receipt of a change admitted through the presentation, or
+        // one a change callback announced before the stop; an observation value, such as a resumed registration's
+        // deferred seed, is discarded.
+        if shown != lastShown, let stoppedAt, shown > stoppedAt, !receipts.contains(shown), !inHook {
+            world.violate(
+                .shownAfterEnd,
+                "r\(shown), an observation value, first shown after the presentation stopped at r\(stoppedAt)"
+            )
+        }
+        if shown != lastShown { announced = nil }
+        lastShown = shown
         if settled, subject.isObserving(), shown != ownerRevision {
             world.violate(
                 .drivingResult,
@@ -301,6 +394,7 @@ import StateMachineUI
 
     private func quiesce() async {
         world.note("quiesce")
+        armed = nil
         kept = nil
         for _ in 0 ..< 3 { await Task { @MainActor in }.value }
         boundary(settled: true)
@@ -319,6 +413,7 @@ import StateMachineUI
             world.violate(.combineFinish, "a subscriber did not finish once the presentation was gone")
         }
         recorders = []
+        installed = []
     }
 }
 

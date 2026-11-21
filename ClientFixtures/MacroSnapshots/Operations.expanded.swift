@@ -1159,6 +1159,30 @@ public typealias Input = Flow.Input
         return nil
     }
     }
+    /// The identifier of the router or completion edge, as the graph names it, whose authored function
+    /// refused the outcome that `deliver` left retained with `result`, preparing it from a snapshot in
+    /// `phase`, or `nil` when no authored function refused it.
+    public borrowing func rejectingRoute(of result: DeliveryResult, in phase: Swift::String) -> Swift::String? {
+        guard case .pending(let id, .reconciliationRequired) = result,
+        case .preparation(let preparation)? = pendingCompletions().first(where: { $0.id == id
+        })?.lastRejection
+    else {
+        return nil
+    }
+    return Self.rejectingRoute(of: .preparation(preparation), in: phase)
+    }
+    /// The identifier of the router or completion edge, as the graph names it, whose authored function
+    /// refused the outcome that `reconcile(id:)` left retained with `result`, preparing it from a snapshot
+    /// in `phase`, or `nil` when no authored function refused it.
+    public borrowing func rejectingRoute(of result: ReconcileResult, in phase: Swift::String) -> Swift::String? {
+        guard case .pending(let id, .reconciliationRequired) = result,
+        case .preparation(let preparation)? = pendingCompletions().first(where: { $0.id == id
+        })?.lastRejection
+    else {
+        return nil
+    }
+    return Self.rejectingRoute(of: .preparation(preparation), in: phase)
+    }
     /// A fresh initial payload, constructed as the schema's declared default constructs it.
     public static func defaultInitialPhase() -> InitialPhase {
         _StateMachineSchema.makeIdle()

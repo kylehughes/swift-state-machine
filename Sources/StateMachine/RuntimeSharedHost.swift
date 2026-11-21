@@ -33,6 +33,14 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         let identity: RuntimeIdentity
         let mailbox: LatestMailbox<[Ledger.Pending]>
     }
+    /// A delivery the owner decided in one installation and makes after it, in the order of the
+    /// installations, through the owner's one report queue.
+    fileprivate enum Report: Sendable {
+        /// A retained completion whose status became `reconciliationRequired`, as its attempt captured it.
+        case reconciliation(Ledger.Pending)
+        /// The retained completions after a change to them, for the registrations that change found.
+        case pending([Ledger.Pending], recipients: [PendingSubscriber], terminal: Bool)
+    }
     // The owner's lifetime: every copy of the host shares it, and nothing else retains it. A
     // cancellation, a delivery, or a worker's termination can keep `storage` and one of its versions
     // for as long as it runs, but never this, so its destructor is the owner's release.
@@ -87,6 +95,9 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         var drainerScheduled = false
         var ready = RuntimeDeliveryReadyQueue()
         var processedRevision: UInt64 = 0
+        // The owner's reports, which every copy of the host and every host the coordinator makes for a
+        // returning worker share, because they share this state.
+        var reports = RuntimeReportQueue<Report>()
         var isQuiescent: Bool { engine.isQuiescent && !drainerScheduled && ready.isIdle }
         /// Live snapshot and pending-completion registrations, which share one capacity.
         ///
@@ -152,8 +163,6 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     private let ticket: @Sendable (Outcome) -> RuntimeTicket
     private let prepare: @Sendable (Ledger.Attempt) -> Ledger.Preparation
     private let reconciliationRequired: @Sendable (Ledger.Pending) -> Void
-    // The capacity-conflict reports captured and not yet made, which every copy of the host shares.
-    private let owed = OSAllocatedUnfairLock(initialState: Ledger.OwedReports())
     private let emit: @Sendable (Descriptor) -> Void
 
     /// Creates a raw managed history with immutable execution and preparation hooks.
@@ -305,7 +314,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             // A closed owner registers nothing; its closed snapshot and finish arrive on a later task.
             let mailbox = LatestMailbox(
                 initial: snapshot,
-                revision: snapshot.revision,
+                revision: Optional(snapshot.revision),
                 terminal: true,
                 receive: receive,
                 finish: onFinish
@@ -337,7 +346,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             guard after.registrations < subscriberCapacity else { throw .capacityExceeded }
             let mailbox = LatestMailbox(
                 initial: snapshot,
-                revision: snapshot.revision,
+                revision: Optional(snapshot.revision),
                 terminal: false,
                 receive: receive,
                 finish: onFinish,
@@ -378,11 +387,13 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             let before = storage.load()
             var after = before.value
             let closed = after.engine.snapshot.isClosed
+            // Later images arrive in the order of the installations that made them, through the
+            // owner's report queue, after every image an earlier installation queued for other
+            // registrations, so the mailbox needs no order of its own.
             let mailbox = LatestMailbox(
                 initial: after.ledger.pending,
-                revision: after.ledger.generation,
+                revision: nil,
                 terminal: closed,
-                order: .generation,
                 receive: receive,
                 finish: onFinish
             )
@@ -410,35 +421,80 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             }
         }
     }
-    /// Installs `next` in place of `previous` and, when that changed the retained completions, offers
-    /// the new collection to pending-completion registrations, outside the lock.
+    /// Installs `next` in place of `previous`, with the reports it decided, then delivers the owner's
+    /// reports.
     ///
-    /// An installation whose caller then reports reconciliation installs through `storage` and offers
-    /// the collection itself, after those reports, as every host orders them.
-    private func install(_ next: State, replacing previous: AtomicRecordStorage<State>.Version) -> Bool {
+    /// `next` carries the reports its caller decided, in order. After them come a report for each
+    /// capacity conflict of `conflicts` under the manual policy, and then, when the installation changed
+    /// the retained completions, the new collection for the pending-completion registrations. Each is
+    /// queued in the installation that decides it, so no report is ever delivered before one an earlier
+    /// installation queued, on any thread or host copy. `wake` schedules the batch drainer that `next`
+    /// already records as scheduled. Under the retry policy, each conflict is scheduled for another
+    /// turn afterward.
+    private func install(
+        _ next: State,
+        replacing previous: AtomicRecordStorage<State>.Version,
+        wake: Bool = false,
+        conflicts: [Ledger.Pending] = []
+    ) -> Bool {
+        var next = next
+        if case .manual = policy {
+            for pending in conflicts { next.reports.append(.reconciliation(pending)) }
+        }
+        if next.ledger.generation != previous.value.ledger.generation, !next.pendingSubscribers.isEmpty {
+            next.reports.append(.pending(next.ledger.pending, recipients: next.pendingSubscribers, terminal: false))
+        }
         guard storage.install(.init(next), replacing: previous) else { return false }
-        offerPending(next, after: previous.value)
+        if wake { scheduleDrain() }
+        CapacityConflictPause.reached(conflicts, \.id)
+        deliverReports()
+        if case .retry = policy {
+            for pending in conflicts { _ = scheduleRetry(pending.id, after: pending.decision) }
+        }
         return true
     }
-    /// Offers the retained completions of installed state `next` to its pending-completion
-    /// registrations, when the installation that replaced `previous` changed them.
+    /// Delivers the owner's queued reports from the oldest, one at a time, outside every lock, unless a
+    /// delivery is already in progress.
     ///
-    /// The ledger's generation orders the offers, so concurrent installers never deliver an older
-    /// collection after a newer one.
-    private func offerPending(_ next: State, after previous: State) {
-        guard next.ledger.generation != previous.ledger.generation, !next.pendingSubscribers.isEmpty else { return }
-        let image = next.ledger.pending
-        for subscriber in next.pendingSubscribers {
-            subscriber.mailbox.offer(image, revision: next.ledger.generation, terminal: false)
+    /// A delivery in progress, inside whose handler this call runs or, on another thread, beside it,
+    /// delivers every report queued before it ends, so this call leaves its reports to it and returns.
+    private func deliverReports() {
+        var delivering = false
+        while true {
+            let before = storage.load()
+            var after = before.value
+            guard let report = after.reports.take(continuing: delivering) else {
+                guard delivering else { return }
+                if storage.install(.init(after), replacing: before) { return }
+                continue
+            }
+            guard storage.install(.init(after), replacing: before) else { continue }
+            delivering = true
+            switch report {
+            case .reconciliation(let pending):
+                reconciliationRequired(pending)
+            case .pending(let image, let recipients, let terminal):
+                for recipient in recipients { recipient.mailbox.offer(image, revision: nil, terminal: terminal) }
+            }
         }
     }
     private func publish(_ snapshot: Engine.Snapshot, to subscribers: [Subscriber]) {
         for subscriber in subscribers {
-            subscriber.mailbox.offer(snapshot, revision: snapshot.revision, terminal: snapshot.isClosed)
+            subscriber.mailbox.offer(snapshot, revision: Optional(snapshot.revision), terminal: snapshot.isClosed)
         }
     }
     /// Captures a coherent historical root.
     public func snapshot() -> Engine.Snapshot { storage.load().value.engine.snapshot }
+    /// Advances the retained completions' change count by `distance` without changing them, as an
+    /// installation that changes them does, so a test can age an image by any part of the count's range.
+    package func advancePendingGeneration(by distance: UInt64) {
+        while true {
+            let before = storage.load()
+            var after = before.value
+            after.ledger.advanceGeneration(by: distance)
+            if install(after, replacing: before) { return }
+        }
+    }
     /// Consumes an immutable candidate into one atomic root, authority, and FIFO publication.
     public func commit(_ candidate: Engine.Candidate) -> Engine.Admission {
         while true {
@@ -452,8 +508,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             after.prune()
             let wake = processor != nil && !after.drainerScheduled
             if processor != nil { after.drainerScheduled = true }
-            if install(after, replacing: before) {
-                if wake { scheduleDrain() }
+            if install(after, replacing: before, wake: wake) {
                 if processor == nil, case .committed(let snapshot) = result { publish(snapshot, to: after.subscribers) }
                 return result
             }
@@ -483,8 +538,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             after.prune()
             let wake = processor != nil && !after.drainerScheduled
             if processor != nil { after.drainerScheduled = true }
-            if install(after, replacing: before) {
-                if wake { scheduleDrain() }
+            if install(after, replacing: before, wake: wake) {
                 if processor == nil, case .committed(let snapshot) = result { publish(snapshot, to: after.subscribers) }
                 Task { await progress.changed() }
                 return result
@@ -509,17 +563,16 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             if processor == nil { after.subscribers = [] }
             after.prune()
             after.ledger.close()
-            // Closing ends every pending-completion registration with the final, empty collection.
-            let pendingSubscribers = after.pendingSubscribers
+            // Closing ends every pending-completion registration with the final, empty collection, after
+            // every collection an earlier installation queued.
+            if !after.pendingSubscribers.isEmpty {
+                after.reports.append(.pending([], recipients: after.pendingSubscribers, terminal: true))
+            }
             after.pendingSubscribers = []
             let wake = processor != nil && !after.drainerScheduled
             if processor != nil { after.drainerScheduled = true }
-            if storage.install(.init(after), replacing: before) {
-                if wake { scheduleDrain() }
+            if install(after, replacing: before, wake: wake) {
                 if processor == nil { publish(snapshot, to: subscribers) }
-                for subscriber in pendingSubscribers {
-                    subscriber.mailbox.offer([], revision: after.ledger.generation, terminal: true)
-                }
                 return snapshot
             }
         }
@@ -563,7 +616,6 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
         retained: RuntimeDeliveryDecision? = nil,
         scheduledRetry: Bool = false
     ) -> Delivery {
-        reportOwed(id)
         // Only the first claim of a queued turn depends on the decision that queued it.
         var scheduledClaim = scheduledRetry
         let result = Ledger.reconcile(
@@ -604,24 +656,14 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                     let wake = processor != nil && after.engine.hasQueuedBatches && !after.drainerScheduled
                     if wake { after.drainerScheduled = true }
                     let pending = after.ledger.pending.first { $0.id == id }
-                    let reason = pending?.lastRejection
-                    if storage.install(.init(after), replacing: before) {
-                        if wake { scheduleDrain() }
-                        // The attempt reports its own decision, captured above, before any other callout,
-                        // then the conflicts its admission found, then the collection it changed.
-                        let automaticConflict: Bool
-                        if automatic, case .retry = policy, case .admission(.conflict) = reason {
-                            automaticConflict = true
-                        } else {
-                            automaticConflict = false
-                        }
-                        if !automaticConflict, let pending,
-                            pending.status == .reconciliationRequired
-                        {
-                            reconciliationRequired(pending)
-                        }
-                        handleCapacityConflicts(conflicts.filter { $0.id != id })
-                        offerPending(after, after: before.value)
+                    // The attempt queues its own decision, captured here, before the conflicts its
+                    // admission found and the collection it changed, in the installation that makes it.
+                    if let pending, pending.status == .reconciliationRequired,
+                        !(automatic && Self.isConflict(pending, retriedUnder: policy))
+                    {
+                        after.reports.append(.reconciliation(pending))
+                    }
+                    if install(after, replacing: before, wake: wake, conflicts: conflicts.filter { $0.id != id }) {
                         Task { await progress.changed() }
                         return (result, pending)
                     }
@@ -642,7 +684,6 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
     }
     /// Discards retained delivery by an authority-only atomic admission.
     public func discardPending(id: RuntimePendingID) -> Delivery {
-        reportOwed(id)
         while true {
             let before = storage.load()
             var after = before.value
@@ -657,8 +698,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             after.prune()
             let wake = processor != nil && !after.drainerScheduled
             if processor != nil { after.drainerScheduled = true }
-            if install(after, replacing: before) {
-                if wake { scheduleDrain() }
+            if install(after, replacing: before, wake: wake) {
                 if case .committed(let snapshot) = result { return .discarded(snapshot) }
             }
         }
@@ -676,10 +716,7 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             let conflicts = processor != nil ? after.retryCapacity() : []
             let wake = processor != nil && after.engine.hasQueuedBatches && !after.drainerScheduled
             if wake { after.drainerScheduled = true }
-            if storage.install(.init(after), replacing: before) {
-                if wake { scheduleDrain() }
-                handleCapacityConflicts(conflicts)
-                offerPending(after, after: before.value)
+            if install(after, replacing: before, wake: wake, conflicts: conflicts) {
                 Task { await progress.changed() }
                 return result
             }
@@ -713,18 +750,14 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             guard let batch = batches.first else {
                 let again = after.engine.hasQueuedBatches
                 after.drainerScheduled = again
-                guard storage.install(.init(after), replacing: before) else { continue }
-                handleCapacityConflicts(conflicts)
-                offerPending(after, after: before.value)
+                guard install(after, replacing: before, conflicts: conflicts) else { continue }
                 if again { continue }
                 await progress.changed()
                 return
             }
             let subscribers = after.subscribers
             if batch.terminal { after.subscribers = [] }
-            guard storage.install(.init(after), replacing: before) else { continue }
-            handleCapacityConflicts(conflicts)
-            offerPending(after, after: before.value)
+            guard install(after, replacing: before, conflicts: conflicts) else { continue }
             let cancellations = batch.commands.compactMap { command -> RuntimeTicket? in
                 if case .cancel(let ticket) = command { return ticket }
                 return nil
@@ -756,22 +789,11 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
             await drainTurn()
         }
     }
-    // Reports a batch of capacity conflicts, each as captured when it was found. A handler that
-    // reconciles a later entry synchronously makes that entry's report first, so each completion's
-    // attempts are reported in order and once each.
-    private func handleCapacityConflicts(_ conflicts: [Ledger.Pending]) {
-        CapacityConflictPause.reached(conflicts, \.id)
-        guard case .manual = policy else {
-            for pending in conflicts { _ = scheduleRetry(pending.id, after: pending.decision) }
-            return
-        }
-        for serial in owed.withLock({ $0.owe(conflicts) }) {
-            for pending in owed.withLock({ $0.take(through: serial) }) { reconciliationRequired(pending) }
-        }
-    }
-    // Makes the reports still owed for `id` before anything else happens to that completion.
-    private func reportOwed(_ id: RuntimePendingID) {
-        for pending in owed.withLock({ $0.take(id) }) { reconciliationRequired(pending) }
+    // Whether `pending` lost a root conflict that `policy` prepares again automatically, which is not
+    // reported until its last turn.
+    private static func isConflict(_ pending: Ledger.Pending, retriedUnder policy: RuntimeCompletionPolicy) -> Bool {
+        guard case .retry = policy, case .admission(.conflict) = pending.lastRejection else { return false }
+        return true
     }
     // Scheduling is bound to the decision that lost the conflict, so a newer attempt keeps its own.
     // An envelope that used its last turn parks, and that is when reconciliation is required.
@@ -785,12 +807,12 @@ nonisolated public struct RuntimeSharedHost<Model: Sendable, Descriptor: Sendabl
                 if storage.isCurrent(before) { return false }
                 continue
             case .exhausted:
-                guard storage.isCurrent(before) else { continue }
-                reportOwed(id)
-                if let pending = before.value.ledger.pending.first(where: { $0.id == id }) {
-                    reconciliationRequired(pending)
+                // The envelope is unchanged; the installation queues its report.
+                if let pending = after.ledger.pending.first(where: { $0.id == id }) {
+                    after.reports.append(.reconciliation(pending))
                 }
-                return false
+                if install(after, replacing: before) { return false }
+                continue
             }
             let wake = after.ready.enqueue(id)
             if install(after, replacing: before) {

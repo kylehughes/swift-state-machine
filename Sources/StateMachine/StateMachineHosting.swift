@@ -24,6 +24,10 @@ nonisolated public protocol StateMachineReceipt {
 ///
 /// Generated `MainActorHost` types conform. Conforming confers no authority: every
 /// requirement is already part of the owner's sealed public surface.
+///
+/// A host of your own, such as a test double or a preview, must end each registration it makes when
+/// the registration's subscription is cancelled: after a registration's cancellation has returned, the
+/// host must not invoke that registration's callbacks again.
 @MainActor public protocol MainActorStateMachineHost: AnyObject {
     /// The closed dynamic inputs this owner routes.
     associatedtype Input

@@ -176,4 +176,21 @@ nonisolated public protocol DeliveringLocalStateMachine: DrainingLocalStateMachi
     mutating func discardPending(id: PendingCompletionID) -> DiscardResult
     /// Reads immutable retained first-outcome records without claiming preparation.
     borrowing func pendingCompletions() -> [PendingCompletion]
+    /// The identifier of the router or completion edge, as ``StateMachineGraph/Router/id`` and
+    /// ``StateMachineGraph/Edge/id`` name them, whose authored function refused the outcome that a
+    /// `deliver` returning `result` prepared from a snapshot in `phase`, or `nil` when no authored
+    /// function refused it: the outcome committed or was not taken, it waits for capacity, or admission
+    /// refused its candidate.
+    borrowing func rejectingRoute(of result: DeliveryResult, in phase: String) -> String?
+    /// The identifier of the router or completion edge whose authored function refused the outcome
+    /// that a `reconcile(id:)` returning `result` prepared from a snapshot in `phase`, or `nil` when no
+    /// authored function refused it, as for a delivery.
+    borrowing func rejectingRoute(of result: ReconcileResult, in phase: String) -> String?
+}
+
+extension DeliveringLocalStateMachine where Self: ~Copyable {
+    /// Attributes no refusal, for an owner that cannot name the function that refused an outcome.
+    public borrowing func rejectingRoute(of result: DeliveryResult, in phase: String) -> String? { nil }
+    /// Attributes no refusal, for an owner that cannot name the function that refused an outcome.
+    public borrowing func rejectingRoute(of result: ReconcileResult, in phase: String) -> String? { nil }
 }

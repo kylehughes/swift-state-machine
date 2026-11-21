@@ -127,13 +127,16 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
     ///
     /// Every change to an envelope's presence, status, rejection, or attempt count advances it; reading
     /// does not. It wraps at its limit rather than stopping, because a stopped count could no longer
-    /// mark a later image newer: an observer tells two generations apart by inequality, or orders them
-    /// as serial numbers, as a pending-completion mailbox does.
+    /// tell a later image from an earlier one: an observer tells two generations apart by inequality
+    /// only, and takes the order of images from the owner that publishes them.
     package private(set) var generation: UInt64 = 0
     /// Creates an empty ledger for one associated runtime.
     public init() {}
     /// Creates an empty ledger whose change count starts at `generation`, so a test can cross its wrap.
     package init(generation: UInt64) { self.generation = generation }
+    /// Advances the change count by `distance` without changing an envelope, so a test can age an
+    /// image by any part of the count's range.
+    package mutating func advanceGeneration(by distance: UInt64) { generation &+= distance }
     /// The number of retained envelopes, including any claimed by preparation.
     package var pendingCount: Int { entries.count }
     /// Historical typed projections; projecting does not claim preparation.
@@ -396,55 +399,6 @@ extension RuntimeDeliveryLedger {
         }
     }
 }
-
-extension RuntimeDeliveryLedger {
-    /// The reconciliation reports of capacity conflicts that a host has captured and not yet made,
-    /// oldest first.
-    ///
-    /// A host owes a batch of conflicts, each captured with the decision that produced it, before any
-    /// callout, and makes each report through ``take(through:)``. Before it begins any other attempt
-    /// of a completion, or discards it, or reports it, the host makes the reports still owed for it
-    /// through ``take(_:)``. A handler of an earlier entry that reconciles a later entry synchronously
-    /// therefore sees that entry's captured attempt before the attempt it starts, and each attempt is
-    /// reported once.
-    package struct OwedReports {
-        private var owed: [(serial: UInt64, pending: Pending)] = []
-        private var nextSerial: UInt64 = 0
-
-        /// Creates an empty record.
-        package init() {}
-
-        /// Owes a report for each entry of `batch`, and returns their serials, in order.
-        package mutating func owe(_ batch: [Pending]) -> [UInt64] {
-            batch.map { pending in
-                defer { nextSerial &+= 1 }
-                owed.append((nextSerial, pending))
-                return nextSerial
-            }
-        }
-        /// Takes the reports still owed for the completion of the entry `serial`, through that entry,
-        /// oldest first, or none once that entry's report was made.
-        package mutating func take(through serial: UInt64) -> [Pending] {
-            guard let entry = owed.first(where: { $0.serial == serial }) else { return [] }
-            return take { $0.pending.id == entry.pending.id && $0.serial <= serial }
-        }
-        /// Takes every report still owed for `id`, oldest first.
-        package mutating func take(_ id: RuntimePendingID) -> [Pending] { take { $0.pending.id == id } }
-
-        private mutating func take(where selected: ((serial: UInt64, pending: Pending)) -> Bool) -> [Pending] {
-            guard owed.contains(where: selected) else { return [] }
-            var taken: [Pending] = []
-            owed.removeAll { entry in
-                guard selected(entry) else { return false }
-                taken.append(entry.pending)
-                return true
-            }
-            return taken
-        }
-    }
-}
-
-extension RuntimeDeliveryLedger.OwedReports: Sendable where Outcome: Sendable {}
 
 /// Bounded by retained pending IDs, with one responsible scheduler per ready cohort.
 nonisolated package struct RuntimeDeliveryReadyQueue: Sendable {

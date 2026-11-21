@@ -5,7 +5,7 @@ import os
 // after unlocking, so a call that only reads a flag never holds a payload.
 nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
     private struct Envelope: Sendable {
-        let revision: UInt64
+        let revision: UInt64?
         let value: Value
         let terminal: Bool
     }
@@ -19,27 +19,7 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
         // Set when the owner released the lease without a terminal envelope pending or claimed.
         var released = false
     }
-    /// How the mailbox decides that an offer is newer than the last one it accepted.
-    package enum Order: Sendable {
-        /// Revisions only grow, so a greater revision is newer.
-        case revision
-        /// The ledger generations of retained-completion images, which wrap, compared as serial
-        /// numbers: an offer is newer when it lies less than half the range of `UInt64` after the
-        /// watermark. Images offered to one mailbox are never that far apart, because each change to
-        /// the ledger advances its generation only a few steps.
-        case generation
-
-        package func isNewer(_ revision: UInt64, than watermark: UInt64) -> Bool {
-            switch self {
-            case .revision: return revision > watermark
-            case .generation:
-                let distance = revision &- watermark
-                return distance != 0 && distance < 1 << 63
-            }
-        }
-    }
     private let storage: OSAllocatedUnfairLock<State>
-    private let order: Order
     private let receive: @Sendable (Value) -> Void
     private let finish: @Sendable () -> Void
     private let onRelease: (@Sendable () -> Void)?
@@ -48,18 +28,21 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
 
     /// Creates a mailbox whose first envelope is `initial`.
     ///
+    /// With a `revision`, an offer replaces the last accepted one only when its revision is greater,
+    /// because revisions only grow. Without one, every offer is newer than the last, because its owner
+    /// offers values in order, through one serial delivery, as a `Shared` owner offers images of its
+    /// retained completions.
+    ///
     /// `onRelease` runs once, at once, when the owner releases the registration without closing, even
     /// while a delivery is still in progress; `finish` follows that delivery.
     package init(
         initial: Value,
-        revision: UInt64,
+        revision: UInt64?,
         terminal: Bool,
-        order: Order = .revision,
         receive: @escaping @Sendable (Value) -> Void,
         finish: @escaping @Sendable () -> Void,
         onRelease: (@Sendable () -> Void)? = nil
     ) {
-        self.order = order
         storage = OSAllocatedUnfairLock(
             initialState: State(
                 watermark: revision,
@@ -106,9 +89,12 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
         if wake { Task { self.deliver() } }
     }
 
-    package func offer(_ value: Value, revision: UInt64, terminal: Bool) {
+    /// Offers `value`, which replaces any envelope not yet claimed unless its `revision` is not greater
+    /// than the last accepted one; an offer without a revision is always newer.
+    package func offer(_ value: Value, revision: UInt64?, terminal: Bool) {
         var changed = storage.withLock { state -> (wake: Bool, replaced: Envelope?)? in
-            guard !state.closed, state.watermark.map({ order.isNewer(revision, than: $0) }) ?? true else { return nil }
+            guard !state.closed else { return nil }
+            if let revision, let watermark = state.watermark, revision <= watermark { return nil }
             state.watermark = revision
             let envelope = Envelope(revision: revision, value: value, terminal: terminal)
             let replaced = exchange(&state.pending, with: envelope)

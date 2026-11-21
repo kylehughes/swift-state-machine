@@ -56,6 +56,9 @@ struct ExplorerFamilies: OptionSet, Hashable, Sendable {
     /// Armable client callback sites: host calls, the subscription before demand, the completion, and
     /// destructors (69).
     static let sites = ExplorerFamilies(rawValue: 524_288)
+    /// Driving Combine: demand requested, and a subscription cancelled, off the main actor through
+    /// `receive(on:)`, and a callback inside a presentation publisher's delivery decision (H10, E10).
+    static let elsewhere = ExplorerFamilies(rawValue: 8_388_608)
 }
 
 /// What one run of a sequence found.
@@ -170,6 +173,8 @@ struct ExplorerOutcome: Sendable {
     // I37: the harness step in progress, and the step in which each observation's first snapshot was shown.
     private var step = 0
     private var reportsThisStep = 0
+    // I51: the expected invalidation trace of each tracked property.
+    private let traces = ExplorerTraces()
     private var firedAtStepStart = 0
     private var firstShownStep: [Int: Int] = [:]
     private var changeDepth = 0
@@ -198,7 +203,8 @@ struct ExplorerOutcome: Sendable {
             )
         else { return nil }
         self.subject = subject
-        installed = subject.install({ [weak self] in self?.reported($0) }, { [weak self] in self?.changed() })
+        traces.tracksSnapshot = kind == .observation
+        installed = subject.install({ [weak self] in self?.reported($0) }, { [weak self] in self?.changed($0) })
         subject.watch(world)
         if families.contains(.clocks) { world.useIndependentClocks() }
         if families.contains(.sites) || families.contains(.matrix) {
@@ -261,7 +267,7 @@ struct ExplorerOutcome: Sendable {
                     result += [
                         .observeFrom(host), .observeAsync(host), .followAsync(host), .observeAsyncHeld(host),
                         .observeSeq(host), .followSeq(host), .observeAsyncNow(host), .observeAsyncFinished(host),
-                        .observeClaimed(host), .followCancelled(host),
+                        .observeClaimed(host), .followCancelled(host), .followUnseeded(host),
                     ]
                 }
             }
@@ -446,14 +452,16 @@ struct ExplorerOutcome: Sendable {
         for (index, event) in sequence.enumerated() {
             world.note("step \(index + 1): \(event)")
             let firedBefore = fired
-            let observingBefore = subject.held() ? subject.isObserving() : nil
+            traces.begin(
+                observing: subject.held() ? subject.isObserving() : nil,
+                shown: subject.held() ? subject.snapshot()?.id : nil
+            )
             await perform(event)
             boundary(topLevel: true)
-            explorerCheckReportParity(
-                world,
-                before: observingBefore,
-                after: subject.held() ? subject.isObserving() : nil,
-                reports: reportsThisStep
+            traces.end(
+                observing: subject.held() ? subject.isObserving() : nil,
+                shown: subject.held() ? subject.snapshot()?.id : nil,
+                world
             )
             if index > 0, case .arm = sequence[index - 1], fired == firedBefore, subject.held(), pruning {
                 redundant = true
@@ -486,6 +494,8 @@ struct ExplorerOutcome: Sendable {
     private var topEvent: ExplorerEvent?
     private var form = "none"
     private var formHost = -1
+    // The form and host each attempt observed, so a callback of an ending observation keeps its own form.
+    private var attemptForms: [Int: (String, Int)] = [:]
     private var clientRegistering = false
 
     private func perform(_ event: ExplorerEvent) async {
@@ -499,7 +509,7 @@ struct ExplorerOutcome: Sendable {
             form = "async closure"
             formHost = host
         case .observeSeq(let host), .followSeq(let host), .observeFrom(let host), .observeClaimed(let host),
-            .followCancelled(let host):
+            .followCancelled(let host), .followUnseeded(let host):
             form = "sequence"
             formHost = host
         default: break
@@ -631,13 +641,14 @@ struct ExplorerOutcome: Sendable {
             startAsync(host: host, follower: false, mode: .immediate)
         case .observeAsyncFinished(let host):
             startAsync(host: host, follower: false, mode: .immediateFinished)
-        case .observeSeq(let host), .followSeq(let host):
+        case .observeSeq(let host), .followSeq(let host), .followUnseeded(let host):
             // `begin` below allocates this number: the epoch of the stop, then the attempt.
             let attempt = attempts + 2
             world.setLatestAttempt(attempt)
             world.setContext(.call(attempt: attempt))
             clientRegistering = true
-            let sequence = try? hosts[host].sequence()
+            let seeded = if case .followUnseeded = event { false } else { true }
+            let sequence = try? hosts[host].sequence(seeded: seeded)
             clientRegistering = false
             world.setContext(.spontaneous)
             guard let sequence else {
@@ -862,7 +873,8 @@ struct ExplorerOutcome: Sendable {
             .observeIsolated, .isolatedReturn, .observeActor, .actorReturn, .tokenDropAfterJob, .driverParked,
             .driverGo, .releaseInHandOff, .releaseInDelivery, .releaseNotice, .noticeGo, .register, .registerPending,
             .cancelOldest, .cancelNewest, .count, .countDuring, .refuse, .accept, .holdDrainer, .releaseDrainer, .edit,
-            .reconcile, .discard, .createRefusing, .createOccupied, .createClosed, .resume, .refuseNext, .occupy,
+            .reconcile, .discard, .returnWork, .onReport, .stage, .subscribeElsewhere, .flushHeld, .createRefusing,
+            .createOccupied, .createClosed, .resume, .refuseNext, .occupy,
             .vacate, .observeUnseeded, .claim, .read, .cancelReader, .sendCancel, .ownerSend, .commitCurrent,
             .saveProposal, .commitSaved, .commitForeign, .copyOwner, .dropCopy, .releaseDrivers, .present, .stopP,
             .dropP,
@@ -1052,7 +1064,18 @@ struct ExplorerOutcome: Sendable {
         letGoAll()
         current = attempts
         world.setLatestAttempt(attempts)
+        attemptForms[attempts] = (form, formHost)
         return attempts
+    }
+    // The matrix's record of what a callback's event changed: the presentation, its registrations, its
+    // reports, and its attempts.
+    private func matrixState() -> String {
+        let held = subject.held()
+        let observing = held ? subject.isObserving() : nil
+        let world = world.state.withLock { state in
+            "\(state.registrations.values.filter { $0.phase != .freed }.map(\.id).sorted()) \(state.letGo.count) \(state.reports.count) \(state.presentationGone)"
+        }
+        return "\(held) \(String(describing: observing)) \(world) \(attempts) \(parked.count)"
     }
     private func letGoAll() {
         // Epoch 0 is the generation the presentation starts in.
@@ -1158,6 +1181,7 @@ struct ExplorerOutcome: Sendable {
     // MARK: Callbacks
 
     private func reported(_ value: Bool) {
+        traces.report(value, world, observation: kind == .observation)
         boundary(topLevel: false)
         let (previous, count) = world.state.withLock { state -> (Bool?, Int) in
             defer { state.reports.append(value) }
@@ -1187,16 +1211,38 @@ struct ExplorerOutcome: Sendable {
     // step and reports a past state, so only a `true` published in the step that first showed its
     // observation's snapshot is checked here; I7 and I14 check the settled value.
     private func checkLiveAtTrue() {
+        // A change made by a callback of an `isObserving` assignment is queued behind it (UI-004), so only
+        // the step's first report is unqueued.
+        // So is one whose own assignment's `objectWillChange` ran client code first: a callback in the
+        // step makes the report a decided change it may have undone.
+        guard reportsThisStep == 1, fired == firedAtStepStart else { return }
+        // The newest observation with a live registration. A `true` published before any snapshot of it is
+        // shown reports a registration whose seed is not yet visible.
+        let current = world.state.withLock { state in
+            state.registrations.values
+                .filter {
+                    $0.phase != .freed && !$0.withheld && !$0.finished && !state.letGo.contains($0.attempt ?? -1)
+                }
+                .compactMap(\.attempt).max()
+        }
+        // The boundary samples what is shown only while the harness holds the presentation.
+        if let current, current > 0, firstShownStep[current] == nil,
+            firstShownStep.keys.allSatisfy({ $0 < current }), subject.held(), let shot = subject.snapshot()
+        {
+            world.violate(
+                .trueBeforeLive,
+                "true reported for observation \(current) before its seed was shown (r\(shot.revision) of observation \(world.observation(of: shot.id)) is shown)"
+            )
+            return
+        }
         // The observation the `true` reports: the newest one whose first snapshot has been shown.
         // The boundary samples what is shown, so one shown and replaced inside a call may go unrecorded;
         // such a report is left to I7 and I14.
         guard let (observation, shownStep) = firstShownStep.filter({ $0.key > 0 }).max(by: { $0.key < $1.key })
         else { return }
-        // A change made by a callback of an `isObserving` assignment is queued behind it (UI-004), so only
-        // the step's first report is unqueued.
-        // So is one whose own assignment's `objectWillChange` ran client code first: a callback in the
-        // step makes the report a decided change it may have undone.
-        guard shownStep == step, reportsThisStep == 1, fired == firedAtStepStart else { return }
+        // A `true` published in a later step than the one that first showed its observation's snapshot
+        // is a queued report of a past change.
+        guard shownStep == step else { return }
         let live = world.state.withLock { state in
             state.registrations.values.filter {
                 // A host's cancellation parked elsewhere is unknown to the presentation until it returns.
@@ -1220,7 +1266,8 @@ struct ExplorerOutcome: Sendable {
             )
         }
     }
-    private func changed() {
+    private func changed(_ old: Int?) {
+        if let old { traces.snapshot.invalidated(old, world) }
         willChanges += 1
         changeDepth += 1
         defer { changeDepth -= 1 }
@@ -1235,7 +1282,11 @@ struct ExplorerOutcome: Sendable {
         guard !inHook, let index = armed.firstIndex(where: { $0.0 == hook }) else { return }
         let event = armed.remove(at: index).1
         fired += 1
-        explorerCover(kind: kind, form: form, host: formHost, site: hook, event: event, phase: explorerPhase(topEvent))
+        let cell = ExplorerMatrixCell.read(world, site: hook, top: topEvent) { attempt in
+            attempt.flatMap { attemptForms[$0] } ?? (form, formHost)
+        }
+        let before = matrixState()
+        defer { explorerCover(kind: kind, cell: cell, site: hook, event: event, changed: matrixState() != before) }
         hookLeftPending = false
         let announcedBefore = world.state.withLock { $0.revision }
         inHook = true
@@ -1520,7 +1571,9 @@ struct ExplorerOutcome: Sendable {
         let observing = subject.isObserving() ?? false
         if unfreed.count > 1 { return (.twoRegistrations, "registrations \(unfreed) hold slots at once") }
         if observing, unfreed.isEmpty { return (.finalState, "isObserving is true but no registration holds a slot") }
-        if !observing, !unfreed.isEmpty {
+        // A registration that has delivered nothing yet, an unseeded one, has no snapshot to report live with.
+        let delivering = world.unfreed.filter { !inFlight.contains($0.attempt ?? -1) && $0.firstOffer != nil }
+        if !observing, !delivering.isEmpty {
             return (.finalState, "isObserving is false but registration \(unfreed) holds a slot")
         }
         return nil

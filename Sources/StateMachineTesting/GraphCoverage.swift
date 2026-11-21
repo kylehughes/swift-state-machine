@@ -20,9 +20,9 @@ import StateMachine
 ///
 /// Every step comes from a real owner admitting a real change, and names the edge from that change's
 /// receipt, so an exercised edge is one that a test actually took, even when a router chooses between
-/// edges with the same destination. Every rejection comes from the real owner refusing an input, and
-/// names the route the owner reports for it, so a route counts as declining only once a test saw it
-/// decline.
+/// edges with the same destination. Every rejection comes from the real owner refusing an input, or a
+/// completion that `deliver` or `reconcile` prepared, and names the route the owner reports for it, so
+/// a route counts as declining only once a test saw it decline.
 nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: Sendable {
     /// The graph the coverage measures: the owner's.
     public var graph: StateMachineGraph { Owner.graph }
@@ -30,8 +30,8 @@ nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: S
     public private(set) var exercisedEdgeIDs: Set<String> = []
     /// The identifiers of the phases that recorded runs held.
     public private(set) var visitedPhaseIDs: Set<String> = []
-    /// The identifiers of the routers and edges whose authored functions refused an input in recorded
-    /// runs, as the owner named them.
+    /// The identifiers of the routers and edges whose authored functions refused an input or a
+    /// completion in recorded runs, as the owner named them.
     public private(set) var rejectingRouteIDs: Set<String> = []
     /// A description of each invariant violation that recorded runs reported.
     public private(set) var violations: [String] = []
@@ -57,6 +57,7 @@ nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: S
         for rejection in test.rejections {
             if let route = rejection.route { rejectingRouteIDs.insert(route) }
         }
+        for rejection in test.completionRejections { rejectingRouteIDs.insert(rejection.route) }
         violations += test.violations.map { "\($0.invariant) at revision \($0.step.revision) in \($0.step.phase)" }
         unobservedChanges += test.unobservedChanges
         replacedOwners += test.replacedOwners
@@ -83,11 +84,12 @@ nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: S
 
     /// The declared routers without candidate edges that no recorded run saw decline, in declaration order.
     ///
-    /// Such a router exists only to decline an input, so no step can exercise it; it counts once a
-    /// recorded run's ``ManualMachineTest/rejection(of:fileID:filePath:line:column:)`` or failed
-    /// ``ManualMachineTest/send(_:fileID:filePath:line:column:)`` made the real owner refuse an input
-    /// through it, as the owner names the route that refused. An owner that names no route for its
-    /// rejections leaves every such router listed.
+    /// Such a router exists only to decline an input or a completion, so no step can exercise it. An
+    /// input router counts once a recorded run's ``ManualMachineTest/rejection(of:fileID:filePath:line:column:)``
+    /// or failed ``ManualMachineTest/send(_:fileID:filePath:line:column:)`` made the real owner refuse an
+    /// input through it, and a completion router once a recorded run's `deliver` or `reconcile` made the
+    /// real owner refuse a completion through it, as the owner names the route that refused. An owner
+    /// that names no route for its rejections leaves every such router listed.
     public var unexercisedRejectingRoutes: [StateMachineGraph.Router] {
         graph.routers.filter { $0.candidates.isEmpty && !rejectingRouteIDs.contains($0.id) }
     }

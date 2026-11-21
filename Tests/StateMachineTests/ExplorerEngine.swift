@@ -1,4 +1,5 @@
 import Foundation
+import StateMachineTestSupport
 
 /// One exploration: a class, the event families it enables, and the depth it enumerates to.
 struct ExplorerConfiguration: Sendable, CustomStringConvertible {
@@ -37,6 +38,7 @@ struct ExplorerConfiguration: Sendable, CustomStringConvertible {
         if families.contains(.copies) { names.append("copies") }
         if families.contains(.chains) { names.append("chains") }
         if families.contains(.matrix) { names.append("matrix") }
+        if families.contains(.elsewhere) { names.append("elsewhere") }
         return "\(kind.rawValue) [\(names.joined(separator: "+"))] depth \(depth)\(stateHashing ? " hashed" : "")"
     }
 }
@@ -75,24 +77,53 @@ struct ExplorerReport: Sendable {
 ///
 /// A sequence that violates an invariant is not extended, so the first sequence recorded for
 /// an invariant is a shortest one.
+///
+/// A sequence can park a cooperative-pool thread (the `reconcile` family holds the drainer), so the
+/// exploration runs under the process-wide exclusion of the tests that do, and lets the tests waiting
+/// for it take their turn between two sequences every quarter of a second.
 @MainActor func explore(_ configuration: ExplorerConfiguration, limit: Int = .max) async -> ExplorerReport {
+    await withExclusiveCooperativeThreadHold(takingTurnsEvery: .milliseconds(250)) { turns in
+        await explore(configuration, limit: limit, turns: &turns)
+    }
+}
+
+@MainActor private func explore(
+    _ configuration: ExplorerConfiguration,
+    limit: Int,
+    turns: inout CooperativeThreadHoldTurns
+) async -> ExplorerReport {
     var report = ExplorerReport(configuration: configuration)
     let start = Date()
     var seen: [String: Int] = [:]
     var frontier: [([ExplorerEvent], [ExplorerEvent])] = []
     guard let root = await explorerRun(configuration, []) else { return report }
+    report.sequences += 1
+    // The empty script runs creation and quiescence alone: a violation there is a finding of its own.
+    if let violation = root.violations.first {
+        explorerAppendAll(configuration, [], root.violations)
+        report.findings.append(.init(violation: violation, sequence: [], count: 1))
+        explorerAppendFailure(configuration, [], violation)
+        report.seconds = Date().timeIntervalSince(start)
+        return report
+    }
     frontier = [([], root.enabled)]
     for depth in 1 ... max(configuration.depth, 1) {
         var next: [([ExplorerEvent], [ExplorerEvent])] = []
         for (prefix, enabled) in frontier {
             for event in enabled {
                 guard report.sequences < limit else { break }
-                // Sleep set over adjacent independent events: run only the order whose descriptions ascend.
-                if let last = prefix.last, last.commutes(with: event), last.description > event.description {
+                // Sleep set over adjacent independent events: run only the order whose descriptions ascend. An
+                // armed callback (a destructor of the value a delivery displaces, an `onCancel`) can act on
+                // the other host, so no pair commutes while one may still be armed.
+                if let last = prefix.last, last.commutes(with: event), last.description > event.description,
+                    !prefix.contains(where: \.arms)
+                {
+
                     report.pruned += 1
                     continue
                 }
                 let sequence = prefix + [event]
+                await turns.yieldIfDue()
                 guard let outcome = await explorerRun(configuration, sequence, pruning: true) else { continue }
                 report.sequences += 1
                 report.deepest = depth
@@ -155,8 +186,10 @@ struct ExplorerReport: Sendable {
             ExplorerFreeSequenceRun(verbose: verbose)
         } else if configuration.kind == .runtimeShared, configuration.families.contains(.copies) {
             ExplorerCopiesRun(verbose: verbose)
+        } else if configuration.kind == .runtimeShared, explorerReconciles(configuration.families, sequence) {
+            ExplorerReportsRun(verbose: verbose, pruning: pruning)
         } else if configuration.kind == .runtimeShared {
-            ExplorerRuntimeRun(families: configuration.families, verbose: verbose, pruning: pruning)
+            ExplorerRuntimeRun(verbose: verbose)
         } else if configuration.kind.isTeardown || configuration.kind == .publisher {
             ExplorerTeardownRun(configuration.kind, verbose: verbose)
         } else if configuration.kind.isGenerated {
@@ -170,6 +203,17 @@ struct ExplorerReport: Sendable {
         }
     guard let run else { return nil }
     return await run.run(sequence)
+}
+
+/// Whether a raw-owner run belongs to the `reconcile` family: named, or, in a replay that names neither
+/// raw-owner family, a script whose events name a work or a stage.
+func explorerReconciles(_ families: ExplorerFamilies, _ sequence: [ExplorerEvent]) -> Bool {
+    if families.contains(.reconcile) { return true }
+    if families.contains(.counts) { return false }
+    return sequence.contains { event in
+        if case .stage = event { return true }
+        return !event.works.isEmpty || [.holdDrainer, .releaseDrainer, .edit, .emit, .releaseDrivers].contains(event)
+    }
 }
 
 /// Appends a newly found violation to the file named by `EXPLORER_FAILURES`, if set.

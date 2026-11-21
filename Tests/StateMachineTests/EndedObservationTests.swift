@@ -285,16 +285,17 @@ private final class Shot: StateMachineSnapshot, Sendable {
         #expect(host.releasedWhileHeld == [false])
     }
 
-    // `close()` ends the observation first, so the delivery from inside that cancellation is not shown
-    // either; the closed snapshot from the receipt is.
+    // `close()` closes the owner, whose receipt holds revision 1, and then ends the observation, so the
+    // delivery from inside that cancellation, revision 11, is not shown; the closed snapshot from the
+    // receipt is.
     @Test func aCombineDrivingPresentationShowsOnlyTheClosedSnapshotWhenItsHostDeliversWhileItCloses() {
         let host = CancellingHost()
         let shown = StateMachineObservableObject(host)
         var published: [UInt64] = []
         let subscription = shown.presentedSnapshots.sink { published.append($0.revision) }
         shown.close()
-        #expect(published == [0, 11])
-        #expect(shown.snapshot.revision == 11)
+        #expect(published == [0, 1])
+        #expect(shown.snapshot.revision == 1)
         #expect(!shown.isObserving)
         subscription.cancel()
     }

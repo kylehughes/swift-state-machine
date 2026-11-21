@@ -43,3 +43,51 @@ public func withExclusiveCooperativeThreadHold(_ operation: @Sendable () async t
     }
     await CooperativeThreadHold.shared.release()
 }
+
+/// The hold of a long operation that runs as a series of steps, each of which may park a
+/// cooperative-pool thread and lets it go before it returns.
+///
+/// Holding the exclusion for the whole operation would make every other test that parks a thread wait
+/// for all of it, past its own time limit. ``yieldIfDue()`` lets the waiting tests take their turn
+/// between two steps once the operation has held the exclusion for its interval.
+public struct CooperativeThreadHoldTurns: Sendable {
+    private let interval: Duration
+    private var since: ContinuousClock.Instant
+
+    fileprivate init(interval: Duration) {
+        self.interval = interval
+        self.since = .now
+    }
+
+    /// Lets the tests waiting for the exclusion run, once the operation has held it for its interval.
+    ///
+    /// It takes the exclusion back before it returns. Call it only between two steps, while no thread
+    /// of the operation is parked.
+    public mutating func yieldIfDue(isolation: isolated (any Actor)? = #isolation) async {
+        guard since.duration(to: .now) >= interval else { return }
+        await CooperativeThreadHold.shared.release()
+        await CooperativeThreadHold.shared.acquire()
+        since = .now
+    }
+}
+
+/// Runs a long operation, made of steps that each may park a cooperative-pool thread, while it alone
+/// may park one, giving up the exclusion between two steps at most once per interval.
+///
+/// The operation calls ``CooperativeThreadHoldTurns/yieldIfDue()`` between its steps.
+public func withExclusiveCooperativeThreadHold<Value>(
+    takingTurnsEvery interval: Duration,
+    isolation: isolated (any Actor)? = #isolation,
+    _ operation: (inout CooperativeThreadHoldTurns) async throws -> Value
+) async rethrows -> Value {
+    await CooperativeThreadHold.shared.acquire()
+    var turns = CooperativeThreadHoldTurns(interval: interval)
+    do {
+        let value = try await operation(&turns)
+        await CooperativeThreadHold.shared.release()
+        return value
+    } catch {
+        await CooperativeThreadHold.shared.release()
+        throw error
+    }
+}

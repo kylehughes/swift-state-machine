@@ -1,6 +1,7 @@
 import Dispatch
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -203,11 +204,10 @@ private actor MainThreadActor {
             gate.close()
         }
         let finished = Signal()
-        DispatchQueue.global()
-            .async {
-                token.cancel()
-                finished.raise()
-            }
+        runOnOwnThread {
+            token.cancel()
+            finished.raise()
+        }
         await entered.wait()
         token.cancel()
         #expect(!gate.isOpen)

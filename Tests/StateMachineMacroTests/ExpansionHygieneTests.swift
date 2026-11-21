@@ -227,7 +227,8 @@ nonisolated private enum Refusing {
     private struct Unexpected: Error {}
 
     @Test func aTypeSpanningLinesIsOneGraphLiteral() throws {
-        #expect(Pairs.graph.inputs.map(\.payload) == ["(Int, Int)"])
+        // Each line break between two tokens is one space, as the author separated them.
+        #expect(Pairs.graph.inputs.map(\.payload) == ["( Int, Int )"])
         var owner = Pairs.Local()
         try owner.send(.pair((1, 2)))
         guard case .idle(let idle) = owner.snapshot() else { throw Unexpected() }

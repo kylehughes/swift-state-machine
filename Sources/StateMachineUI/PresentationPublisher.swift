@@ -33,7 +33,9 @@ import os
 /// `stopObserving()` and every later observation, and it does not keep the presentation alive. Once the
 /// presentation's release has begun, it delivers no value: it discards a value its demand has not
 /// reached, a later main-actor turn finishes every subscriber, and a subscriber that attaches after the
-/// release receives `.finished` at once. A client that keeps the publisher can therefore tell a presentation that is not observing from
+/// release receives `.finished` at once. A buffered value is delivered only when the subscriber had
+/// demand at an instant when the presentation could still deliver, so demand requested after the
+/// release reaches no value. A client that keeps the publisher can therefore tell a presentation that is not observing from
 /// one that can never publish again.
 ///
 /// Subscription, delivery, and completion happen on the main actor. Subscribing off the main actor stops
@@ -222,14 +224,21 @@ extension PresentationPublisher: @MainActor Publisher {
                 // A snapshot offered while `transform` ran is newer than the one it read.
                 if !isEnded, case .none = next { next = .value(first) }
             case .value:
-                // Nothing is delivered once the presentation's release has begun: the value waiting for
-                // demand is discarded, and the turn that disposes of the presentation finishes.
+                // A delivery claims its unit of demand first and only then reads whether the presentation
+                // can still deliver, holding the unit in between, so a value is delivered only when there
+                // was an instant with both: demand that a request made after the release cannot supply
+                // reaches no value. Nothing is delivered once the presentation's release has begun: the
+                // value waiting is discarded, its unit is returned, and the turn that disposes of the
+                // presentation finishes.
+                guard demand.claim() else { return }
+                PresentationDeliveryPause.reached()
                 guard feed?.current() != nil else {
+                    demand.add(.max(1))
                     let discarded = exchange(&next, with: .none)
                     withExtendedLifetime(discarded) {}
                     return
                 }
-                guard demand.claim(), case .value(let value) = exchange(&next, with: .none) else { return }
+                guard case .value(let value) = exchange(&next, with: .none) else { return }
                 demand.add(downstream.receive(value))
             case .none:
                 return
@@ -302,4 +311,16 @@ nonisolated private final class PresentationDemand: Subscription, Sendable {
         }
         if first { wake() }
     }
+}
+
+/// A pause that a test inserts into a presentation publisher's delivery of a buffered value, between
+/// the two reads that decide it, so a release and a request can happen in between.
+///
+/// It runs on the main actor, in the delivery's turn, which inherits the task-local values of the task
+/// that scheduled it. It is `nil` everywhere else.
+nonisolated package enum PresentationDeliveryPause {
+    @TaskLocal package static var betweenReads: (@Sendable () -> Void)?
+
+    /// Runs the pause bound for the current task, if any.
+    package static func reached() { betweenReads?() }
 }

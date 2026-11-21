@@ -28,6 +28,18 @@ extension TokenSyntax {
     }
 }
 
+extension AttributeSyntax {
+    /// The attribute's name as Swift reads a name it may define itself: a bare identifier without
+    /// backticks, so `@escaping` and `` @`escaping` `` are both `escaping`; `nil` for a name through a
+    /// module selector, a member, or with generic arguments, which only a custom attribute has.
+    var builtInName: String? {
+        guard let identifier = attributeName.as(IdentifierTypeSyntax.self), identifier.moduleSelector == nil,
+            identifier.genericArgumentClause == nil, case .identifier = identifier.name.tokenKind
+        else { return nil }
+        return identifier.name.lookupName
+    }
+}
+
 extension TokenSyntax {
     /// The value of an integer literal token, read as Swift reads it: decimal digits, or `0x`, `0o`, or
     /// `0b` and digits of that base, with any `_` between them ignored; `nil` for another token, and for
@@ -715,15 +727,28 @@ struct LexicalScopes {
 
     /// The declarations of the schema that `type`, spelled in `scope`, names.
     ///
-    /// They are each type reference resolved by lookup from `scope` outward, and each member of a type
-    /// whose members the macro reads, such as `Notes.Draft`, found in that type. A name declared nowhere
-    /// the macro reads, such as one outside the schema, names none of them, and an alias's own spelling
-    /// is the alias's to resolve.
+    /// They are each reference that name lookup resolves (``TypeQualifier/lookupReferences(in:)``),
+    /// looked up from `scope` outward, and each member of a type whose members the macro reads, such as
+    /// `Notes.Draft`, found in that type, including a type reached through a nongeneric alias, such as
+    /// `N.Draft` where `N` names `Notes`. A name declared nowhere the macro reads, such as one outside the
+    /// schema, names none of them, and an alias's own spelling is the alias's to resolve.
     func namedDeclarations(_ type: TypeSyntax, in scope: Int = Self.schema) -> [SyntaxIdentifier] {
         let scope = scopes.indices.contains(scope) ? scope : Self.schema
-        var result: [SyntaxIdentifier] = []
-        /// The scope whose members a reference names, when the macro reads them.
-        func members(of type: TypeSyntax) -> Int? {
+        // An alias expands to its target where it is declared; a cycle, which Swift refuses, stops after
+        // a bounded number of expansions for each member reference.
+        var expansions = 0
+        /// The scope whose members a member of `member` names, when the macro reads them.
+        func members(of member: Member?, in scope: Int) -> Int? {
+            switch member {
+            case .type(let child, _)?: return child
+            case .alias(let alias)? where alias.parameters.isEmpty && expansions > 0:
+                expansions -= 1
+                return members(of: alias.target, in: scope)
+            default: return nil
+            }
+        }
+        /// The scope whose members a reference spelled in `scope` names, when the macro reads them.
+        func members(of type: TypeSyntax, in scope: Int) -> Int? {
             let type = type.unparenthesized
             if let identifier = type.as(IdentifierTypeSyntax.self) {
                 guard identifier.moduleSelector == nil, identifier.genericArgumentClause == nil else { return nil }
@@ -734,26 +759,27 @@ struct LexicalScopes {
                     // The schema's own name, which no member may take, names the schema.
                     return identifier.name.lookupName == schemaName ? Self.schema : nil
                 }
-                guard case .type(let child, _)? = scopes[index].members[name] else { return nil }
-                return child
+                return members(of: scopes[index].members[name], in: index)
             }
             guard let member = type.as(MemberTypeSyntax.self), member.moduleSelector == nil,
-                member.genericArgumentClause == nil, let base = members(of: member.baseType),
-                let name = number(of: member.name), case .type(let child, _)? = scopes[base].members[name]
+                member.genericArgumentClause == nil, let base = members(of: member.baseType, in: scope),
+                let name = number(of: member.name)
             else { return nil }
-            return child
+            return members(of: scopes[base].members[name], in: base)
+        }
+        var result: [SyntaxIdentifier] = []
+        for reference in TypeQualifier.lookupReferences(in: type) {
+            guard case .identifier = reference.name.tokenKind, let name = number(of: reference.name),
+                case .found(let index) = lookup(name, from: scope), let declaration = scopes[index].declarations[name]
+            else { continue }
+            result.append(declaration)
         }
         var pending = [Syntax(type)]
         while let node = pending.popLast() {
             pending += node.children(viewMode: .sourceAccurate).reversed()
-            if let identifier = node.as(IdentifierTypeSyntax.self), identifier.moduleSelector == nil,
-                case .identifier = identifier.name.tokenKind, let name = number(of: identifier.name),
-                case .found(let index) = lookup(name, from: scope),
-                let declaration = scopes[index].declarations[name]
-            {
-                result.append(declaration)
-            } else if let member = node.as(MemberTypeSyntax.self), member.moduleSelector == nil,
-                let base = members(of: member.baseType), let name = number(of: member.name),
+            expansions = 64
+            if let member = node.as(MemberTypeSyntax.self), member.moduleSelector == nil,
+                let base = members(of: member.baseType, in: scope), let name = number(of: member.name),
                 let declaration = scopes[base].declarations[name]
             {
                 result.append(declaration)
@@ -1262,7 +1288,7 @@ struct LexicalScopes {
     /// The passing conventions an attributed type spells, sorted, and whether `element` is one.
     private static func isConvention(_ element: AttributeListSyntax.Element) -> Bool {
         guard case .attribute(let attribute) = element else { return false }
-        return parameterAttributes.contains(attribute.attributeName.trimmedDescription)
+        return attribute.builtInName.map(parameterAttributes.contains) ?? false
     }
 
     private static func isConvention(_ specifier: TypeSpecifierListSyntax.Element) -> Bool {

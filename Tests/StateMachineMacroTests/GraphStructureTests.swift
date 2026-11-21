@@ -305,16 +305,16 @@ private struct Gate: Sendable {
         #expect(
             Door.graph.dot() == """
                 digraph "Door" {
-                    "*" [shape=point];
-                    "closed";
-                    "open";
-                    "broken" [peripheries=2];
-                    "*" -> "closed";
-                    "*" -> "open" [label="restored", style=dashed];
-                    "closed" -> "open" [label="swingOpen"];
-                    "open" -> "closed" [label="swingShut"];
-                    "closed" -> "broken" [label="kick"];
-                    "open" -> "broken" [label="kick"];
+                    entry [shape=point];
+                    p0 [label="closed"];
+                    p1 [label="open"];
+                    p2 [label="broken", peripheries=2];
+                    entry -> p0;
+                    entry -> p1 [label="restored", style=dashed];
+                    p0 -> p1 [label="swingOpen"];
+                    p1 -> p0 [label="swingShut"];
+                    p0 -> p2 [label="kick"];
+                    p1 -> p2 [label="kick"];
                 }
 
                 """

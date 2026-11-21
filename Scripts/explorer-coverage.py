@@ -2,10 +2,14 @@
 """Aggregate the schedule explorer's interruption matrix coverage into the tables of Tests/ScheduleExplorer.md.
 
 A run of the explorer with `EXPLORER_COVERAGE=PATH` writes every matrix cell its armed callbacks reached, one
-`class|form|site|interrupt|phase` line each. This script reads one or more such files, sets the reached cells against
-the cells that apply to each presentation class, and prints, in Markdown, each class's reached count and its site by
-phase table, the applicable cells it did not reach, and the cells that do not apply, grouped by reason. Run the
-`matrix` family for each class, each into a file of its own, then aggregate them:
+`class|form|site|interrupt|phase|attempt|registration|origin` line each. A cell is recorded only when the armed event
+changed what the presentation or its registrations hold, and its phase, form, attempt (`current` or `earlier`) and
+registration state are those of the observation the callback concerns, read when the callback starts; `origin` is the
+top-level event it ran under. This script reads one or more such files, sets the reached cells against the cells that
+apply to each presentation class, and prints, in Markdown, each class's reached count and its site by phase table, the
+registration states and origins each phase was reached in, the applicable cells it did not reach, and the cells that
+do not apply, grouped by reason. Run the `matrix` family for each class, each into a file of its own, then aggregate
+them:
 
     mkdir -p /tmp/state-machine-coverage
     for kind in SnapshotObservableObject SnapshotPresentation StateMachineObservableObject StateMachinePresentation; do
@@ -48,6 +52,9 @@ def not_applicable(kind, form, site, interrupt, phase):
     if site == 'subscriptionBefore' and phase != 'steady':
         return ('A subscription is handed out only by an attach, a steady-state event (an attach armed inside a '
                 "registration's callback needs two arms: `chains`).")
+    if site == 'onCancel' and phase != 'ending':
+        return ('A token\'s cancellation runs only for a registration that is ending, so its callback concerns an '
+                'ending observation whatever top-level event runs it.')
     if site == 'hostSubscribe' and phase != 'registering':
         return 'A registration call runs only while registering.'
     if site == 'hostSubscribe' and form == 'sequence':
@@ -79,19 +86,23 @@ def not_applicable(kind, form, site, interrupt, phase):
 
 
 def read_cells(paths):
-    cells = set()
+    """The reached cells, `(class, form, site, interrupt, phase)`, and each one's details `(attempt, registration,
+    origin)`."""
+    cells, details = set(), collections.defaultdict(set)
     for path in paths:
         for line in path.read_text().splitlines():
             line = line.strip()
             if line:
                 fields = tuple(line.split('|'))
-                if len(fields) != 5:
-                    raise SystemExit(f'{path}: not a `class|form|site|interrupt|phase` cell: {line}')
-                cells.add(fields)
-    return cells
+                if len(fields) != 8:
+                    raise SystemExit(f'{path}: not a `class|form|site|interrupt|phase|attempt|registration|origin` cell: {line}')
+                cells.add(fields[:5])
+                details[fields[:5]].add(fields[5:])
+    return cells, details
 
 
-def report(cells):
+def report(cells, details=None):
+    details = details or {}
     lines = []
     reasons = collections.Counter()
     for kind, (forms, sites, interrupts) in CLASSES.items():
@@ -118,6 +129,11 @@ def report(cells):
                 total = sum(1 for cell in applicable if cell[2] == site and cell[4] == phase)
                 row.append(f'{count}/{total}' if total else 'n/a')
             lines.append(f'| {site} | ' + ' | '.join(row) + ' |')
+        lines += ['', '| phase | attempts | registration states | origins |', '|---|---|---|---|']
+        for phase in PHASES:
+            seen = set().union(*[details.get(cell, set()) for cell in inside if cell[4] == phase] or [set()])
+            column = lambda index: ', '.join(sorted({entry[index] for entry in seen})) or '-'
+            lines.append(f'| {phase} | {column(0)} | {column(1)} | {column(2)} |')
         missing = collections.defaultdict(list)
         for cell in sorted(applicable - inside):
             missing[(cell[2], cell[4])].append(f'{cell[1]}: {cell[3]}')
@@ -137,7 +153,8 @@ def main():
     parser.add_argument('coverage', type=Path, nargs='+', help='Files that EXPLORER_COVERAGE runs wrote')
     parser.add_argument('--output', type=Path, help='Write the Markdown here instead of to standard output')
     args = parser.parse_args()
-    text = report(read_cells(args.coverage))
+    text = report(*read_cells(args.coverage))
+
     if args.output:
         args.output.write_text(text)
     else:

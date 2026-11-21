@@ -1,6 +1,7 @@
 import Dispatch
 import Foundation
 import StateMachine
+import StateMachineTestSupport
 import os
 
 // The confined-stream slice: a `MainActorSnapshotSequence` registered with the fake
@@ -213,11 +214,10 @@ import os
             let slot = OSAllocatedUnfairLock<ExplorerStreamKeeper?>(initialState: held)
             _ = consume held
             let dropped = DispatchSemaphore(value: 0)
-            DispatchQueue.global()
-                .async {
-                    slot.withLock { $0 = nil }
-                    dropped.signal()
-                }
+            runOnOwnThread {
+                slot.withLock { $0 = nil }
+                dropped.signal()
+            }
             if !explorerWait(dropped) { world.violate(.stuck, "release on a worker never returned") }
         case .dropAfterJob:
             release()

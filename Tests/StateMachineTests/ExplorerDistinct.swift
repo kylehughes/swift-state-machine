@@ -34,6 +34,10 @@ import os
     // Every projection the owner has held since each sequence's registration.
     private var history: [[String]] = [[], []]
     private var closed = false
+    // The projection of the closed phase, the last element every open sequence must reach.
+    private var closedProjection: String?
+    // The harness cancels every sequence at quiescence.
+    private var tearingDown = false
     private var cancelled = false
     private var turns = 0
     private var equalityArmed = false
@@ -107,6 +111,7 @@ import os
         case .finish:
             closed = true
             _ = owner.close()
+            closedProjection = current
         case .observe: register(1)
         case .readSeq(let index): startRead(index)
         case .stop:
@@ -158,6 +163,17 @@ import os
         record()
         guard let value else {
             ended[index] = true
+            // Only the owner's closing ends a sequence the harness did not cancel, and only after the
+            // closed phase, unless that equals the sequence's last element.
+            if !(index == 0 && cancelled), !tearingDown,
+                let problem = explorerDistinctEndProblem(
+                    reads: reads[index],
+                    closed: closed,
+                    closedProjection: closedProjection
+                )
+            {
+                world.violate(.distinctProjection, "sequence \(index) \(problem)")
+            }
             return
         }
         world.note("sequence \(index) read \(value)")
@@ -171,14 +187,15 @@ import os
             )
         }
         // The element may stand for an earlier state than the owner's now (the seed, read before later
-        // offers arrived): anchor it at its earliest position after the previous one.
-        lastRead[index] = history[index][lastRead[index]...].firstIndex(of: value) ?? max(history[index].count - 1, 0)
-        if !history[index].contains(value) {
-            world.violate(
-                .distinctProjection,
-                "sequence \(index) read \(value), which the owner never held after its registration (\(history[index]))"
-            )
-        }
+        // offers arrived): anchor it at its earliest position after the previous element's, in order.
+        let read = explorerDistinctReadProblem(
+            value,
+            reads: reads[index],
+            history: history[index],
+            lastRead: lastRead[index]
+        )
+        lastRead[index] = read.anchor
+        if let problem = read.problem { world.violate(.distinctProjection, "sequence \(index) \(problem)") }
         reads[index].append(value)
     }
 
@@ -217,6 +234,7 @@ import os
                 }
             }
         }
+        tearingDown = true
         for index in 0 ..< 2 { sequences[index]?.cancel() }
         for _ in 0 ..< 2000 where reading.contains(true) { await Task { @MainActor in }.value }
         sequences = [nil, nil]

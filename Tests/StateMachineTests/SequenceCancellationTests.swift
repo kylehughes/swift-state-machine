@@ -1,6 +1,7 @@
 import Dispatch
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -274,11 +275,10 @@ private final class Raised: Sendable {
         // The main actor waits while another thread cancels, so the removal that cancellation queues
         // on it has not run when the main actor cancels.
         let cancelled = DispatchSemaphore(value: 0)
-        DispatchQueue.global()
-            .async {
-                snapshots.cancel()
-                cancelled.signal()
-            }
+        runOnOwnThread {
+            snapshots.cancel()
+            cancelled.signal()
+        }
         cancelled.wait()
         #expect(host.registrations == 1)
         snapshots.cancel()
@@ -302,11 +302,10 @@ private final class Raised: Sendable {
                 proceed.wait()
             }
         }
-        DispatchQueue.global()
-            .async {
-                snapshots.cancel()
-                finished.raise()
-            }
+        runOnOwnThread {
+            snapshots.cancel()
+            finished.raise()
+        }
         await entered.wait()
         snapshots.cancel()
         #expect(!gate.isOpen)

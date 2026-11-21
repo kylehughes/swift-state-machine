@@ -3,6 +3,7 @@ import Dispatch
 import Foundation
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import os
 
 // The host-teardown slice of the explorer: an owner of the profile example graph, its saved
@@ -160,11 +161,10 @@ import os
                             })
                     else { return nil }
                     await delivered.wait()
-                    DispatchQueue.global()
-                        .async {
-                            token.cancel()
-                            park.returned.signal()
-                        }
+                    runOnOwnThread {
+                        token.cancel()
+                        park.returned.signal()
+                    }
                     return explorerWait(park.dropped) ? park : nil
                 },
                 saveHandingOff: { pause in
@@ -201,19 +201,17 @@ nonisolated final class ExplorerOwnerBox<Owner: AnyObject & Sendable>: Sendable 
     }
     /// Releases the owner on a worker with H4 bound to `pause`, then runs `returned`; returns at once.
     func releaseNoticing(_ pause: @escaping @Sendable () -> Void, _ returned: @escaping @Sendable () -> Void) {
-        DispatchQueue.global()
-            .async {
-                explorerWithReleaseNoticePause(pause) { self.releaseHere() }
-                returned()
-            }
+        runOnOwnThread {
+            explorerWithReleaseNoticePause(pause) { self.releaseHere() }
+            returned()
+        }
     }
     func releaseElsewhere() -> Bool {
         let dropped = DispatchSemaphore(value: 0)
-        DispatchQueue.global()
-            .async {
-                self.releaseHere()
-                dropped.signal()
-            }
+        runOnOwnThread {
+            self.releaseHere()
+            dropped.signal()
+        }
         return explorerWait(dropped)
     }
 }
@@ -322,6 +320,27 @@ nonisolated final class ExplorerDriverControl: Sendable {
     var completions = 0
     /// Runs on every value; an echoing subscriber changes the owner from inside it.
     var onValue: (@MainActor () -> Void)?
+    /// E9 on an owner publisher: the demand the subscriber asks for when it subscribes, the demand it returns
+    /// from each value, the units granted so far (`nil` for unlimited), and whether it cancelled.
+    var initialDemand: Subscribers.Demand = .unlimited
+    var returnedDemand: Subscribers.Demand = .none
+    private(set) var granted: Int?
+    private(set) var cancelled = false
+    private var subscription: (any Subscription)?
+    var limited: Bool { granted != nil }
+    /// Requests `count` more values (`requestOldest`).
+    func request(_ count: Int) {
+        guard let subscription, !cancelled else { return }
+        granted = granted.map { $0 + count }
+        subscription.request(.max(count))
+    }
+    /// Cancels this subscription (`cancelFirstSubscriber`), which is owed no completion.
+    func cancel() {
+        cancelled = true
+        let held = subscription
+        subscription = nil
+        held?.cancel()
+    }
     // Values received since the first value of the current batch; a main-actor job enqueued at that
     // first value closes the batch when it runs (I32's measure of a turn).
     private var batch = 0
@@ -354,9 +373,20 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
         if subscriptions > 1 {
             world.violate(.subscriptionProtocol, "subscriber \(index) received a second subscription")
         }
-        subscription.request(.unlimited)
+        self.subscription = subscription
+        granted = initialDemand.max
+        if initialDemand != .none { subscription.request(initialDemand) }
     }
     func receive(_ input: UInt64) -> Subscribers.Demand {
+        // I18 and I20 on an owner publisher: never more values than requested, none after a cancellation.
+        if cancelled { world.violate(.combineAfterCancel, "subscriber \(index) received r\(input) after it cancelled") }
+        if let granted, values.count + 1 > granted {
+            world.violate(
+                .combineDemand,
+                "subscriber \(index) received \(values.count + 1) values for \(granted) requested"
+            )
+        }
+        if let returned = returnedDemand.max, returned > 0 { granted = granted.map { $0 + returned } }
         // Before the owner's teardown, which a driver's cancellation or the release of a registration's
         // callbacks marks, a value it accepted before its last reference went is still delivered (I28).
         let accepted = !world.state.withLock { $0.ownerTeardown } && (acceptedBound().map { input <= $0 } ?? false)
@@ -392,7 +422,7 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
             world.violate(.publisherTurnBound, "subscriber \(index) received 33 values in one main-actor turn")
         }
         onValue?()
-        return .none
+        return returnedDemand
     }
     func receive(completion: Subscribers.Completion<Never>) {
         completions += 1
@@ -466,6 +496,11 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
             // The burst needs the loading phase, which `driver(k)` reaches with its driver started.
             if kind == .publisher, driverStarted { result.append(.request) }
             if kind == .publisher, publishers[0] != nil, !echoAttached { result.append(.subscribeProjected) }
+            // E9 on a saved owner publisher: zero and finite initial demand, demand returned from each value, a
+            // later request, and the cancellation of one particular subscription.
+            if kind == .publisher, publishers[0] != nil, recorders.count < 3 {
+                result += [.subscribeZero, .subscribeReturning]
+            }
             if subject.workerDrop != nil, park == nil, publishers[0] != nil { result.append(.workerDrop) }
             // The two orders of a release against a delivery the main actor is making, each forced.
             if explorerHasHandOffPause, subject.saveHandingOff != nil, forced == nil {
@@ -503,6 +538,12 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
         if park != nil { result.append(.workerReturn) }
         if driverPark != nil { result.append(.driverGo) }
         if turns < 2 { result.append(.turn) }
+        // A later request, before or after the release (demand first made after it receives only the completion,
+        // I28), and the cancellation of the oldest open subscription.
+        if recorders.contains(where: { $0.limited && !$0.cancelled && !$0.finished }) { result.append(.requestOldest) }
+        if kind == .publisher, recorders.contains(where: { !$0.cancelled && !$0.finished }) {
+            result.append(.cancelFirstSubscriber)
+        }
         return result
     }
 
@@ -537,6 +578,17 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
             if publishers[index] != nil { registrationOrder.append("publisher \(index)") }
         case .attach(let index):
             attach(index)
+        case .subscribeZero:
+            attach(0) { $0.initialDemand = .none }
+        case .subscribeReturning:
+            attach(0) { recorder in
+                recorder.initialDemand = .max(1)
+                recorder.returnedDemand = .max(1)
+            }
+        case .requestOldest:
+            recorders.first { $0.limited && !$0.cancelled && !$0.finished }?.request(1)
+        case .cancelFirstSubscriber:
+            recorders.first { !$0.cancelled && !$0.finished }?.cancel()
         case .capture(let index):
             let hold = ExplorerAttachOnRelease(kind == .teardownMain ? world : nil, teardown: world) { [weak self] in
                 guard Thread.isMainThread else { return }
@@ -838,7 +890,7 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
         }
         var finished = false
         for _ in 0 ..< 100 {
-            if subject.gone(), recorders.allSatisfy(\.finished) {
+            if subject.gone(), recorders.allSatisfy({ $0.finished || $0.cancelled }) {
                 finished = true
                 break
             }
@@ -847,7 +899,7 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
         if !finished {
             world.violate(
                 .ownerReleasedUnfinished,
-                "at quiescence: owner gone \(subject.gone()), unfinished subscribers \(recorders.filter { !$0.finished }.map(\.index))"
+                "at quiescence: owner gone \(subject.gone()), unfinished subscribers \(recorders.filter { !$0.finished && !$0.cancelled }.map(\.index))"
             )
         }
         // A release before the delivery's decision discards the value; one after it lets at most that

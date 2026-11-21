@@ -2,14 +2,16 @@ import StateMachine
 import StateMachineExamples
 import Testing
 
-// Both renderers write every authored name so that the diagram language reads it as text: Mermaid
-// through internal state names and entity-coded labels, Graphviz through escaped quoted strings.
+// Both renderers write every authored name so that the diagram language reads it as text: each phase is
+// a node or state with an internal identifier, labeled with its name, which Mermaid entity-codes and
+// Graphviz escapes, a Unicode scalar at a time.
 
 /// Phase and edge names that the diagram languages reserve or that contain their syntax.
 private let hostileNames = [
     "note", "end", "state", "direction", "classDef", "click", "default", "direction TB", "a\"b", "x:y",
     "a-->b", "back\\slash", "semi;colon", "hash#tag", "percent%%comment", "café", "日本", "Straße",
-    "two\nlines", "[*]", "&amp;", "<b>", "{brace}",
+    "two\nlines", "[*]", "&amp;", "<b>", "{brace}", "quote\"\u{301}", "back\\\u{301}slash", "*", "p0", "p1",
+    "entry", "x\u{5B0}", "carriage\r\nreturn", "lone\rreturn", "line\u{2028}separator",
 ]
 
 /// A graph whose phases, edges, and name are the hostile names: each phase has an edge to the next,
@@ -74,25 +76,48 @@ private func decodeMermaidLabel(_ label: Substring) -> String? {
 /// Reads a DOT quoted string at the start of `text` as Graphviz does, then as its label renders it,
 /// returning the rendered text and the rest of `text`.
 private func readDOTString(_ text: Substring) -> (String, Substring)? {
-    guard text.first == "\"" else { return nil }
+    // Graphviz reads bytes, so this reads Unicode scalars, never grapheme clusters.
+    let scalars = text.unicodeScalars
+    guard scalars.first == "\"" else { return nil }
     var rendered = ""
-    var index = text.index(after: text.startIndex)
-    while index < text.endIndex {
-        let character = text[index]
-        if character == "\"" { return (rendered.replacingAmpersandEntity(), text[text.index(after: index)...]) }
-        if character == "\\" {
-            index = text.index(after: index)
-            guard index < text.endIndex else { return nil }
-            switch text[index] {
-            case "n": rendered.append("\n")
-            case let escaped: rendered.append(escaped)
+    var index = scalars.index(after: scalars.startIndex)
+    while index < scalars.endIndex {
+        let scalar = scalars[index]
+        if scalar == "\"" {
+            return (rendered.replacingAmpersandEntity(), Substring(scalars[scalars.index(after: index)...]))
+        }
+        if scalar == "\\" {
+            index = scalars.index(after: index)
+            guard index < scalars.endIndex else { return nil }
+            switch scalars[index] {
+            case "n": rendered.unicodeScalars.append("\n")
+            case let escaped: rendered.unicodeScalars.append(escaped)
             }
         } else {
-            rendered.append(character)
+            guard scalar != "\n", scalar != "\r" else { return nil }
+            rendered.unicodeScalars.append(scalar)
         }
-        index = text.index(after: index)
+        index = scalars.index(after: index)
     }
     return nil
+}
+
+/// How DOT renders `name`: every line ending as one line break.
+private func renderedLines(_ name: String) -> String {
+    var rendered = ""
+    var scalars = name.unicodeScalars.makeIterator()
+    var pending = scalars.next()
+    while let scalar = pending {
+        pending = scalars.next()
+        switch scalar {
+        case "\r":
+            if pending == "\n" { pending = scalars.next() }
+            rendered.unicodeScalars.append("\n")
+        case "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}": rendered.unicodeScalars.append("\n")
+        default: rendered.unicodeScalars.append(scalar)
+        }
+    }
+    return rendered
 }
 
 extension String {
@@ -206,8 +231,10 @@ extension String {
         #expect(edgeLabels == ["restored"] + hostileNames.dropFirst())
     }
 
-    // Every DOT name is one quoted string that Graphviz reads and renders as the name itself, so a
-    // reserved word, a quotation mark, a backslash, a line break, and an entity stay text.
+    // Every phase is a node with an internal identifier, labeled with one quoted string that Graphviz
+    // reads and renders as the name itself, so a reserved word, a quotation mark or a backslash with a
+    // combining scalar attached, a line ending, an entity, and a name equal to `*`, to the entry point's
+    // identifier, or to another phase's identifier stay text.
     @Test func dotStringsRenderEveryHostileName() throws {
         let graph = hostileGraph()
         let lines = graph.dot().split(separator: "\n", omittingEmptySubsequences: false)
@@ -216,29 +243,79 @@ extension String {
         let (name, afterName) = try #require(readDOTString(header.dropFirst(8)))
         #expect(name == graph.name)
         #expect(afterName == " {")
-        var nodes: [String] = []
+        #expect(lines[1] == "    entry [shape=point];")
+        var labels: [String: String] = [:]
+        var declared: [String] = []
+        var terminal: [String] = []
         var edges: [(String, String, String)] = []
         for line in lines.dropFirst(2).dropLast(2) {
             let body = line.dropFirst(4)
-            let (source, rest) = try #require(readDOTString(body), "\(line)")
+            let identifier = String(body.prefix { $0 != " " && $0 != ";" })
+            let rest = body.dropFirst(identifier.count)
             if rest.hasPrefix(" -> ") {
-                let (destination, attributes) = try #require(readDOTString(rest.dropFirst(4)), "\(line)")
+                let target = rest.dropFirst(4)
+                let destination = String(target.prefix { $0 != " " && $0 != ";" })
+                let attributes = target.dropFirst(destination.count)
                 guard attributes.hasPrefix(" [label=") else {
                     #expect(attributes == ";")
-                    edges.append((source, destination, ""))
+                    edges.append((identifier, destination, ""))
                     continue
                 }
                 let (label, _) = try #require(readDOTString(attributes.dropFirst(8)), "\(line)")
-                edges.append((source, destination, label))
+                edges.append((identifier, destination, label))
             } else {
-                #expect(rest == ";" || rest == " [peripheries=2];", "\(line)")
-                nodes.append(source)
+                #expect(identifier.wholeMatch(of: /p[0-9]+/) != nil, "\(line)")
+                #expect(rest.hasPrefix(" [label="), "\(line)")
+                let (label, after) = try #require(readDOTString(rest.dropFirst(8)), "\(line)")
+                #expect(after == "];" || after == ", peripheries=2];", "\(line)")
+                if after != "];" { terminal.append(label) }
+                #expect(labels[identifier] == nil)
+                labels[identifier] = label
+                declared.append(label)
             }
         }
-        #expect(nodes == hostileNames)
-        let named = edges.filter { $0.0 != "*" }
-        #expect(named.map(\.2) == Array(hostileNames.dropFirst()))
-        #expect(named.map(\.0) == Array(hostileNames.dropLast()))
-        #expect(edges.filter { $0.0 == "*" }.map(\.1) == Array(hostileNames.prefix(2)))
+        let rendered = hostileNames.map(renderedLines)
+        #expect(declared == rendered)
+        #expect(Set(labels.keys).count == hostileNames.count)
+        #expect(terminal == [rendered[rendered.count - 1]])
+        let named = edges.filter { $0.0 != "entry" }
+        #expect(named.map(\.2) == Array(rendered.dropFirst()))
+        #expect(named.map { labels[$0.0] } == Array(rendered.dropLast()))
+        #expect(named.map { labels[$0.1] } == Array(rendered.dropFirst()))
+        #expect(edges.filter { $0.0 == "entry" }.map { labels[$0.1] } == Array(rendered.prefix(2)))
+        #expect(!labels.keys.contains("entry"))
+    }
+
+    // Rendering a graph with many terminal phases finds each phase's outline in a set built once, and
+    // keeps declaration order.
+    @Test func dotOutlinesEveryTerminalPhaseInDeclarationOrder() {
+        let names = (0 ..< 2_000).map { "t\($0)" }
+        let graph = StateMachineGraph(
+            name: "Terminals",
+            mode: .shared,
+            owners: [.owned],
+            initial: names[0],
+            terminal: names,
+            restorable: [],
+            phases: names.map { StateMachineGraph.Phase(id: $0, payload: "Void") },
+            inputs: [],
+            scopes: [],
+            operations: [],
+            events: [],
+            edges: [],
+            routers: []
+        )
+        let lines = graph.dot().split(separator: "\n")
+        let outlined = lines.filter { $0.hasSuffix(", peripheries=2];") }
+        #expect(outlined.count == names.count)
+        #expect(outlined.first == "    p0 [label=\"t0\", peripheries=2];")
+        #expect(outlined.last == "    p1999 [label=\"t1999\", peripheries=2];")
+    }
+
+    // An alphabetic combining scalar stays a letter in a Mermaid label and is written as itself in DOT.
+    @Test func anAlphabeticCombiningScalarStaysText() {
+        let graph = hostileGraph()
+        #expect(graph.mermaid().contains("state \"x\u{5B0}\" as "))
+        #expect(graph.dot().unicodeScalars.contains("\u{5B0}"))
     }
 }

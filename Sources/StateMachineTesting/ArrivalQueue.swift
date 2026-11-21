@@ -2,9 +2,12 @@
 /// still live, in constant amortized work.
 ///
 /// A matched element is not removed where it stands: the caller's liveness test rejects it, and the
-/// queue drops it once its head reaches it. The queue drops the part before its head once that part is
-/// at least half of the storage, and a scan of every element compacts the ones it found ended, so a
-/// backlog consumed oldest first costs work linear in its length.
+/// queue drops it once its head reaches it. An element that the liveness test once rejects stays
+/// ended. Every scan advances the head past the ended elements it passed, and a scan that stops early
+/// keeps only the live elements it passed, so no later scan passes the same ended element again. The
+/// queue drops the part before its head once that part is at least half of the storage, on every exit,
+/// so waits matched first or calls matched first, and long traffic that alternates between them, cost
+/// work linear in the elements matched and storage linear in the elements still live.
 nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
     private var elements: [Element] = []
     private var head = 0
@@ -12,6 +15,9 @@ nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
     private(set) var examined = 0
 
     var isEmpty: Bool { head == elements.count }
+    /// How many elements the queue stores, ended ones before the head included, which tests read as
+    /// its storage.
+    var storedCount: Int { elements.count }
 
     mutating func append(_ element: Element) { elements.append(element) }
 
@@ -26,12 +32,12 @@ nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
 
     /// The oldest element that `isLive` accepts, after dropping the ended elements before it.
     mutating func oldest(where isLive: (Element) -> Bool) -> Element? {
+        defer { dropTaken() }
         while head < elements.count {
             examined += 1
             if isLive(elements[head]) { return elements[head] }
             head += 1
         }
-        dropTaken()
         return nil
     }
 
@@ -47,7 +53,13 @@ nonisolated struct ArrivalQueue<Element: Sendable>: Sendable {
             index += 1
             guard isLive(element) else { continue }
             found.append(element)
-            if last(element) { return found }
+            guard last(element) else { continue }
+            // The live elements passed move up against the rest, in order, and the head follows them,
+            // so the ended ones they passed fall before the head.
+            head = index - found.count
+            for (offset, live) in found.enumerated() { elements[head + offset] = live }
+            dropTaken()
+            return found
         }
         elements = found
         head = 0

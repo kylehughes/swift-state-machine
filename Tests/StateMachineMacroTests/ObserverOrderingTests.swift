@@ -19,7 +19,9 @@ import os
         }
     }
 
-    @Test func anObserverWaitingOnItsOwnRevisionsWorkSeesThatWorkStart() async throws {
+    // The observer blocks the owner's actor, on a cooperative-pool thread, until the driver has started on
+    // another one.
+    @Test(.parksCooperativeThread) func anObserverWaitingOnItsOwnRevisionsWorkSeesThatWorkStart() async throws {
         let user = try UserID("kyle")
         let started = DispatchSemaphore(value: 0)
         let observed = OSAllocatedUnfairLock<DispatchTimeoutResult?>(initialState: nil)

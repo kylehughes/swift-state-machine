@@ -1,6 +1,7 @@
 import Dispatch
 import Foundation
 import StateMachine
+import StateMachineTestSupport
 import StateMachineUI
 import Testing
 import os
@@ -120,11 +121,10 @@ private final class WorkerSlotHost: Sendable {
             state.waits = true
             return state.token
         }
-        DispatchQueue.global()
-            .async { [returned] in
-                token?.cancel()
-                returned.signal()
-            }
+        runOnOwnThread { [returned] in
+            token?.cancel()
+            returned.signal()
+        }
         entered.wait()
     }
     /// Lets the cancellation in progress free the slot and return, and returns once it has.
@@ -136,11 +136,10 @@ private final class WorkerSlotHost: Sendable {
     /// Cancels the last token on a worker and returns once that cancellation has returned.
     func cancelOnWorker() {
         let token = state.withLock { $0.token }
-        DispatchQueue.global()
-            .async { [returned] in
-                token?.cancel()
-                returned.signal()
-            }
+        runOnOwnThread { [returned] in
+            token?.cancel()
+            returned.signal()
+        }
         returned.wait()
     }
 }
@@ -149,11 +148,10 @@ private final class WorkerSlotHost: Sendable {
 private func drop<Kept: Sendable>(_ kept: consuming Kept) {
     let slot = OSAllocatedUnfairLock<Kept?>(initialState: kept)
     let dropped = DispatchSemaphore(value: 0)
-    DispatchQueue.global()
-        .async {
-            slot.withLock { $0 = nil }
-            dropped.signal()
-        }
+    runOnOwnThread {
+        slot.withLock { $0 = nil }
+        dropped.signal()
+    }
     dropped.wait()
 }
 
@@ -456,7 +454,7 @@ private final class IslandHost: IsolatedStateMachineHost, Sendable {
             return token
         }
         if waiting, let kept {
-            DispatchQueue.global().async { kept.cancel() }
+            runOnOwnThread { kept.cancel() }
             entered.wait()
             registered.raise()
             returning.wait()

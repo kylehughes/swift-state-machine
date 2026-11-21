@@ -1057,10 +1057,10 @@ struct SpellingTotalityTests {
 
     // MARK: Cost
 
-    /// Each generic argument is read once for each use, so nested generic aliases read in time
+    /// Each generic argument is read once for each use, so nested generic aliases read in steps
     /// proportional to their spelling, and an alias whose reading would double past the bound reads as
     /// itself.
-    @Test func nestedGenericAliasesReadInBoundedTime() throws {
+    @Test func nestedGenericAliasesReadInBoundedSteps() throws {
         var nested = "Swift::Int"
         for _ in 0 ..< 40 { nested = "Id<\(nested)>" }
         // Each level of `Twice` nests a tuple, which a test's thread has stack for to about thirty levels.
@@ -1073,17 +1073,17 @@ struct SpellingTotalityTests {
             edges:
                 "@Transition(onSuccess: Load.self)\nstatic func done(_ source: Running, _ value: Swift::Int) -> Idle { fatalError() }"
         )
-        let clock = ContinuousClock()
-        let elapsed = try clock.measure {
-            let schema = try Self.parse(source)
-            #expect(schema.typeScopes.resolve(nested).key == .standard("Int"))
-            #expect(!schema.typeScopes.resolve(doubled).key.exceeds(2 * LexicalScopes.keyBudget))
-            // An alias whose key would outgrow its budget keeps its kind, and stands for its own identity.
-            let chained = schema.typeScopes.resolve("Chain40")
-            #expect(chained.reading == .visible && !chained.key.exceeds(LexicalScopes.keyBudget))
-            _ = try Generator(schema: schema).members()
-        }
-        #expect(elapsed < .seconds(5), "\(elapsed)")
+        let schema = try Self.parse(source)
+        #expect(schema.typeScopes.resolve(nested).key == .standard("Int"))
+        #expect(!schema.typeScopes.resolve(doubled).key.exceeds(2 * LexicalScopes.keyBudget))
+        // An alias whose key would outgrow its budget keeps its kind, and stands for its own identity.
+        let chained = schema.typeScopes.resolve("Chain40")
+        #expect(chained.reading == .visible && !chained.key.exceeds(LexicalScopes.keyBudget))
+        // The schema's readings and the three above together charge fewer steps than the source has
+        // characters, where reading `Chain40` or `Twice` by doubling would charge about 2^40 and 2^24.
+        let work = schema.typeScopes.work
+        #expect(work.steps <= source.utf8.count && !schema.typeScopes.exhaustedBudget, "\(work)")
+        _ = try Generator(schema: schema).members()
     }
 
     // MARK: Transfer

@@ -7,21 +7,92 @@ import os
 // `EXPLORER_COVERAGE=path` writes the set at the end of a test, which `Scripts/explorer-coverage.py`
 // aggregates into the coverage table of `Tests/ScheduleExplorer.md`.
 
-/// The cells reached so far in this process: `class|form|site|interrupt|phase`.
+/// The cells reached so far in this process:
+/// `class|form|site|interrupt|phase|attempt|registration|origin`.
 let explorerCoverage = OSAllocatedUnfairLock<Set<String>>(initialState: [])
 
-/// Records that an armed callback at `site` ran `event` during `phase`, if `event` interrupts.
+/// Where an armed callback ran, read from the registrations before its event: the form and host of the
+/// observation it concerns, the lifecycle phase of that observation, whether its attempt is the current
+/// one, the registration's state, and the top-level event the callback runs under.
+struct ExplorerMatrixCell {
+    var form: String
+    var host: Int
+    var phase: String
+    var attempt: String
+    var registration: String
+    var origin: String
+
+    /// Reads the coordinates from the world.
+    ///
+    /// The registration a callback concerns is the one being
+    /// cancelled at a cancellation site, and otherwise the newest one still holding a slot. Its phase is
+    /// ending while a registration of an ended observation still holds its slot or is being cancelled;
+    /// registering during a registering call, or while the newest registration is live but not yet
+    /// reported, which a deferred registering callback during `turn` is; and steady otherwise.
+    static func read(
+        _ world: ExplorerWorld,
+        site: ExplorerHook,
+        top: ExplorerEvent?,
+        ended: Set<Int> = [],
+        form: (Int?) -> (String, Int)
+    ) -> ExplorerMatrixCell {
+        let (registrations, latest, letGo, context, lastReport) = world.state.withLock { state in
+            (
+                Array(state.registrations.values.filter { !$0.withheld }), state.latestAttempt, state.letGo,
+                state.context, state.reports.last
+            )
+        }
+        let ending = registrations.filter {
+            $0.phase != .freed
+                && ($0.phase == .cancelling || $0.hostEnded || letGo.contains($0.attempt ?? -1)
+                    || ended.contains($0.id))
+        }
+        let holding = registrations.filter { $0.phase != .freed }
+        let concerned =
+            (site == .onCancel ? ending.max { $0.id < $1.id } : nil) ?? holding.max { $0.id < $1.id }
+            ?? registrations.max { $0.id < $1.id }
+        let registeringCall = if case .call = context { true } else { false }
+        let unconfirmed =
+            concerned.map {
+                $0.phase == .active && !$0.finished && !letGo.contains($0.attempt ?? -1) && !ended.contains($0.id)
+                    && lastReport != true
+            } ?? false
+        let topPhase = explorerPhase(top)
+        let phase =
+            if site == .onCancel, !ending.isEmpty {
+                "ending"
+            } else if registeringCall || topPhase == "registering" || unconfirmed {
+                "registering"
+            } else if topPhase == "ending" || !ending.isEmpty {
+                "ending"
+            } else {
+                "steady"
+            }
+        let (formName, host) = form(concerned?.attempt)
+        return ExplorerMatrixCell(
+            form: formName,
+            host: host,
+            phase: phase,
+            attempt: concerned.map { $0.attempt == latest ? "current" : "earlier" } ?? "none",
+            registration: concerned.map { "\($0.phase)\($0.hostEnded ? "+hostEnded" : "")" } ?? "none",
+            origin: top.map { String($0.description.prefix { $0 != "(" }) } ?? "none"
+        )
+    }
+}
+
+/// Records that an armed callback ran `event` at `site` in `cell`, if `event` interrupts and running it
+/// changed what the presentation or its registrations hold.
 func explorerCover(
     kind: ExplorerPassiveKind,
-    form: String,
-    host: Int,
+    cell: ExplorerMatrixCell,
     site: ExplorerHook,
     event: ExplorerEvent,
-    phase: String
+    changed: Bool
 ) {
-    guard let interrupt = explorerInterrupt(event, host: host) else { return }
-    let cell = "\(kind.rawValue)|\(form)|\(site.rawValue)|\(interrupt)|\(phase)"
-    explorerCoverage.withLock { _ = $0.insert(cell) }
+    guard changed, let interrupt = explorerInterrupt(event, host: cell.host) else { return }
+    let line =
+        "\(kind.rawValue)|\(cell.form)|\(site.rawValue)|\(interrupt)|\(cell.phase)|\(cell.attempt)|\(cell.registration)|\(cell.origin)"
+    explorerCoverage.withLock { _ = $0.insert(line) }
 }
 
 /// Writes the recorded cells to the file `EXPLORER_COVERAGE` names, one per line, if set.
@@ -33,16 +104,86 @@ func explorerWriteCoverage() {
     try? lines.write(toFile: path, atomically: true, encoding: .utf8)
 }
 
-/// I51: a presentation publishes `isObserving` only when its observing state changes (UI-004), so a
-/// property-precise observer, the `$isObserving` sink or an Observation tracker of `isObserving` alone,
-/// is called an odd number of times in a step exactly when the step changed the value.
-@MainActor func explorerCheckReportParity(_ world: ExplorerWorld, before: Bool?, after: Bool?, reports: Int) {
-    guard let before, let after else { return }
-    if (reports % 2 == 1) != (before != after) {
-        world.violate(
-            .propertyInvalidation,
-            "isObserving went from \(before) to \(after) across a step that reported \(reports) changes of it"
-        )
+/// I51's expected invalidation trace of one tracked property across a step.
+///
+/// A presentation publishes a property only when its value changes (UI-004), so a property-precise
+/// observer sees a chain: an Observation tracker reads the value about to be replaced, a Combine
+/// `$isObserving` sink the value about to be set. The first invalidation of a step continues the value
+/// at the step's start, each one differs from the one before it, and the last one leads to the value at
+/// the step's end; a step without one leaves the value unchanged. An extra invalidation, a missing one,
+/// and an invalidation of a property whose value did not change all break the chain.
+@MainActor final class ExplorerPropertyTrace<Value: Equatable> {
+    let name: String
+    /// Whether the observer reads the value about to be replaced (Observation) rather than the new one.
+    var readsOld = true
+    private var start: Value?
+    private var chain: [Value] = []
+    private var open = false
+    init(_ name: String) { self.name = name }
+
+    func begin(_ value: Value?) {
+        start = value
+        chain = []
+        open = value != nil
+    }
+    func invalidated(_ value: Value, _ world: ExplorerWorld) {
+        guard open else { return }
+        if let last = chain.last ?? (readsOld ? nil : start), last == value {
+            world.violate(
+                .propertyInvalidation,
+                "\(name) was invalidated without a change: \(chain.map { "\($0)" } + ["\(value)"])"
+            )
+            open = false
+            return
+        }
+        if readsOld, chain.isEmpty, let start, start != value {
+            world.violate(
+                .propertyInvalidation,
+                "\(name) changed from \(start) to \(value) without an invalidation before its first one this step"
+            )
+            open = false
+            return
+        }
+        chain.append(value)
+    }
+    func end(_ value: Value?, _ world: ExplorerWorld) {
+        defer { open = false }
+        guard open, let value, let start else { return }
+        if let last = chain.last {
+            if readsOld ? last == value : last != value {
+                world.violate(
+                    .propertyInvalidation,
+                    "\(name) ends the step at \(value) after the invalidations \(chain.map { "\($0)" })"
+                )
+            }
+        } else if value != start {
+            world.violate(.propertyInvalidation, "\(name) changed from \(start) to \(value) without an invalidation")
+        }
+    }
+}
+
+/// The traces of a presentation's two tracked properties (I51).
+///
+/// They are `isObserving` (the `$isObserving` sink, or an Observation tracker of it alone) and, for an
+/// Observation class, `snapshot`'s identity.
+@MainActor final class ExplorerTraces {
+    let observing = ExplorerPropertyTrace<Bool>("isObserving")
+    let snapshot = ExplorerPropertyTrace<Int>("snapshot")
+    /// Whether the class tracks `snapshot` on its own (Observation); `objectWillChange` does not.
+    var tracksSnapshot = false
+
+    func begin(observing value: Bool?, shown: Int?) {
+        observing.begin(value)
+        snapshot.begin(tracksSnapshot ? shown : nil)
+    }
+    /// A report: the sink's new value, or for an Observation tracker the negation of the value it read.
+    func report(_ value: Bool, _ world: ExplorerWorld, observation: Bool) {
+        observing.readsOld = observation
+        observing.invalidated(observation ? !value : value, world)
+    }
+    func end(observing value: Bool?, shown: Int?, _ world: ExplorerWorld) {
+        observing.end(value, world)
+        snapshot.end(shown, world)
     }
 }
 

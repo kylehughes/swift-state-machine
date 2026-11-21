@@ -891,6 +891,18 @@ internal typealias Input = Note.Input
     internal static func rejectingRoute(of rejection: SendRejection, in phase: Swift::String) -> Swift::String? {
         nil
     }
+    /// The identifier of the router or completion edge, as the graph names it, whose authored function
+    /// refused the outcome that `deliver` left retained with `result`, preparing it from a snapshot in
+    /// `phase`, or `nil` when no authored function refused it.
+    internal borrowing func rejectingRoute(of result: DeliveryResult, in phase: Swift::String) -> Swift::String? {
+        nil
+    }
+    /// The identifier of the router or completion edge, as the graph names it, whose authored function
+    /// refused the outcome that `reconcile(id:)` left retained with `result`, preparing it from a snapshot
+    /// in `phase`, or `nil` when no authored function refused it.
+    internal borrowing func rejectingRoute(of result: ReconcileResult, in phase: Swift::String) -> Swift::String? {
+        nil
+    }
     /// The receipt of a delivery that committed, or `nil` when the outcome was retained or not taken.
     internal static func receipt(of result: DeliveryResult) -> Receipt? {
         if case .committed(let receipt) = result {

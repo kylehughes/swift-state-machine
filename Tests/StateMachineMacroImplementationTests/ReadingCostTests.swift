@@ -30,9 +30,41 @@ struct ReadingCostTests {
         )
     }
 
-    /// Parses and generates `source`, requiring both to finish within a bound that leaves the work
-    /// linear in the declarations.
-    private static func measure(_ source: String, _ check: (Schema) throws -> Void = { _ in }) throws {
+    /// Parses and generates `source`, requiring the schema's readings to charge at most one step for
+    /// each character of the source, which keeps them linear in the declarations whatever they spell.
+    ///
+    /// The bound is on the readings' own step count, which is the same on every machine and in every
+    /// configuration; the families below charge between one step per hundred characters and one per
+    /// four.
+    private static func read(_ source: String, _ check: (Schema) throws -> Void = { _ in }) throws {
+        let schema = try parse(source)
+        let work = schema.typeScopes.work
+        #expect(work.steps <= source.utf8.count, "\(work) for \(source.utf8.count) characters")
+        try check(schema)
+        _ = try Generator(schema: schema).members()
+    }
+
+    /// Requires `source` to be diagnosed with the budget's message.
+    private static func expectDiagnosed(_ source: String) {
+        #expect(DeclarationHygieneTests.diagnostics(source) == [budgetMessage])
+    }
+
+    /// Requires `source` either to read in full, as `check` confirms, or to be diagnosed with the
+    /// budget's message: a test's thread has less stack than the macro's, so the deepest families may
+    /// reach the nesting budget there and not in the compiler.
+    private static func readOrDiagnosed(_ source: String, _ check: (Schema) throws -> Void) throws {
+        guard let messages = DeclarationHygieneTests.diagnostics(source) else {
+            try read(source, check)
+            return
+        }
+        #expect(messages == [budgetMessage])
+    }
+
+    /// Generates `source`, requiring parsing and generation to finish within two seconds.
+    ///
+    /// Generation keeps no count of its work, so the families that bound only generation, not
+    /// reading, are timed; two seconds is many times what linear generation of each takes.
+    private static func generateWithinTimeBound(_ source: String, _ check: (Schema) throws -> Void = { _ in }) throws {
         let clock = ContinuousClock()
         let elapsed = try clock.measure {
             let schema = try parse(source)
@@ -40,26 +72,6 @@ struct ReadingCostTests {
             _ = try Generator(schema: schema).members()
         }
         #expect(elapsed < .seconds(2), "\(elapsed)")
-    }
-
-    /// Requires `source` to be diagnosed with the budget's message, within the same bound.
-    private static func measureDiagnosed(_ source: String) {
-        let clock = ContinuousClock()
-        let elapsed = clock.measure {
-            #expect(DeclarationHygieneTests.diagnostics(source) == [budgetMessage])
-        }
-        #expect(elapsed < .seconds(2), "\(elapsed)")
-    }
-
-    /// Requires `source` either to read in full, as `check` confirms, or to be diagnosed with the
-    /// budget's message: a test's thread has less stack than the macro's, so the deepest families may
-    /// reach the nesting budget there and not in the compiler.
-    private static func measureReadOrDiagnosed(_ source: String, _ check: (Schema) throws -> Void) throws {
-        guard let messages = DeclarationHygieneTests.diagnostics(source) else {
-            try measure(source, check)
-            return
-        }
-        #expect(messages == [budgetMessage])
     }
 
     /// `First<X, Y> = X` with each level using its predecessor twice, through different arguments: the
@@ -74,7 +86,7 @@ struct ReadingCostTests {
 
     @Test func aFamilyNoReadingReachesIsNeverRead() throws {
         let declarations = Self.doublingThroughUnusedArguments(depth: 64)
-        try Self.measure(Self.schema(output: "Swift::Int", declarations: declarations)) { schema in
+        try Self.read(Self.schema(output: "Swift::Int", declarations: declarations)) { schema in
             #expect(!schema.typeScopes.exhaustedBudget)
         }
     }
@@ -84,7 +96,7 @@ struct ReadingCostTests {
     @Test func anArgumentAnAliasDoesNotUseIsNeverRead() throws {
         let declarations = Self.doublingThroughUnusedArguments(depth: 64)
         for depth in [24, 64] {
-            try Self.measure(Self.schema(output: "A\(depth)<Swift::Int>", declarations: declarations, void: true)) {
+            try Self.read(Self.schema(output: "A\(depth)<Swift::Int>", declarations: declarations, void: true)) {
                 schema in
                 let operation = try #require(schema.operations.first)
                 #expect(operation.producesVoid)
@@ -96,7 +108,7 @@ struct ReadingCostTests {
 
     /// Each level uses its predecessor three times through different arguments, so its reading grows
     /// threefold; the step budget cuts it short, and the declaration is diagnosed rather than guessed.
-    @Test func fanOutThroughSeveralParametersIsDiagnosedAtItsBudget() {
+    @Test func fanOutThroughSeveralParametersIsDiagnosedAtItsBudget() throws {
         var declarations = [
             "struct L<T> {}", "struct M<T> {}", "struct R<T> {}", "typealias Triple<A, B, C> = (A, B, C)",
             "typealias P0<T> = T",
@@ -106,9 +118,10 @@ struct ReadingCostTests {
                 "typealias P\(level)<T> = Triple<P\(level - 1)<L<T>>, P\(level - 1)<M<T>>, P\(level - 1)<R<T>>>"
             )
         }
-        Self.measureDiagnosed(
-            Self.schema(output: "P40<Swift::Int>", declarations: declarations.joined(separator: "; "))
-        )
+        let text = declarations.joined(separator: "; ")
+        Self.expectDiagnosed(Self.schema(output: "P40<Swift::Int>", declarations: text))
+        let (work, reading) = try Self.cutWork(output: "P40<Swift::Int>", declarations: text)
+        #expect(reading.isCut && work.steps <= LexicalScopes.stepBudget + 1, "\(work)")
     }
 
     /// One argument used several times is read once, so a tree of repeated uses is read in linear steps,
@@ -119,13 +132,13 @@ struct ReadingCostTests {
             declarations.append("typealias S\(level)<T> = Triple<S\(level - 1)<T>, S\(level - 1)<T>, S\(level - 1)<T>>")
         }
         let text = declarations.joined(separator: "; ")
-        try Self.measure(Self.schema(output: "S16<Swift::Int>", declarations: text)) { schema in
+        try Self.read(Self.schema(output: "S16<Swift::Int>", declarations: text)) { schema in
             let reading = schema.typeScopes.resolve("S16<Swift::Int>")
             #expect(reading.reading == .visible && reading.confirmsShape)
             #expect(!reading.key.exceeds(LexicalScopes.keyBudget))
             #expect(!schema.typeScopes.exhaustedBudget)
         }
-        try Self.measureReadOrDiagnosed(Self.schema(output: "S64<Swift::Int>", declarations: text)) { schema in
+        try Self.readOrDiagnosed(Self.schema(output: "S64<Swift::Int>", declarations: text)) { schema in
             #expect(schema.typeScopes.resolve("S64<Swift::Int>").reading == .visible)
         }
     }
@@ -141,10 +154,10 @@ struct ReadingCostTests {
             )
         }
         let text = declarations.joined(separator: "; ")
-        try Self.measure(Self.schema(output: "E16<Swift::Int>", declarations: text)) { schema in
+        try Self.read(Self.schema(output: "E16<Swift::Int>", declarations: text)) { schema in
             #expect(schema.typeScopes.resolve("E16<Swift::Int>").reading == .visible)
         }
-        try Self.measureReadOrDiagnosed(Self.schema(output: "E56<Swift::Int>", declarations: text)) { schema in
+        try Self.readOrDiagnosed(Self.schema(output: "E56<Swift::Int>", declarations: text)) { schema in
             #expect(schema.typeScopes.resolve("E56<Swift::Int>").reading == .visible)
         }
         let cyclic = Self.schema(
@@ -163,13 +176,13 @@ struct ReadingCostTests {
     /// opaque type with every link read once.
     @Test func longLinearChainsReadIteratively() throws {
         let plain = (0 ..< 5_000).map { "typealias B\($0) = B\($0 + 1)" }.joined(separator: "; ")
-        try Self.measure(Self.schema(output: "B0", declarations: plain + "; typealias B5000 = Swift::Int")) { schema in
+        try Self.read(Self.schema(output: "B0", declarations: plain + "; typealias B5000 = Swift::Int")) { schema in
             #expect(schema.typeScopes.resolve("B0").key == .standard("Int"))
             #expect(!schema.typeScopes.exhaustedBudget)
         }
         let generic = (["typealias G0<T> = T"] + (1 ... 3_000).map { "typealias G\($0)<T> = G\($0 - 1)<T>" })
             .joined(separator: "; ")
-        try Self.measure(Self.schema(output: "G3000<()>", declarations: generic, void: true)) { schema in
+        try Self.read(Self.schema(output: "G3000<()>", declarations: generic, void: true)) { schema in
             // The output is `Void`, so the success edge, which takes nothing after its source, is its own.
             let operation = try #require(schema.operations.first)
             #expect(operation.producesVoid)
@@ -177,7 +190,7 @@ struct ReadingCostTests {
             #expect(!schema.typeScopes.exhaustedBudget)
         }
         let links = (0 ..< 1_536).map { "typealias Link\($0) = Link\($0 + 1)" }.joined(separator: "; ")
-        try Self.measure(
+        try Self.read(
             Self.schema(
                 output: "Link0",
                 declarations: links + "; typealias Link1536 = Nested.Last; enum Nested { typealias Last = Link0 }"
@@ -193,36 +206,46 @@ struct ReadingCostTests {
     @Test func nestedGenericAliasesReadToDepthForty() throws {
         var nested = "Swift::Int"
         for _ in 0 ..< 40 { nested = "Id<\(nested)>" }
-        try Self.measure(Self.schema(output: nested, declarations: "typealias Id<T> = T")) { schema in
+        try Self.read(Self.schema(output: nested, declarations: "typealias Id<T> = T")) { schema in
             #expect(schema.typeScopes.resolve(nested).key == .standard("Int"))
         }
     }
 
     /// A reading that nests past its budget through the structure its aliases spell is diagnosed at the
     /// declaration that spells it.
-    @Test func aReadingPastItsNestingBudgetIsDiagnosed() {
+    @Test func aReadingPastItsNestingBudgetIsDiagnosed() throws {
         let wrapping = (["typealias W0 = Swift::Int"] + (1 ... 2_000).map { "typealias W\($0) = [W\($0 - 1)]" })
             .joined(separator: "; ")
         let generic = (["typealias V0<T> = T"] + (1 ... 2_000).map { "typealias V\($0)<T> = [V\($0 - 1)<T>]" })
             .joined(separator: "; ")
         // A chain of nongeneric aliases keeps each one's reading, so it does not nest.
         #expect(DeclarationHygieneTests.diagnostics(Self.schema(output: "W2000", declarations: wrapping)) == nil)
-        Self.measureDiagnosed(Self.schema(output: "V2000<Swift::Int>", declarations: generic))
+        Self.expectDiagnosed(Self.schema(output: "V2000<Swift::Int>", declarations: generic))
+        let (work, reading) = try Self.cutWork(output: "V2000<Swift::Int>", declarations: generic)
+        #expect(reading.isCut && work.steps <= LexicalScopes.stepBudget + 1, "\(work)")
     }
 
     /// Structure spends the step budget as aliases do, charged and checked at every type it reads: a
     /// tuple, a function's parameters, a composition, or a pack's arguments wider than the budget is
     /// diagnosed at the declaration that spells it, and its siblings past the cut are left unread.
-    @Test func wideStructuresSpendTheStepBudget() {
+    ///
+    /// Read alone, each reading is charged the whole budget and stops there, and it looks up no more
+    /// than the two names, `Swift` and `Int`, of each element it was charged for.
+    @Test func wideStructuresSpendTheStepBudget() throws {
         let count = LexicalScopes.stepBudget + 1
         func list(_ element: String, _ separator: String = ", ") -> String {
             Array(repeating: element, count: count).joined(separator: separator)
         }
+        let declarations = "protocol P {}; struct Pack<each T> {}"
         for output in [
             "(\(list("()")))", "(\(list("Swift::Int"))) -> ()", "any \(list("P", " & "))",
             "Pack<\(list("Swift::Int"))>",
         ] {
-            Self.measureDiagnosed(Self.schema(output: output, declarations: "protocol P {}; struct Pack<each T> {}"))
+            let (work, reading) = try Self.cutWork(output: output, declarations: declarations)
+            #expect(reading.isCut)
+            #expect(work.steps >= LexicalScopes.stepBudget && work.steps <= LexicalScopes.stepBudget + 1, "\(work)")
+            #expect(work.named <= 2 * LexicalScopes.stepBudget, "\(work)")
+            Self.expectDiagnosed(Self.schema(output: output, declarations: declarations))
         }
     }
 
@@ -233,7 +256,7 @@ struct ReadingCostTests {
         for links in [384, 2_304] {
             let chain = (["typealias G0<T> = ()"] + (1 ... links).map { "typealias G\($0)<T> = G\($0 - 1)<[T]>" })
                 .joined(separator: "; ")
-            try Self.measure(Self.schema(output: "G\(links)<Swift::Int>", declarations: chain, void: true)) { schema in
+            try Self.read(Self.schema(output: "G\(links)<Swift::Int>", declarations: chain, void: true)) { schema in
                 let operation = try #require(schema.operations.first)
                 #expect(operation.producesVoid)
                 #expect(schema.typeScopes.retainedVisits <= links + 1, "\(schema.typeScopes.retainedVisits)")
@@ -246,7 +269,7 @@ struct ReadingCostTests {
     /// double past its budget keeps its kind.
     @Test func doublingChainsAndWideTuplesAreLinear() throws {
         let doubling = (1 ... 60).map { "typealias D\($0) = (D\($0 - 1), D\($0 - 1))" }.joined(separator: "; ")
-        try Self.measure(Self.schema(output: "D60", declarations: "typealias D0 = Swift::Int; " + doubling)) { schema in
+        try Self.read(Self.schema(output: "D60", declarations: "typealias D0 = Swift::Int; " + doubling)) { schema in
             let reading = schema.typeScopes.resolve("D60")
             #expect(reading.reading == .visible && reading.confirmsShape)
             #expect(!reading.key.exceeds(LexicalScopes.keyBudget))
@@ -254,7 +277,7 @@ struct ReadingCostTests {
         let wide = "(" + Array(repeating: "Swift::Int", count: 2_000).joined(separator: ", ") + ")"
         let widening = (1 ... 30).map { "typealias W\($0) = (W\($0 - 1), W\($0 - 1), W\($0 - 1), W\($0 - 1))" }
             .joined(separator: "; ")
-        try Self.measure(Self.schema(output: "W30", declarations: "typealias W0 = \(wide); " + widening)) { schema in
+        try Self.read(Self.schema(output: "W30", declarations: "typealias W0 = \(wide); " + widening)) { schema in
             #expect(schema.typeScopes.resolve("W30").reading == .visible)
         }
         // A generic alias's reading whose key outgrows its budget keeps a function type's kind.
@@ -265,7 +288,7 @@ struct ReadingCostTests {
                 + handler,
             edges: "@Transition(onSuccess: Load.self)\nstatic func done(_ source: Running) -> Idle { fatalError() }"
         )
-        try Self.measure(source) { schema in
+        try Self.read(source) { schema in
             let operation = try #require(schema.operations.first)
             #expect(operation.inputEscapes)
             let reading = schema.typeScopes.resolve("Handler<H9>")
@@ -358,7 +381,7 @@ struct ReadingCostTests {
         let (cut, cutReading) = try Self.cutWork(output: family(400).output, declarations: family(400).declarations)
         #expect(cutReading.isCut)
         #expect(cut.steps <= LexicalScopes.stepBudget + 1, "\(cut)")
-        Self.measureDiagnosed(Self.schema(output: family(400).output, declarations: family(400).declarations))
+        Self.expectDiagnosed(Self.schema(output: family(400).output, declarations: family(400).declarations))
     }
 
     /// Telling cycles apart charges each link it follows and checks the budget at each one, so a ring
@@ -372,7 +395,7 @@ struct ReadingCostTests {
         let (work, reading) = try Self.cutWork(output: "R0", declarations: ring)
         #expect(reading.isCut)
         #expect(work.steps <= LexicalScopes.stepBudget + 1, "\(work)")
-        Self.measureDiagnosed(Self.schema(output: "R0", declarations: ring))
+        Self.expectDiagnosed(Self.schema(output: "R0", declarations: ring))
     }
 
     // MARK: Work that grows with the declarations, family by family
@@ -460,7 +483,7 @@ struct ReadingCostTests {
         #expect(!reading.isCut && reading.isOpaque == false)
         // The alias's width changes nothing a use of it reads.
         #expect(wide.steps == narrow.steps, "\(narrow) against \(wide)")
-        try Self.measure(
+        try Self.read(
             Self.schema(output: family(width: 3_000).output, declarations: family(width: 3_000).declarations)
         )
     }
@@ -489,7 +512,7 @@ struct ReadingCostTests {
         let (cut, cutReading) = try Self.cutWork(output: large.output, declarations: large.declarations)
         #expect(cutReading.isCut)
         #expect(cut.steps <= LexicalScopes.stepBudget + 2 * 2_000 + 8, "\(cut)")
-        Self.measureDiagnosed(Self.schema(output: large.output, declarations: large.declarations))
+        Self.expectDiagnosed(Self.schema(output: large.output, declarations: large.declarations))
     }
 
     /// A composition flattens a composition it names once, by whatever spelling it names it, and charges
@@ -569,7 +592,7 @@ struct ReadingCostTests {
                 \(edges.joined(separator: "\n"))
             }
             """
-        try Self.measure(source) { schema in
+        try Self.generateWithinTimeBound(source) { schema in
             #expect(schema.namesThrowingDifferentFailures == ["step"])
         }
     }
@@ -593,7 +616,7 @@ struct ReadingCostTests {
                 \(edges.joined(separator: "\n"))
             }
             """
-        try Self.measure(source)
+        try Self.generateWithinTimeBound(source)
     }
 
     /// One phase with many routed triggers, each choosing between two edges back to the phase: the
@@ -622,7 +645,7 @@ struct ReadingCostTests {
                 \(functions.joined(separator: "\n"))
             }
             """
-        try Self.measure(source)
+        try Self.generateWithinTimeBound(source)
     }
 
     /// A key's nodes are counted as it is built, so keeping many readings whose keys are near the key
@@ -639,7 +662,7 @@ struct ReadingCostTests {
             #expect(!reading.isCut)
         }
         let uses = "(" + (0 ..< 2_000).map { "H<C\($0)>" }.joined(separator: ", ") + ")"
-        try Self.measure(
+        try Self.read(
             Self.schema(
                 output: uses,
                 declarations: "typealias D0 = Swift::Int; " + doubling + "; typealias H<T> = (D9, T); "

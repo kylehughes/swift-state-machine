@@ -44,6 +44,9 @@ enum ExplorerHook: String, CaseIterable, Hashable, Sendable {
     case completion
     /// The destructor of a client value (snapshot, unread or displaced element), on the main thread.
     case destroy
+    /// A presentation publisher's delivery of a buffered value, between its demand claim and its lifetime
+    /// read (H10, `PresentationDeliveryPause`).
+    case decision
 }
 
 indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
@@ -70,6 +73,8 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
     case observeSeq(Int)
     /// Registers a sequence with the host, then `follow(_:)` of it on a task of its own.
     case followSeq(Int)
+    /// As `followSeq`, with a registration that delivers no seed, so the follower waits for its first element.
+    case followUnseeded(Int)
     /// The oldest parked registration closure registers with its host and returns.
     case factoryReturn
     /// The oldest parked registration closure throws a refusal.
@@ -93,10 +98,15 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
     /// From now on, each cancellation of the host's token delivers a new value to its registration from
     /// inside that cancellation, before the slot is free, wherever the cancellation runs.
     case deliverInCancel(Int)
-    /// The newest limited subscriber requests one more value from a worker thread.
+    /// The queue of the subscribers attached through `receive(on:)` runs what it holds while the main actor
+    /// waits: their values arrive, the demand each returns is requested there, and a subscriber that takes
+    /// one value cancels there.
     case requestElsewhere
-    /// The newest open subscriber cancels from a worker thread.
+    /// Unused: a subscriber that takes one value cancels from the queue in `requestElsewhere`.
     case cancelElsewhere
+    /// Attaches a subscriber through `receive(on:)` of the harness's queue; with `once`, through
+    /// `prefix(1)` as well, so it cancels its subscription from the queue after its first value.
+    case subscribeElsewhere(once: Bool)
     /// `apply(_:)` of a newer snapshot on a passive presentation; `send(_:)` on a driving one.
     case apply
     /// `close()` on a driving presentation.
@@ -222,6 +232,16 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
     case stopCustody
     /// Discards work `k`'s retained completion.
     case discard(Int)
+    /// Work `k`'s driver returns its outcome, which its preparation may accept or refuses; the owner's
+    /// coordinator delivers it from the worker.
+    case returnWork(Int, accepts: Bool)
+    /// Runs `event` once, inside the next report of work `k`'s retained completion.
+    case onReport(Int, ExplorerEvent)
+    /// Puts the works in a starting arrangement; first event only.
+    case stage(String)
+    /// Starts `flush(through:)` of the receipt the held drainer's batch returned, which must not return until
+    /// that batch is processed.
+    case flushHeld
 
     // E9, `demand` family of the `ObservableObject` classes.
     /// Attaches a subscriber to `presentedSnapshots` that requests no value from `receive(subscription:)`.
@@ -325,6 +345,7 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
         case .tokenDropAfterJob: "tokenDropAfterJob"
         case .observeSeq(let host): "observeSeq(\(Self.name(host)))"
         case .followSeq(let host): "followSeq(\(Self.name(host)))"
+        case .followUnseeded(let host): "followUnseeded(\(Self.name(host)))"
         case .hostCancelMain(let host): "hostCancelMain(\(Self.name(host)))"
         case .applyBelow: "applyBelow"
         case .then(let first, let second): "\(first)+\(second)"
@@ -355,6 +376,7 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
         case .deliverInCancel(let host): "deliverInCancel(\(Self.name(host)))"
         case .requestElsewhere: "requestElsewhere"
         case .cancelElsewhere: "cancelElsewhere"
+        case .subscribeElsewhere(let once): once ? "subscribe(elsewhere,once)" : "subscribe(elsewhere,1+)"
         case .apply: "apply"
         case .close: "close"
         case .deliver(let host): "deliver(\(Self.name(host)))"
@@ -386,6 +408,10 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
         case .edit: "edit"
         case .reconcile(let work): "reconcile(\(work))"
         case .discard(let work): "discard(\(work))"
+        case .returnWork(let work, let accepts): accepts ? "returnAccept(\(work))" : "returnRefuse(\(work))"
+        case .onReport(let work, let event): "onReport(\(work),\(event))"
+        case .stage(let text): "stage(\(text))"
+        case .flushHeld: "flushHeld"
         case .releaseDrivers: "releaseDrivers"
         case .emit: "emit"
         case .releaseDecided(let index): "releaseDecided(\(index))"
@@ -446,8 +472,17 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
             false
         }
     }
+    /// Whether this event arms a callback, which may still be pending in a later step.
+    var arms: Bool {
+        switch self {
+        case .arm, .onReport: true
+        case .then(let first, let second): first.arms || second.arms
+        default: false
+        }
+    }
     /// The hosts this event names.
     var hosts: [Int] {
+
         switch self {
         case .observe(let host), .observeFrom(let host), .observeAsync(let host), .followAsync(let host),
             .deliver(let host), .deliverElsewhere(let host), .deliverInCancel(let host), .finish(let host),
@@ -455,7 +490,8 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
             .followCancelled(let host), .echo(let host), .hostCancel(let host),
             .hostCancelReturn(let host),
             .observeAsyncHeld(let host), .observeAsyncNow(let host), .observeAsyncFinished(let host),
-            .observeSeq(let host), .followSeq(let host), .hostCancelMain(let host), .deliverEqual(let host):
+            .observeSeq(let host), .followSeq(let host), .followUnseeded(let host), .hostCancelMain(let host),
+            .deliverEqual(let host):
             [host]
         case .observeIsolated, .isolatedReturn, .observeActor, .actorReturn: [0]
         case .arm(_, let event): event.hosts
@@ -467,7 +503,10 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
     /// The raw owner's works this event names.
     var works: [Int] {
         switch self {
-        case .refuse(let work), .accept(let work), .reconcile(let work), .discard(let work): [work]
+        case .refuse(let work), .accept(let work), .reconcile(let work), .discard(let work),
+            .returnWork(let work, _):
+            [work]
+        case .onReport(let work, let event): [work] + event.works
         case .arm(_, let event): event.works
         default: []
         }
@@ -482,6 +521,18 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
                 let inner = ExplorerEvent(parsing: body[body.index(after: comma)...])
             else { return nil }
             self = .arm(hook, inner)
+            return
+        }
+        if text.hasPrefix("onReport("), text.hasSuffix(")") {
+            let body = text.dropFirst(9).dropLast()
+            guard let comma = body.firstIndex(of: ","), let work = Int(body[..<comma]),
+                let inner = ExplorerEvent(parsing: body[body.index(after: comma)...])
+            else { return nil }
+            self = .onReport(work, inner)
+            return
+        }
+        if text.hasPrefix("stage("), text.hasSuffix(")") {
+            self = .stage(String(text.dropFirst(6).dropLast()))
             return
         }
         if text.hasPrefix("countDuring("), text.hasSuffix(")") {
@@ -532,10 +583,16 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
             .saveProjected, .subscribeSavedProjected, .factoryReturnNewest, .factoryThrowNewest, .cancelFollowerOldest,
             .cancelCall, .observeUnseeded, .claim, .read, .cancelReader, .sendCancel, .ownerSend, .commitCurrent,
             .saveProposal, .commitSaved, .commitForeign, .copyOwner, .dropCopy, .releaseDrivers, .resetOwner, .emit,
-            .stopCustody,
+            .stopCustody, .flushHeld,
             .releaseDecided(0), .releaseDecided(1),
         ]
-        for work in 1 ... 2 { all += [.refuse(work), .accept(work), .reconcile(work), .discard(work)] }
+        all += [.subscribeElsewhere(once: false), .subscribeElsewhere(once: true)]
+        for work in 1 ... 3 {
+            all += [
+                .refuse(work), .accept(work), .reconcile(work), .discard(work), .returnWork(work, accepts: false),
+                .returnWork(work, accepts: true),
+            ]
+        }
         for index in 0 ..< 3 {
             all += [.stopP(index), .dropP(index), .pending(index), .readSeq(index)]
             for owner in 0 ..< 3 { all.append(.present(index, owner)) }
@@ -552,7 +609,7 @@ indirect enum ExplorerEvent: Hashable, Sendable, CustomStringConvertible {
                 .finish(host), .hostCancel(host), .hostCancelReturn(host), .observeAsyncHeld(host), .observeSeq(host),
                 .observeAsyncNow(host), .observeAsyncFinished(host), .deliverElsewhere(host), .observeClaimed(host),
                 .followCancelled(host), .echo(host), .deliverInCancel(host),
-                .followSeq(host), .hostCancelMain(host), .deliverEqual(host),
+                .followSeq(host), .followUnseeded(host), .hostCancelMain(host), .deliverEqual(host),
             ]
         }
         for host in 2 ..< 4 {

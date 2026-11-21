@@ -230,31 +230,26 @@ struct WorkBoundTests {
         }
     }
 
-    /// An operation's `Output` nested `depth` arrays deep: the graph shows the spelling the parser kept,
-    /// so generating it parses nothing again, where parsing nested brackets takes time that doubles with
-    /// each level.
+    /// An operation's `Output` nested twenty arrays deep, which the graph shows as the parser kept it.
+    ///
+    /// Generating the graph parses nothing again, where parsing nested brackets takes time that doubles
+    /// with each level. Every spelling the macro parses is parsed through the schema's spellings, which
+    /// record it, so the graph adds none to them.
     @Test func theGraphShowsSpellingsWithoutParsingThemAgain() throws {
-        func schema(_ depth: Int) throws -> Schema {
-            let output = String(repeating: "[", count: depth) + "Swift::Int" + String(repeating: "]", count: depth)
-            return try Self.parse(
-                TypeResolutionTests.loading(
-                    aliases: "typealias Output = \(output)",
-                    edges:
-                        "@Transition(onSuccess: Load.self)\nstatic func done(_ source: Running, _ value: Load.Output) -> Idle { fatalError() }"
-                )
+        let nested = String(repeating: "[", count: 20) + "Swift::Int" + String(repeating: "]", count: 20)
+        let schema = try Self.parse(
+            TypeResolutionTests.loading(
+                aliases: "typealias Output = \(nested)",
+                edges:
+                    "@Transition(onSuccess: Load.self)\nstatic func done(_ source: Running, _ value: Load.Output) -> Idle { fatalError() }"
             )
-        }
-        let small = try schema(10)
-        let large = try schema(20)
-        #expect(
-            large.operations.first?.outputType == String(repeating: "[", count: 20) + "Swift::Int"
-                + String(repeating: "]", count: 20)
         )
-        Self.expectLinear(
-            "graphs of outputs nested 10 and 20 arrays deep",
-            small: { _ = Generator(schema: small).graph() },
-            large: { _ = Generator(schema: large).graph() }
-        )
+        #expect(schema.operations.first?.outputType == nested)
+        let parsed = schema.spellings.parsed
+        let graph = Generator(schema: schema).graph()
+        #expect(graph.contains(nested))
+        #expect(schema.spellings.parsed == parsed, "\(schema.spellings.parsed.subtracting(parsed))")
+        #expect(!schema.spellings.parsed.contains { $0.contains("[[[") }, "\(schema.spellings.parsed)")
     }
 
     /// An edge whose payload, request, and failure are nested `depth` arrays deep: generating every

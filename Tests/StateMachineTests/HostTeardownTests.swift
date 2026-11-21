@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -279,11 +280,10 @@ private final class DropOnRelease<Owner: Sendable>: Sendable {
         delivered: Signal
     ) async throws {
         await delivered.wait()
-        DispatchQueue.global()
-            .async {
-                token.cancel()
-                slot.returned.signal()
-            }
+        runOnOwnThread {
+            token.cancel()
+            slot.returned.signal()
+        }
         slot.waitForDrop()
         let late = Recorder()
         saved.subscribe(late)

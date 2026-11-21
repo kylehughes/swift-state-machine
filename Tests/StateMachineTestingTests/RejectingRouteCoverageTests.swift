@@ -31,25 +31,34 @@ nonisolated private enum Payment: Sendable {
         #expect(coverage.unexercisedRejectingRoutes.map(\.id) == ["pending.refuse"])
 
         var refused = ManualMachineTest(Payment.Local())
-        _ = try refused.rejection(of: .refund)
+        let reason = try refused.rejection(of: .refund)
+        guard case .preparation(.refuse(.nothingToRefund)) = reason else {
+            Issue.record("Expected the router's typed refusal, not \(reason)")
+            return
+        }
         let rejection = try #require(refused.rejections.first)
         #expect(refused.rejections.count == 1)
         #expect(rejection.phase == "pending")
+        #expect(rejection.route == "pending.refuse")
         #expect(rejection.snapshot.revision == 0)
         coverage.record(refused)
-        let named = rejection.route == "pending.refuse"
-        #expect(named || rejection.route == nil)
-        #expect(coverage.unexercisedRejectingRoutes.map(\.id) == (named ? [] : ["pending.refuse"]))
-        #expect(coverage.rejectingRouteIDs == (named ? ["pending.refuse"] : []))
+        #expect(coverage.unexercisedRejectingRoutes.isEmpty)
+        #expect(coverage.rejectingRouteIDs == ["pending.refuse"])
     }
 
     // A router that chooses between edges and declines while locked: a failed `send` records the
-    // rejection the real owner returned, from the phase it held.
+    // rejection the real owner returned, from the phase it held, with the router the generated owner
+    // names for it.
     @Test func aFailedSendRecordsTheOwnersRejection() {
         var test = ManualMachineTest(GeneratedRetry.Local(GeneratedRetry.Waiting(attempts: 1, locked: true)))
         #expect(throws: StateMachineTestFailure.self) { try test.send(.retry) }
         #expect(test.rejections.map(\.phase) == ["waiting"])
-        #expect(test.rejections.allSatisfy { $0.route == nil || $0.route == "waiting.decide" })
+        #expect(test.rejections.map(\.route) == ["waiting.decide"])
+        #expect(
+            test.rejections.allSatisfy { rejection in
+                if case .preparation(.decide(.locked)) = rejection.reason { true } else { false }
+            }
+        )
         #expect(test.history.count == 1)
     }
 }

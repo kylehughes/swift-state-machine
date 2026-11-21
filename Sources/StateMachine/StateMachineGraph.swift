@@ -11,9 +11,11 @@
 /// or router is identified by its source phase and name, `"<phase>.<name>"`, so edges of one name that
 /// leave different phases stay distinct.
 ///
-/// Each type spelling is the author's own text, on one line without comments, and means what it means
-/// where it was written: a phase's payload inside the schema, an input case's payload inside `Input`,
-/// and an operation's or event's types inside its namespace. A type the namespace omits is spelled
+/// Each type spelling is the author's text: the type's tokens as written, in order, with one space
+/// wherever whitespace, a line break, or a comment separated two of them, and nothing else, so
+/// `Self.Draft` and `(@Sendable () -> Int)` are kept as written. It means what it means where it was
+/// written: a phase's payload inside the schema, an input case's payload inside `Input`, and an
+/// operation's or event's types inside its namespace. A type the namespace omits is spelled
 /// through the standard library's module, `Swift::Void` or `Swift::Never`, which no declaration shadows.
 ///
 /// A path in the graph shows only that an edge is declared. Whether it is taken depends on the authored
@@ -356,24 +358,31 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
 
     /// Renders the phases and edges as a Graphviz `digraph`.
     ///
-    /// A point node named `*` enters the initial phase, and with a dashed edge labeled `restored` each
-    /// other restorable phase. Terminal phases have a double outline, and each edge is labeled with its
-    /// name. Every name is a quoted string, so none is read as DOT syntax: a quotation mark, a backslash,
-    /// a line break, and `&` are escaped, so each renders as itself. Lines follow declaration order, so
-    /// equal graphs render identical text.
+    /// Each phase is a node named `p0`, `p1`, and so on in declaration order, labeled with the phase's
+    /// name, so no name is ever read as DOT syntax or meets the entry point, a point node named `entry`,
+    /// which enters the initial phase, and with a dashed edge labeled `restored` each other restorable
+    /// phase. Terminal phases have a double outline, and each edge is labeled with its name. A label
+    /// escapes a quotation mark, a backslash, and `&`, one Unicode scalar at a time, and writes every line
+    /// ending as a line break, so each renders as itself. Lines follow declaration order, so equal graphs
+    /// render identical text.
     public func dot() -> String {
-        var lines = ["digraph \(Self.dotString(name)) {", "    \"*\" [shape=point];"]
-        for phase in phases {
-            let node = Self.dotString(phase.id)
-            lines.append(terminal.contains(phase.id) ? "    \(node) [peripheries=2];" : "    \(node);")
+        // Every phase is a node with an internal identifier, `p0`, `p1`, and so on, labeled with its
+        // name, so no name can be read as DOT syntax or meet the entry point, whose identifier is
+        // `entry`, which no phase's identifier can be.
+        let states = DiagramStates(self)
+        let terminals = Set(terminal)
+        var lines = ["digraph \(Self.dotString(name)) {", "    entry [shape=point];"]
+        for (phase, state) in states.declared {
+            let outline = terminals.contains(phase) ? ", peripheries=2" : ""
+            lines.append("    \(state) [label=\(Self.dotString(phase))\(outline)];")
         }
-        lines.append("    \"*\" -> \(Self.dotString(initial));")
+        lines.append("    entry -> \(states[initial]);")
         for phase in restorable where phase != initial {
-            lines.append("    \"*\" -> \(Self.dotString(phase)) [label=\"restored\", style=dashed];")
+            lines.append("    entry -> \(states[phase]) [label=\"restored\", style=dashed];")
         }
         for edge in edges {
             lines.append(
-                "    \(Self.dotString(edge.source)) -> \(Self.dotString(edge.destination)) [label=\(Self.dotString(edge.name))];"
+                "    \(states[edge.source]) -> \(states[edge.destination]) [label=\(Self.dotString(edge.name))];"
             )
         }
         lines.append("}")
@@ -400,15 +409,23 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
 
     /// A quoted DOT string of `text`, which Graphviz reads, and renders as a label, as `text` itself.
     private static func dotString(_ text: String) -> String {
+        // Each Unicode scalar is read on its own, so a quotation mark or a backslash that a combining
+        // scalar follows is still escaped. Every line ending, a carriage return and line feed pair
+        // included, becomes one escaped line break.
         var quoted = "\""
-        for character in text {
-            switch character {
+        var scalars = text.unicodeScalars.makeIterator()
+        var pending = scalars.next()
+        while let scalar = pending {
+            pending = scalars.next()
+            switch scalar {
             case "\"": quoted += "\\\""
             case "\\": quoted += "\\\\"
             case "&": quoted += "&amp;"
-            case "\n", "\r\n": quoted += "\\n"
-            case "\r": quoted += "\\r"
-            default: quoted.append(character)
+            case "\r":
+                if pending == "\n" { pending = scalars.next() }
+                quoted += "\\n"
+            case "\n", "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}": quoted += "\\n"
+            default: quoted.unicodeScalars.append(scalar)
             }
         }
         return quoted + "\""

@@ -1,6 +1,7 @@
 import Dispatch
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -55,11 +56,10 @@ private struct Signal: Sendable {
 /// Runs `body` on another thread and returns once it has.
 private func elsewhere(_ body: @escaping @Sendable () -> Void) {
     let done = DispatchSemaphore(value: 0)
-    DispatchQueue.global()
-        .async {
-            body()
-            done.signal()
-        }
+    runOnOwnThread {
+        body()
+        done.signal()
+    }
     done.wait()
 }
 
@@ -229,12 +229,11 @@ private func elsewhere(_ body: @escaping @Sendable () -> Void) {
             }
         }
         let finishing = DispatchSemaphore(value: 0)
-        DispatchQueue.global()
-            .async {
-                callbacks.value?.receive(Probe(events))
-                callbacks.value?.finish()
-                finishing.signal()
-            }
+        runOnOwnThread {
+            callbacks.value?.receive(Probe(events))
+            callbacks.value?.finish()
+            finishing.signal()
+        }
         entered.wait()
         elsewhere {
             sequence.cancel(isolation: nil)

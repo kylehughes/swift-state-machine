@@ -1,5 +1,6 @@
 import Dispatch
 import Foundation
+import StateMachineTestSupport
 import StateMachineUI
 import os
 
@@ -22,8 +23,17 @@ import os
     private var delivered: [UInt64] = []
     private var depth = 0
     private var cancelled = false
-    private var newest: UInt64 = 0
+    // The newest revision offered so far; nothing before the first offer, whatever its revision.
+    private var newest: UInt64?
     private var staged: UInt64?
+    // Every value that was staged when offered: a delivery must be one of them.
+    private var stagedValues: Set<Int> = []
+    // Responsible delivery jobs: activations (an offer that staged a value while nothing staged was
+    // undelivered and no delivery was running), continuations after a job reached its allowance, and
+    // the jobs that actually delivered.
+    private var activations = 0
+    private var continuations = 0
+    private var jobs = 0
     private var echoing = false
     private var echoes = 0
     private var turns = 0
@@ -68,9 +78,14 @@ import os
     private func offer(_ revision: UInt64? = nil, elsewhere: Bool = false) {
         let value = world.makeValue(.applied(attempt: nil), attempt: nil, revision: revision)
         let revision = value.revision
-        if revision > newest {
+        if newest.map({ revision > $0 }) ?? true {
             newest = revision
-            if !cancelled { staged = revision }
+            if !cancelled {
+                let idle = (staged == nil || delivered.last == staged) && depth == 0 && !batchOpen
+                if idle { activations += 1 }
+                staged = revision
+                stagedValues.insert(value.id)
+            }
         }
         guard elsewhere else {
             ingress.offer(value, revision: revision)
@@ -80,11 +95,10 @@ import os
         _ = consume value
         let ingress = ingress!
         let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global()
-            .async {
-                if let shot = slot.withLock({ $0.take() }) { ingress.offer(shot, revision: revision) }
-                done.signal()
-            }
+        runOnOwnThread {
+            if let shot = slot.withLock({ $0.take() }) { ingress.offer(shot, revision: revision) }
+            done.signal()
+        }
         if !explorerWait(done) { world.violate(.stuck, "an offer on a worker never returned") }
     }
 
@@ -92,7 +106,7 @@ import os
         switch event {
         case .apply: offer()
         case .deliverElsewhere: offer(elsewhere: true)
-        case .applyBelow: offer(newest >= 5 ? newest - 5 : 0)
+        case .applyBelow: offer((newest ?? 0) >= 5 ? (newest ?? 0) - 5 : 0)
         case .request: for _ in 0 ..< 40 { offer() }
         case .echo: echoing = true
         case .stop:
@@ -114,12 +128,21 @@ import os
         if let last = delivered.last, shot.revision <= last {
             world.violate(.ingressDelivery, "r\(shot.revision) was delivered after r\(last)")
         }
+        if let problem = explorerIngressMembershipProblem(id: shot.id, revision: shot.revision, staged: stagedValues) {
+            world.violate(.ingressDelivery, problem)
+        }
         delivered.append(shot.revision)
         world.considered(shot.id)
         if !batchOpen {
             batchOpen = true
             batch = 0
-            Task { @MainActor [weak self] in self?.batchOpen = false }
+            jobs += 1
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                batchOpen = false
+                // A job that used its whole allowance with more staged continues in the next job.
+                if batch == 32, staged != nil, delivered.last != staged { continuations += 1 }
+            }
         }
         batch += 1
         if batch == 33 { world.violate(.ingressDelivery, "33 values were delivered in one main-actor job") }
@@ -141,6 +164,12 @@ import os
             world.violate(
                 .ingressDelivery,
                 "the ingress went idle with r\(staged) staged but last delivered \(delivered.last.map { "r\($0)" } ?? "nothing")"
+            )
+        }
+        if jobs > activations + continuations {
+            world.violate(
+                .ingressDelivery,
+                "\(jobs) delivery jobs ran for \(activations) activations and \(continuations) continuations"
             )
         }
         ingress.cancel()

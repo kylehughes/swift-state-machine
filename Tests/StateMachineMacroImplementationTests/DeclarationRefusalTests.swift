@@ -77,12 +77,11 @@ struct DeclarationRefusalTests {
             Self.diagnostics(Self.replacing("    static func approve", "    @\(attribute)\n    static func approve"))
         }
         let custom = { (name: String) in
-            "Remove '@\(name)': generated code calls this function from nonisolated code and from every owner, so it takes only Swift's @discardableResult, @inlinable, @inline, and @usableFromInline, and no attribute that may isolate it to a global actor such as MainActor."
+            "Remove '@\(name)': generated code calls this function from nonisolated code and from every owner, so it takes only Swift's @discardableResult, @inlinable, @inline, @usableFromInline, and @available(*, deprecated), and no attribute that may isolate it to a global actor such as MainActor."
         }
         for attribute in [
             "MainActor", "Swift.MainActor", "Swift::MainActor", "SomeGlobalActor", "uiActor", "Actors.ui", "concurrent",
-            "objc", "preconcurrency", "_disfavoredOverload", "Sendable", "warn_unqualified_access", "`inlinable`",
-            "Swift::inlinable",
+            "objc", "preconcurrency", "_disfavoredOverload", "Sendable", "warn_unqualified_access", "Swift::inlinable",
         ] {
             let name =
                 attribute.split(whereSeparator: { $0 == "." || $0 == ":" }).last.map(String.init)?
@@ -94,13 +93,18 @@ struct DeclarationRefusalTests {
         }
         for attribute in [
             "available(macOS 14, *)", "available(macOS 13, *)", "available(*, unavailable)",
-            "available(*, deprecated, message: \"old\")", "available(macOS, obsoleted: 14)",
-            "backDeployed(before: macOS 14)",
+            "available(macOS, obsoleted: 14)", "available(macOS, deprecated: 14)", "available(*, noasync)",
+            "available(*, deprecated, message: \"a\", message: \"b\")", "available(swift, deprecated: 6)",
+            "available(*, deprecated, introduced: 1)", "backDeployed(before: macOS 14)",
         ] {
             let name = String(attribute.prefix { $0 != "(" })
             #expect(with(attribute) == [availability(name)], "\(attribute)")
         }
-        for attribute in ["inlinable", "discardableResult", "inline(__always)", "inline(never)", "usableFromInline"] {
+        // Swift reads a built-in attribute's name with backticks as the same attribute.
+        for attribute in [
+            "inlinable", "discardableResult", "inline(__always)", "inline(never)", "usableFromInline", "`inlinable`",
+            "`discardableResult`", "`inline`(never)",
+        ] {
             #expect(with(attribute) == nil, "\(attribute)")
         }
         let qualified = Self.replacing(

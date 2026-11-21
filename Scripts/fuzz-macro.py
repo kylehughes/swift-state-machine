@@ -22,13 +22,17 @@ Each case applies rewrites to a valid seed schema and compiles it, alone, throug
 
 Each case compiles as the module `Fz`; a harness module that imports it prints every graph, its Mermaid and DOT
 renderings, and the seed's report, and a seed's client section compiles in that module, so it sees the schema as
-another module does. Beside the comparison above, every compiled case must: link and run to completion; export type
-spellings that, compiled exactly as exported in the scope the guide says each is meant in, name the authored types;
-render both diagrams so that a strict reader of the subset the library writes reads back exactly its graph; and take
-initializer driver and handler labels in its own declaration order. Every seed must pass all of this on its own, and a
-domain seed must print the report EXPECTED_REPORTS pins. Every compilation runs under a watchdog that kills its process
-tree past `--memory-cap-mb` or `--timeout`, which fails the case. `--self-test` plants a defect for each of these
-oracles and checks that each is reported.
+another module does. Beside the comparison above, every compiled case must: link and run to completion; print a graph
+for every schema the module declares, holding every phase, input, operation, and event the source declares; export
+each type spelling as the author's own text, on one line without comments, and so that, compiled exactly as exported
+in the scope the guide says it is meant in, it names the authored type; render both diagrams so that a strict reader
+of the subset the library writes reads back exactly its graph; and give each managed owner an initializer with its
+driver and handler labels in its own declaration order. Every seed must pass all of this on its own, a domain seed
+must print the report EXPECTED_REPORTS pins, and a module generated from the seed's attributes must use each selected
+owner and find no unselected one. A refusal must match its whole documented message at the token it names. Every
+compilation runs under a watchdog that kills its process tree past `--memory-cap-mb` or `--timeout`, which fails the
+case before any allowance. `--self-test` plants a defect for each of these oracles and checks that each is
+reported.
 
 --cost compares scaled schemas spelled a base way and rewritten ways: the same outcome at the same size, the macro's
 own time within a constant factor, and near-linear growth from the smaller size to the larger.
@@ -61,47 +65,60 @@ DOC = ROOT / 'Documentation/StateMachine.docc/DeclaringAGraph.md'
 # sentence of DeclaringAGraph.md that documents the limit; the run checks that the sentence is still there.
 
 #
-# A macro diagnostic meets an entry only when its message matches `pattern` and it stands where the case changed the
-# schema: on a line a rewrite changed, or on a line that declares a name the message quotes. An entry marked `exact`
-# is a refusal a rewrite must meet: the case passes only with that diagnostic, and only when no other diagnostic or
-# error accompanies it, other than the generated names the refused expansion leaves undeclared (CASCADE).
+# A macro diagnostic meets an entry only when the whole message matches `pattern` (`re.fullmatch`), it stands where the
+# case changed the schema (on a line a rewrite changed, or on a line that declares a name the message quotes), and the
+# token at its line and column is the one the message names (`anchored_token`). An entry marked `exact` is a refusal a
+# rewrite must meet: the case passes only with that diagnostic, and only when every other diagnostic or error is one
+# the refused expansion leaves behind (CASCADE) or one the entry lists as its consequence (`consequent`). Every
+# interface allowance must explain every line of the difference, not a part of it.
 
 LIMITS = [
     dict(id='phase-alias', rewrites=r'^alias-', observed='macro-diagnostic', role='phase',
-         pattern=r"Phase '[^']*' needs a distinct nongeneric struct or enum declared directly inside the schema, named with a Swift identifier that needs no backticks; aliases are unsupported|"
-                 r"^(Source |Destination )?'[^']*' is not a phase payload type declared in this schema|^Put this construction in a static function that returns",
+         pattern=r"Phase '[^']*' needs a distinct nongeneric struct or enum declared directly inside the schema, named with a Swift identifier that needs no backticks; aliases are unsupported\.|"
+                 r"(Source |Destination )?'[^']*' is not a phase payload type declared in this schema\.|Put this construction in a static function that returns .* and name that function here\.",
          doc='Phase aliases, reusing a payload type for several phases, generic schema or phase payload'),
     dict(id='reserved-names', rewrites=r'^(reserved-member|verb-edge-name)$', observed='macro-diagnostic',
-         pattern=r'(?i)reserved|shadow|redeclar|collid|distinct name|rename', doc='Generated member names are reserved'),
+         pattern=r"(The schema name is reserved or shadowed by a direct member|'[^']*' is reserved for generated members|"
+                 r"'[^']*' names a declaration the expansion makes inside the schema)\b.*|"
+                 r"(Router|Transition) '[^']*' would generate the \w+ method [^ ]+, which (shadows|redeclares) .*; rename the (router|transition)\.|"
+                 r"This (transition|router)'s effect type would be Effect\.\w+, which is unavailable; rename the (transition|router)\.",
+         doc='Generated member names are reserved'),
     dict(id='pinned-failure', rewrites=r'^(throws-any-error|untyped-throws)$', observed='expansion-error',
-         pattern=r'cannot be converted to error type',
+         pattern=r'.*cannot be converted to error type.*',
          doc='The compiler then checks that the router and every throwing candidate throw that type'),
-    dict(id='public-default', rewrites=r'^schema-access$', observed='expansion-error', pattern=r'is internal and cannot be referenced from a default argument',
+    dict(id='public-default', rewrites=r'^schema-access$', observed='expansion-error', pattern=r'.*is internal and cannot be referenced from a default argument.*',
          doc='a public schema needs a public initializer or function'),
     # Refusals a rewrite must meet exactly: the case passes only with this diagnostic.
     dict(id='conditional-members', rewrites=r'^conditional-compilation$', observed='macro-diagnostic',
-         pattern=r"Move this '#if' outside the schema or into a function body", exact=True,
+         pattern=r"Move this '#if' outside the schema or into a function body: .*", exact=True, token=r'#if',
          doc='so it refuses `#if` among the members of the schema, `Input`, `Scope`, and each operation and event namespace'),
     dict(id='conditional-attributes', rewrites=r'^conditional-attribute$', observed='macro-diagnostic',
-         pattern=r"Move this '#if' out of the declaration's attributes", exact=True,
+         pattern=r"Move this '#if' out of the declaration's attributes: .*", exact=True, token=r'#if',
          doc='and in the attributes of any of those members'),
     dict(id='custom-attribute', rewrites=r'^(declaration-attributes|lowercase-attribute)$', observed='macro-diagnostic',
-         pattern=r"Remove '@[^']+': generated code calls this function from nonisolated code and from every owner", exact=True,
+         pattern=r"Remove '@[^']+': generated code calls this function from nonisolated code and from every owner, .*", exact=True,
          doc='any other attribute, which could isolate it to a global actor such as `@MainActor`, whatever its capitalization, or change how a call to it is checked, is refused'),
     dict(id='function-availability', rewrites=r'^(declaration-attributes|edge-availability)$', observed='macro-diagnostic',
-         pattern=r"Remove '@(available|backDeployed)' and give the schema this availability instead", exact=True,
+         pattern=r"Remove '@(available|backDeployed)' and give the schema this availability instead: .*", exact=True,
+         # Swift's own refusals of the same attribute on the authored function: `@backDeployed` on a fileprivate
+         # function, and an `@available` older than the schema's own availability.
+         consequent=r"'@backDeployed' may not be used on (fileprivate|private) declarations|"
+                    r"static method cannot be more available than enclosing scope",
          doc='so it refuses `@available` and `@backDeployed` on the function and asks for them on the schema'),
-    dict(id='schema-access', rewrites=r'^schema-access$', observed='macro-diagnostic',
-         pattern=r"Declare '[^']*' (public|package): the (public|package) schema '[^']*' generates (public|package) members that name it",
+    # A rewrite that declares an alias or helper of internal access inside a public schema meets the same refusal.
+    dict(id='schema-access', rewrites=r'^(schema-access|alias-generic|alias-chain|alias-nested|alias-local|leaf-access)$', observed='macro-diagnostic',
+         pattern=r"Declare '[^']*' (public|package): the (public|package) schema '[^']*' generates (public|package) members that name it.*",
          exact=True, doc='Each declaration of the schema that one of those spellings names, as Swift resolves the spelling where it is written, needs that access too'),
     # Not an allowance: under `reorder-members` the initializers' driver and handler labels must follow the new
     # declaration order, as this documents; every case checks them against its own declaration order.
     dict(id='declaration-order-labels', rewrites=r'^reorder-members$', observed='normalization', pattern=r'$^',
          doc="A managed owner's initializers take one driver per operation, in the order the operations are declared, and then one handler per event, in the order the events are declared"),
-    dict(id='size-limit', rewrites=r'^ceilings$', observed='macro-diagnostic', pattern=r'the macro accepts at most \d+', exact=True,
+    dict(id='size-limit', rewrites=r'^ceilings$', observed='macro-diagnostic', exact=True,
+         pattern=r'This schema declares \d+ (phases|input cases|operations|operations, cancellations, and events); the macro accepts at most \d+, .*',
          doc='The macro accepts at most 600 phases, 512 input cases, 256 operations, and 512 effect cases'),
     dict(id='raw-type-names', rewrites=r'^collide-raw$', observed='macro-diagnostic',
-         pattern=r'(?i)needs no backticks',
+         pattern=r'Name the (case|schema|operation|event|transition or router) with a Swift identifier that needs no backticks, .*|'
+                 r"Phase '[^']*' needs a distinct nongeneric struct or enum declared directly inside the schema, named with a Swift identifier that needs no backticks; aliases are unsupported\.",
          doc='names are Swift identifiers that need no backticks'),
     # A failure the macro reads without confirming it (a name a nested namespace finds outside itself, a bare `Array` or
     # `Int` the schema does not declare, a `Swift.` the schema does not declare) is not provably the type another
@@ -114,55 +131,78 @@ LIMITS = [
          pattern=r'PreparationRejection|Route\.\w+Result',
          doc='an alias declared outside the schema is invisible to the macro'),
     dict(id='outside-never', rewrites=r'^alias-file$', observed='expansion-error',
-         pattern=r'names Never through a declaration the macro cannot read',
+         pattern=r'.*names Never through a declaration the macro cannot read.*',
+         # The generated code that reads the failure as a type with values: its catch of a typed error and its
+         # `try` find the type is `Never` after all.
+         consequent=r"cannot convert value of type 'any Error' to expected argument type '[^']*' \(aka 'Never'\)|"
+                    r"no calls to throwing functions occur within 'try' expression|"
+                    r"'catch' block is unreachable because no errors are thrown in 'do' block",
          doc='that the macro reads as a type with values without confirming its kind, must not be `Never`'),
     dict(id='nfc-refusal', rewrites=r'^collide-(nfd|kelvin|varia)', observed='macro-diagnostic',
-         pattern=r"The name '[^']*' is not in Unicode Normalization Form C",
+         pattern=r"The name '[^']*' is not in Unicode Normalization Form C(; spell it '[^']*'|, and composed it reads '[^']*', which is no name; spell it with other characters)\. .*",
          doc='The macro therefore refuses a name that is not in that form anywhere it reads one'),
     dict(id='repeated-ownership', rewrites=r'^shared-param$', observed='interface', pattern=r'__shared',
          doc='repeats the payload\'s ownership'),
 ]
 
-POLICY_NFC = r"The name '[^']*' is not in Unicode Normalization Form C"
+POLICY_NFC = r"The name '[^']*' is not in Unicode Normalization Form C.*"
 
 # Errors a refused expansion leaves behind: authored code that names a generated type the macro never declared.
 CASCADE = re.compile(r"^cannot find (type )?'(Effect|Route|Change|Advance|Restoration|Observed|Owned|Prepared|Snapshot|Phase|"
                      r"\w+Request|\w+Completion|\w+Result)' in scope$|^'(Effect|Route|Change|Advance|Restoration|Observed|Owned|"
                      r"Prepared|Snapshot|Phase|Local|Shared|\w+Request|\w+Completion|\w+Result)' is not a member type|"
                      # Swift's own access errors where an access refusal names the declaration that lacks access.
-                     r"uses an? (internal|fileprivate|private|package) type|is (internal|fileprivate|private|package) and cannot be referenced")
+                     r"uses an? (internal|fileprivate|private|package) type|is (internal|fileprivate|private|package) and cannot be referenced|"
+                     # The harness's accessor of a graph whose expansion was refused.
+                     r"^type '[^']*' has no member 'graph'$")
 
 # What a breaking rewrite must be rejected with: the macro's documented diagnostic, or Swift's own error where the
 # grammar is Swift's. A case rejected any other way, or by a link error, fails.
 # The graph checks a breaking rewrite of the graph may meet first: which one fires depends on the order the macro checks
 # a graph in, so any of them is the documented rejection of a graph made invalid.
-GRAPH_VALIDITY = (r"is unreachable from the initial phase|has no outgoing transitions; mark it '@Terminal'|is never started|"
-                  r"can start but never complete|is never accepted|can never fire|can never run|must be eligible in destination|"
-                  r"cannot be active in terminal phase|needs a (success|failure) edge or router|has no on(Success|Failure): edge or router|"
-                  r"Ambiguous routing from|declare exactly one @Route")
+# The graph findings a graph made invalid elsewhere leaves behind: a phase or an operation that only the changed part
+# reached. A breaking rewrite of the graph names its own finding (`refusal`, below); these may accompany it.
+GRAPH_CONSEQUENCES = (r"Phase '[^']*' is unreachable from the initial phase '[^']*'( or a phase @Restoration can restore)?; declare a transition into it, or remove it\.|"
+                      r"Phase '[^']*' has no outgoing transitions; mark it '@Terminal' or declare a transition from it\.|"
+                      r"Operation '[^']*' is never started: .*|Operation '[^']*' can start but .*")
 
+# What a breaking rewrite must be rejected with, the whole message: the macro's documented diagnostic, or Swift's own
+# error where the grammar is Swift's. A rewrite whose change names a phase or an operation gives the exact finding in
+# its `refusal`; these are the rest. A case rejected any other way, or by a link error, fails.
 BREAK_EXPECT = {
-    'router-returns-void': r'A router with no edge to choose returns Never and throws a typed rejection|A router returns its choice among|'
-                           r"The name '[^']*' is not in Unicode Normalization Form C",
-    'scope-property': r'Operation metadata must reference declared Scope cases|Write each reference|must reference|Normalization Form C',
-    'phase-alias-other': r"Phase '[^']*' needs a distinct nongeneric struct or enum declared directly inside the schema|Normalization Form C|"
-                         r"is not a phase payload type declared in this schema|^Put this construction in a static function",
-    'drop-request-label': r'labeled request:',
-    'terminal-flip': GRAPH_VALIDITY + r"|Terminal phase '[^']*' cannot have an outgoing",
-    'redirect-entrance': GRAPH_VALIDITY,
-    'router-delete': GRAPH_VALIDITY,
-    'router-duplicate': r"Ambiguous routing|declare exactly one @Route|A router returns its choice among|more than one @Route|routes? .* twice|already",
-    'operation-drop-start': GRAPH_VALIDITY + r"|This transition starts no operation, cancels no work, and emits no event",
-    'operation-drop-success': GRAPH_VALIDITY,
-    'operation-drop-failure': GRAPH_VALIDITY,
-    'scope-ineligible': GRAPH_VALIDITY,
-    'cancel-unkeyed': r'cancel',
-    'owner-duplicate': r"List each owner once; '\.[^']*' appears twice",
-    'owner-excluded': r"Owner '\.[^']*' is unavailable in \.\w+, which supports",
-    'owner-empty': r'List at least one owner, or omit owners:',
-    'restoration-duplicate': r'Declare at most one @Restoration function in a schema',
-    'restoration-entrance': GRAPH_VALIDITY + r"|List at least one restorable phase in only:",
+    'router-returns-void': r"A router with no edge to choose returns Never and throws a typed rejection.*|A router returns its choice among .*|"
+                           r"The name '[^']*' is not in Unicode Normalization Form C.*",
+    'scope-property': r"Operation metadata must reference declared Scope cases, .*|\w+ must reference declared Scope cases\.|Write each reference .*|"
+                      r"The name '[^']*' is not in Unicode Normalization Form C.*",
+    'phase-alias-other': r"Phase '[^']*' needs a distinct nongeneric struct or enum declared directly inside the schema, .*|The name '[^']*' is not in Unicode Normalization Form C.*|"
+                         r"'[^']*' is not a phase payload type declared in this schema\.|Put this construction in a static function .*",
+    'drop-request-label': r'.*labeled request:.*',
+    'router-duplicate': r"Ambiguous routing from '[^']*' for .*; declare exactly one @Route when multiple edges match\.|.*more than one @Route.*|.*twice.*",
+    'cancel-unkeyed': r'.*\bcancels?:? .*keyed.*|.*cancel.*',
+    'owner-duplicate': r"List each owner once; '\.[^']*' appears twice\.",
+    'owner-excluded': r"Owner '\.[^']*' is unavailable in \.\w+, which supports .*",
+    'owner-empty': r'List at least one owner, or omit owners:.*',
+    'restoration-duplicate': r'Declare at most one @Restoration function in a schema\.',
+    'restoration-entrance': r"List at least one restorable phase in only:\.",
 }
+
+# Swift's own diagnostics of the unsupported form itself, which may accompany the macro's.
+# - "generic parameter 'T' is not used in function signature": an authored generic function's unused parameter
+#   (`generic-function`) is Swift's own warning, an error under `-warnings-as-errors`.
+# - "static stored properties not supported in generic types": inside a generic enclosing type (`nest-generic`)
+#   Swift itself refuses every static stored property the schema's authored members declare.
+DIAG_CONSEQUENCES = (r"generic parameter '[^']*' is not used in function signature|"
+                     r"static stored properties not supported in generic types")
+
+# What an unsupported rewrite must be diagnosed with, the whole message, at the token it changed.
+DIAG_EXPECT = {
+    'async-function': r"Use a synchronous nongeneric static function with .*",
+    'generic-function': r"Use a synchronous nongeneric static function with .*|Take this .* as a concrete type; an opaque 'some' parameter makes the function generic\.",
+    'untyped-throws': r".* must use typed throws\(Failure\), or omit throws\.",
+    'inout-source': r"Use a plain or borrowing phase payload as the source parameter\.|Pass the saved data to a @Restoration function by value, not inout\.",
+    'nest-generic': r"Generic schemas(, including schemas inside a generic enclosing type,)? are unsupported.*",
+}
+
 
 STANDARD = {'Int', 'String', 'Bool', 'Double', 'Never', 'Void', 'Error', 'Int32', 'UInt8', 'Character', 'Sendable',
             'Array', 'Dictionary', 'Optional', 'Result', 'Equatable', 'Hashable'}
@@ -191,6 +231,11 @@ FILE_MARKER = re.compile(r'^// fuzz-file: (\w+\.swift)\n', re.M)
 # The report each domain seed's `fuzzReport()` must print: a consistently wrong choice of edge, driver, handler, or
 # restoration changes it even where every variant agrees with its seed.
 EXPECTED_REPORTS = {
+    'own-public-sendable-helper': '7',
+    'own-swap-drivers': 'left done L,noted 1; right done R,logged 2',
+    'own-deprecated-edge': 'finished',
+    'own-same-basename': '2 3',
+    'own-alias-leaf': 'done',
     'own-report-local': 'idle.left@1; driver L1; delivery busy.worked; idle.right@3; driver R2; delivery busy.worked; '
                         'idle.finish@5; logged left 1,worked 21,right 2,worked 22; rejected left(3); done; idle.right@1; '
                         'driver R4; delivery busy.worked; 2; refused broken',
@@ -223,6 +268,27 @@ nonisolated enum Chain: Sendable {{
 
 func fuzzReport() -> String {{ "\\(Chain.graph.edges.count)" }}
 '''
+
+def chain_owner_seed(mode, owner):
+    """A schema in `mode` selecting `owner` alone, with an operation whose driver its initializer takes."""
+    return f'''import StateMachine
+
+@StateMachine(mode: {mode}, owners: [{owner}])
+nonisolated enum Solo: Sendable {{
+    struct Idle: Sendable {{}}
+    struct Busy: Sendable {{}}
+    @Initial case idle(Idle)
+    case busy(Busy)
+    enum Input: Sendable {{ case go }}
+    @Operation(activeIn: [Busy.self])
+    enum Work {{ typealias Output = Int }}
+    @Transition(on: Input.go, starts: [Work.self])
+    fileprivate static func go(_ source: Idle) -> Change<Busy, Effect.Go> {{ Change(Busy(), effects: [.work]) }}
+    @Transition(onSuccess: Work.self)
+    fileprivate static func done(_ source: Busy, _ value: Int) -> Idle {{ Idle() }}
+}}
+'''
+
 
 EMBEDDED_SEEDS = {
     'initial-factory': '''
@@ -1001,6 +1067,175 @@ func pinnedHook(_ start: Hook.Observed<Hook.Start>) -> (Int) throws(Hook.Problem
 ''',
     'parallel-32': chain_seed(32, 33),
     'parallel-33': chain_seed(33, 34),
+    # A public closure payload beside a lower-access helper named `Sendable`: `@Sendable` is an attribute, not a type
+    # the access check resolves, so the helper's access does not matter.
+    'public-sendable-helper': '''
+import StateMachine
+
+@StateMachine(mode: .shared, owners: [.owned, .local])
+public nonisolated enum Runner: Swift::Sendable {
+    enum Sendable {}
+    public struct Idle: Swift::Sendable { public init() {} }
+    public struct Done: Swift::Sendable { public let value: Swift::Int }
+    @Initial case idle(Idle)
+    @Terminal case done(Done)
+    public enum Input: Swift::Sendable { case run(@Sendable () -> Swift::Int) }
+    @Transition(on: Input.run)
+    fileprivate static func run(_ source: Idle, _ work: @escaping @Sendable () -> Swift::Int) -> Done { Done(value: work()) }
+}
+
+func fuzzReport() -> String { Runner.owned(Runner.Idle()).run { 7 }.withValue { "\\($0.value)" } }
+''',
+    # A managed graph with two drivers of one type and two handlers of one payload: wiring the wrong closure to an
+    # operation or an event changes the pinned report.
+    'swap-drivers': '''
+import StateMachine
+import os
+
+@StateMachine(mode: .shared, owners: [.mainActorHost])
+nonisolated enum Swap: Sendable {
+    struct Idle: Sendable {}
+    struct Busy: Sendable {}
+    struct Done: Sendable {}
+    @Initial case idle(Idle)
+    case busy(Busy)
+    @Terminal case done(Done)
+    enum Input: Sendable { case left, right }
+    @Operation(activeIn: [Busy.self])
+    enum Left { typealias Output = Int }
+    @Operation(activeIn: [Busy.self])
+    enum Right { typealias Output = Int }
+    @Event
+    enum Noted { typealias Payload = Int }
+    @Event
+    enum Logged { typealias Payload = Int }
+    @Transition(on: Input.left, starts: [Left.self], emits: [Noted.self])
+    fileprivate static func goLeft(_ source: Idle) -> Change<Busy, Effect.GoLeft> { Change(Busy(), effects: [.left, .noted(1)]) }
+    @Transition(on: Input.right, starts: [Right.self], emits: [Logged.self])
+    fileprivate static func goRight(_ source: Idle) -> Change<Busy, Effect.GoRight> { Change(Busy(), effects: [.right, .logged(2)]) }
+    @Transition(onSuccess: Left.self)
+    fileprivate static func leftDone(_ source: Busy, _ value: Int) -> Done { Done() }
+    @Transition(onSuccess: Right.self)
+    fileprivate static func rightDone(_ source: Busy, _ value: Int) -> Done { Done() }
+}
+
+final class FuzzLog: Sendable {
+    let lines = OSAllocatedUnfairLock<[String]>(initialState: [])
+    func add(_ line: String) { lines.withLock { $0.append(line) } }
+}
+
+@MainActor func fuzzSwapRun(_ input: Swap.Input) async -> String {
+    let log = FuzzLog()
+    let host = Swap.MainActorHost(
+        Swap.Idle(),
+        leftDriver: {
+            log.add("L")
+            return 10
+        },
+        rightDriver: {
+            log.add("R")
+            return 20
+        },
+        onNoted: { log.add("noted \\($0)") },
+        onLogged: { log.add("logged \\($0)") }
+    )
+    _ = try? host.send(input)
+    for _ in 0 ..< 10_000 {
+        if case .done = host.snapshot() { break }
+        await Task.yield()
+    }
+    let done = if case .done = host.snapshot() { "done" } else { "stuck" }
+    return "\\(input) \\(done) \\(log.lines.withLock { $0.sorted() }.joined(separator: ","))"
+}
+
+@MainActor func fuzzReportAsync() async -> String { "\\(await fuzzSwapRun(.left)); \\(await fuzzSwapRun(.right))" }
+''',
+    # One managed owner selected alone, each with an operation, so its external use stands on its own.
+    'single-actor-host': chain_owner_seed('.shared', '.actorHost'),
+    'single-main-actor-host': chain_owner_seed('.shared', '.mainActorHost'),
+    'single-isolated-host': chain_owner_seed('.isolated', '.isolatedHost'),
+    # A deprecated authored function: generated public members named for it repeat the deprecation, and the
+    # expansion stays warning-clean.
+    'deprecated-edge': '''
+import StateMachine
+
+@StateMachine(mode: .shared, owners: [.owned, .local])
+public nonisolated enum Renamed: Swift::Sendable {
+    public struct Idle: Swift::Sendable { public init() {} }
+    public struct Done: Swift::Sendable {}
+    @Initial case idle(Idle)
+    @Terminal case done(Done)
+    public enum Input: Swift::Sendable { case go, finish }
+    @available(*, deprecated, renamed: "finish")
+    @Transition(on: Input.go)
+    fileprivate static func go(_ source: Idle) -> Done { Done() }
+    @Transition(on: Input.finish)
+    fileprivate static func finish(_ source: Idle) -> Done { Done() }
+}
+
+func fuzzReport() -> String { Renamed.owned(Renamed.Idle()).finish().withValue { _ in "finished" } }
+''',
+    # Two schemas of one basename in different enclosing types, one in another file of the module.
+    'same-basename': '''
+import StateMachine
+
+enum Left {}
+enum Right {}
+
+extension Left {
+    @StateMachine(mode: .shared, owners: [.owned])
+    nonisolated enum Flow: Sendable {
+        struct Idle: Sendable {}
+        struct Done: Sendable {}
+        @Initial case idle(Idle)
+        @Terminal case done(Done)
+        enum Input: Sendable { case go }
+        @Transition(on: Input.go)
+        fileprivate static func go(_ source: Idle) -> Done { Done() }
+    }
+}
+
+func fuzzReport() -> String { "\\(Left.Flow.graph.phases.count) \\(Right.Flow.graph.phases.count)" }
+// fuzz-file: Other.swift
+import StateMachine
+
+extension Right {
+    @StateMachine(mode: .shared, owners: [.owned])
+    nonisolated enum Flow: Sendable {
+        struct Start: Sendable {}
+        struct Middle: Sendable {}
+        struct End: Sendable {}
+        @Initial case start(Start)
+        case middle(Middle)
+        @Terminal case end(End)
+        enum Input: Sendable { case go }
+        @Transition(on: Input.go)
+        fileprivate static func go(_ source: Start) -> Middle { Middle() }
+        @Transition(on: Input.go)
+        fileprivate static func on(_ source: Middle) -> End { End() }
+    }
+}
+''',
+    # A public schema whose payload names a public leaf through a public namespace alias; `leaf-access` lowers the
+    # leaf's access, which the access check must refuse through the alias as it does through the type's own name.
+    'alias-leaf': '''
+import StateMachine
+
+@StateMachine(mode: .shared, owners: [.owned, .local])
+public nonisolated enum Leaf: Swift::Sendable {
+    public enum Box { public struct Hidden: Swift::Sendable { public init() {} } }
+    public typealias N = Box
+    public struct Idle: Swift::Sendable { public init() {} }
+    public struct Done: Swift::Sendable {}
+    @Initial case idle(Idle)
+    @Terminal case done(Done)
+    public enum Input: Swift::Sendable { case use(N.Hidden) }
+    @Transition(on: Input.use)
+    fileprivate static func use(_ source: Idle, _ value: N.Hidden) -> Done { Done() }
+}
+
+func fuzzReport() -> String { Leaf.owned(Leaf.Idle()).use(Leaf.Box.Hidden()).withValue { _ in "done" } }
+''',
 }
 
 # A seed whose name is in this set has its own fuzzReport; every seed's graphs are printed.
@@ -1058,9 +1293,37 @@ def scan_type_end(text, start, stops):
 
 
 def code_mask(text):
-    """True for each character outside comments and string literals."""
+    """True for each character outside comments and string literals. Block comments nest, as Swift's do, and a raw
+    string (`#"…"#`, multiline or not) ends only at its own delimiter."""
     mask = [True] * len(text)
-    for match in re.finditer(r'//[^\n]*|/\*.*?\*/|"(?:[^"\\\n]|\\\((?:[^()]|\([^()]*\))*\)|\\.)*"', text, re.S):
+    index = 0
+    while True:
+        opening = text.find('/*', index)
+        if opening < 0:
+            break
+        # Only a comment opener in code: not inside a line comment or a string that starts earlier on its line.
+        line_start = text.rfind('\n', 0, opening) + 1
+        if '//' in text[line_start:opening] or text[line_start:opening].count('"') % 2:
+            index = opening + 2
+            continue
+        depth, cursor = 1, opening + 2
+        while cursor < len(text) and depth:
+            if text.startswith('/*', cursor):
+                depth, cursor = depth + 1, cursor + 2
+            elif text.startswith('*/', cursor):
+                depth, cursor = depth - 1, cursor + 2
+            else:
+                cursor += 1
+        for position in range(opening, cursor):
+            mask[position] = False
+        index = cursor
+    for raw in re.finditer(r'(#+)("""|")(.*?)\2\1', text, re.S):
+        if mask[raw.start()]:
+            for position in range(raw.start(), raw.end()):
+                mask[position] = False
+    for match in re.finditer(r'//[^\n]*|"""(?:.|\n)*?"""|"(?:[^"\\\n]|\\\((?:[^()]|\([^()]*\))*\)|\\.)*"', text):
+        if not mask[match.start()]:
+            continue
         for index in range(match.start(), match.end()):
             mask[index] = False
         # Code interpolated into a string literal is code.
@@ -1384,8 +1647,16 @@ def alias_rewrite(text, make, predicate=lambda s: True, phases=False):
             if namespace.end() <= site.start < namespace.end() + len(body):
                 members = scope_members(text, schema, namespace.group(1)) if schema else set()
                 qualified = qualify_in(site.text, members, namespace.group(1))
-                if qualified != site.text:
+                # A `make` that already spelled the site through its namespace (`alias-file`) needs no second pass.
+                already = f'{schema}.{qualified}' in declaration or (scope == 'schema' and qualified in declaration)
+                if qualified != site.text and not already:
                     declaration = declaration.replace(site.text, qualified if scope == 'schema' else f'{schema}.{qualified}')
+        # A helper that a public or package schema's spelling names needs that access too, or the rewrite is no
+        # longer the same program.
+        access = re.search(r'\b(public|package)\s+(?:\w+\s+)*enum\s+`?' + re.escape(schema) + r'\b', text) if schema else None
+        if access:
+            declaration = re.sub(r'(^\s*|\{\s*|;\s*)(typealias|enum|struct)\b', lambda m: f'{m.group(1)}{access.group(1)} {m.group(2)}',
+                                 declaration, flags=re.M)
         new = text[:site.start] + spelling + text[site.end:]
         new = insert_in_schema(new, declaration, site.start) if scope == 'schema' else insert_at_file_scope(new, declaration)
         if new:
@@ -1591,7 +1862,9 @@ def member_blocks(text):
         top = line.startswith('    ') and not line.startswith('     ')
         stripped = line.strip()
         if top and (stripped.startswith((')', '}', ']')) or stripped.startswith('->')):
-            current.append(line)
+            # A schema nested in another declaration has no member at this indentation.
+            if current is not None:
+                current.append(line)
         elif top and (stripped.startswith('//') or re.fullmatch(r'@[\w.]+(\(.*\))?', stripped)):
             pending.append(line)
         elif top and re.match(r'@[\w.]+\(', stripped) and stripped.count('(') > stripped.count(')'):
@@ -1980,7 +2253,11 @@ def _(text, rng):
 @rewrite('phase-alias-other', 'break', 'whose distinct struct or enum is declared directly inside the schema')
 def _(text, rng):
     results = []
-    payloads = [m.group(2) for m in re.finditer(r'^(    (?:@[\w.]+\s+)*case\s+\w+\()(\w+)', text, re.M)]
+    # A phase case's whole payload, a plain name, with its default: the default goes with the payload, so the
+    # program stays valid Swift and only the graph is refused.
+    phase_case = r'^(    (?:@[\w.]+\s+)*case\s+\w+\()([A-Za-z_]\w*)(\s*=\s*[\w.]+(?:\([^()\n]*\))?)?(?=\))'
+    payloads = [m.group(2) for m in re.finditer(phase_case, text, re.M)]
+    access = re.search(r'^\s*(public|package)\s+(?:\w+\s+)*enum\s+\w+', text, re.M)
     for number, name in enumerate(payloads):
         for flavor in ('nfd', 'fresh'):
             base, alias = text, 'FuzzPhase'
@@ -1988,9 +2265,9 @@ def _(text, rng):
                 # The struct spelled with a precomposed letter; the alias the case names with a combining mark.
                 base = rename(text, name, name + '\u00e9')
                 alias = name + 'e\u0301'
-            line = list(re.finditer(r'^(    (?:@[\w.]+\s+)*case\s+\w+\()(\w+)', base, re.M))[number]
-            new = base[:line.start(2)] + alias + base[line.end(2):]
-            new = insert_in_schema(new, f'typealias {alias} = Swift.Int')
+            line = list(re.finditer(phase_case, base, re.M))[number]
+            new = base[:line.start(2)] + alias + base[line.end(3) if line.group(3) else line.end(2):]
+            new = insert_in_schema(new, f'{access.group(1) + " " if access else ""}typealias {alias} = Swift.Int')
             results.append((new, dict(site=f'case payload {name} -> alias {alias!r} of Int', role='value')))
     return results[:6]
 
@@ -2007,11 +2284,18 @@ def _(text, rng):
         line = text[text.rfind('\n', 0, match.start()) + 1:text.find('\n', match.start())]
         if '@Initial' in line:
             continue
-        results.append((text[:match.start()] + text[match.end():], dict(site='remove @Terminal', role='value')))
-    for match in re.finditer(r'^    @Initial\s+case', text, re.M):
+        phase = re.search(r'case\s+`?(\w+)', line)
+        refusal = (rf"Phase '{re.escape(phase.group(1))}' has no outgoing transitions; mark it '@Terminal' or declare a transition from it\."
+                   if phase else None)
+        results.append((text[:match.start()] + text[match.end():], dict(site='remove @Terminal', role='value', refusal=refusal)))
+    for match in re.finditer(r'^    @Initial\s+case(?=\s+`?(\w+))', text, re.M):
         if '@Terminal' in text[match.start():text.find('\n', match.start())]:
             continue
-        results.append((text[:match.start()] + '    @Initial @Terminal case' + text[match.end():], dict(site='add @Terminal to initial', role='value')))
+        refusal = (rf"Terminal phase '{re.escape(match.group(1))}' cannot have an outgoing (transition|router) '[^']*'; "
+                   r"remove '@Terminal', or remove the (transition|router)\.")
+        results.append((text[:match.start()] + '    @Initial @Terminal case' + text[match.end():],
+                        dict(site='add @Terminal to initial', role='value', refusal=refusal)))
+
     return results
 
 
@@ -2027,7 +2311,9 @@ def _(text, rng):
         modifiers = re.search(MODIFIERS + r'$', before)
         head = before[:modifiers.start()] if modifiers and modifiers.group(0) else before
         for spelling in ('+@escaping ', '@escaping ', 'borrowing ', 'borrowing @escaping ', 'sending ', '__owned ', '__shared ', 'sending @escaping ', 'consuming @escaping '):
-            # A leading + keeps the parameter's own modifiers and adds the rest.
+            # A leading + keeps the parameter's own modifiers and adds the rest, unless they already hold it.
+            if spelling.startswith('+') and modifiers and spelling[1:].strip() in modifiers.group(0):
+                continue
             new = (before + spelling[1:] if spelling.startswith('+') else head + spelling) + text[site.start:]
             results.append((new, dict(site=f'{spelling.strip()} {site.text}', role='value')))
     return results
@@ -2395,7 +2681,10 @@ def _(text, rng):
             spelled = re.sub(r'(?<![\w.`])([A-Za-z_]\w*)', lambda m: m.group(1) if m.group(1) in members or m.group(1) in STANDARD
                              or m.group(1) not in outer or inside[:m.start()].rstrip().endswith('.') else f'{schema}.{m.group(1)}', inside)
             path = schema_paths(text).get(schema, schema)
-            new = append_to_module(new, f'extension {path}.Input {{\n    typealias FuzzMoved = {spelled}\n}}')
+            # A public or package schema's payload names the alias, which needs that access too.
+            access = re.search(r'\b(public|package)\s+(?:\w+\s+)*enum\s+`?' + re.escape(schema) + r'\b', text)
+            prefix = f'{access.group(1)} ' if access else ''
+            new = append_to_module(new, f'extension {path}.Input {{\n    {prefix}typealias FuzzMoved = {spelled}\n}}')
             results.append((new, dict(site=f'input {case}({payload}) through an Input extension', role='value')))
     return results
 
@@ -2652,7 +2941,10 @@ def _(text, rng):
         brace = text.find('{', function['after'])
         body = body_of(text, re.compile(r'\{').match(text, brace))
         new = text[:start] + other + text[end:brace] + '{ fatalError() }' + text[brace + len(body) + 2:]
-        results.append((new, dict(site=f'{function["name"]} into {other} instead of {destination}', role='value')))
+        lost = phase_of_type(text, destination)
+        refusal = (rf"Phase '{re.escape(lost)}' is unreachable from the initial phase '[^']*'( or a phase @Restoration can restore)?; "
+                   r"declare a transition into it, or remove it\." if lost else None)
+        results.append((new, dict(site=f'{function["name"]} into {other} instead of {destination}', role='value', refusal=refusal)))
     return results
 
 
@@ -2670,8 +2962,19 @@ def route_blocks(text):
 def _(text, rng):
     """The only router for two matching candidates removed."""
     # Only a router that chooses among candidates; one that only rejects leaves a valid graph when removed.
-    return [(text[:start] + text[end + 1:], dict(site=f'router {name} removed', role='value'))
-            for start, end, name in route_blocks(text) if re.search(r'->\s*(Self\.)?Route\.', text[start:end].split('{')[0])]
+    results = []
+    for start, end, name in route_blocks(text):
+        head = text[start:end].split('{')[0]
+        if not re.search(r'->\s*(Self\.)?Route\.', head):
+            continue
+        source = re.search(r'\(\s*_\s+\w+:\s*(?:borrowing\s+|consuming\s+)?(\w+)', head)
+        phase = phase_of_type(text, source.group(1)) if source else None
+        # The finding names the source by its payload type or its case.
+        names = '|'.join(re.escape(n) for n in ([source.group(1)] if source else []) + ([phase] if phase else []))
+        refusal = (rf"Ambiguous routing from '({names})' for .*; declare exactly one @Route when multiple edges match\."
+                   if names else None)
+        results.append((text[:start] + text[end + 1:], dict(site=f'router {name} removed', role='value', refusal=refusal)))
+    return results
 
 
 @rewrite('router-duplicate', 'break', 'declare exactly one @Route when multiple edges match')
@@ -2708,14 +3011,21 @@ def _(text, rng):
             match = starts[0]
             items = [i.strip() for i in match.group(1).split(',') if i.strip() and i.strip() != f'{operation}.self']
             new = text[:match.start()] + (f'starts: [{", ".join(items)}]' if items else 'starts: []') + text[match.end():]
-            results.append((new, dict(site=f'start of {operation} removed', role='value', breaking='operation-drop-start')))
+            refusal = (rf"Operation '{re.escape(operation)}' is never started: no transition lists it in starts:; start it from a transition, or remove it\.|"
+                       r"This transition starts no operation, cancels no work, and emits no event.*")
+            results.append((new, dict(site=f'start of {operation} removed', role='value', breaking='operation-drop-start', refusal=refusal)))
         for outcome in ('Success', 'Failure'):
             handlers = [f for f in functions if re.search(rf'@(?:StateMachine\.)?(?:Transition|Route)\(on{outcome}:\s*{operation}\.self', text[f['func_at'] - 200:f['func_at']].split('\n\n')[-1])]
             handlers = [f for f in handlers if re.search(rf'on{outcome}:\s*{operation}\.self', text[text.rfind(chr(10) + '    @', 0, f['func_at']):f['func_at']])]
             if len(handlers) == 1:
                 start, end = function_block(text, handlers[0])
+                kind = 'Output' if outcome == 'Success' else 'Failure'
+                # Dropping a phase's only completion edge can leave the phase without an exit instead.
+                refusal = (rf"Operation '{re.escape(operation)}' can start but (never complete: .*|its {outcome.lower()} is never accepted: .*)|"
+                           r"Phase '[^']*' has no outgoing transitions; mark it '@Terminal' or declare a transition from it\.|"
+                           rf"Operation '{re.escape(operation)}' has no on{outcome}: edge or router, so the macro reads its {kind} as Never, .*")
                 results.append((text[:start] + text[end + 1:], dict(site=f'on{outcome} of {operation} removed', role='value',
-                                                                    breaking=f'operation-drop-{outcome.lower()}')))
+                                                                    breaking=f'operation-drop-{outcome.lower()}', refusal=refusal)))
     return results
 
 
@@ -2740,7 +3050,9 @@ def _(text, rng):
                     continue
                 kept = [i for i in items if i != f'{destination}.self']
                 new = text[:active.start(1)] + ', '.join(kept) + text[active.end(1):]
-                results.append((new, dict(site=f'{scope} not active in {destination}', role='value')))
+                refusal = (rf"Started operation '{re.escape(operation.group(2))}' and every required scope must be eligible in destination '[^']*'\.|"
+                           rf"Operation '{re.escape(operation.group(2))}' can never run: .*")
+                results.append((new, dict(site=f'{scope} not active in {destination}', role='value', refusal=refusal)))
     return results
 
 
@@ -2795,7 +3107,213 @@ def _(text, rng):
     return results
 
 
+# --- Boundaries the older families leave out ----------------------------------------------------------------------
+
+ATTRIBUTE_HEAD = re.compile(r'@(?:StateMachine(?:::|\.))?(StateMachine|Operation|Transition|Route|Active|Restoration|Event)\(')
+
+
+@rewrite('label-backtick', 'eq', 'an argument label may be escaped with backticks, nested ones included')
+def _(text, rng):
+    """One argument label inside a macro attribute, at any depth (`.parallel(`limit`: 2)` too), escaped; the callee,
+    the argument, and the declaration stay as they are. Swift may warn that the escape is redundant, and a consumer
+    need not make that warning an error, so the case compiles without `-warnings-as-errors`."""
+    results = []
+    mask = code_mask(text)
+    nested = []
+    for head in ATTRIBUTE_HEAD.finditer(text):
+        if not mask[head.start()]:
+            continue
+        depth, index = 1, head.end()
+        while index < len(text) and depth:
+            depth += {'(': 1, ')': -1}.get(text[index], 0)
+            index += 1
+        inside = text[head.end():index - 1]
+        for label in re.finditer(r'(?<![\w`.])([a-z]\w*)\s*:(?!:)', inside):
+            start = head.end() + label.start(1)
+            end = head.end() + label.end(1)
+            depth = inside[:label.start(1)].count('(') - inside[:label.start(1)].count(')')
+            (nested if depth > 0 else results).append((text[:start] + f'`{label.group(1)}`' + text[end:], dict(
+                site=f'`{label.group(1)}:` in @{head.group(1)}', role='value', flags=['-no-warnings-as-errors'])))
+    # Nested labels first, so a spread of sites always holds one.
+    return nested + results
+
+
+@rewrite('schema-named-value', 'eq', 'a static property named like the schema changes nothing')
+def _(text, rng):
+    """A static property named like the schema, declared directly inside it or in an extension of it: a value cannot
+    shadow the schema's name where a type is expected, so both compile alike."""
+    results = []
+    for schema in schema_names(text):
+        opened, closed = schema_opening(text, schema)
+        if opened is None:
+            continue
+        member = f'    static var {schema}: Swift::Int {{ 0 }}'
+        added = [rf'\.{re.escape(schema)}\.{re.escape(schema)}\b', rf'\b{re.escape(schema)}\.getter : Swift\.Int']
+        results.append((text[:opened] + '\n' + member + text[opened:], dict(site=f'static var {schema} inside {schema}', role='value', added=added)))
+        path = schema_paths(text).get(schema, schema)
+        if 'func fuzzLocalSchema()' not in text:
+            results.append((append_to_module(text, f'extension {path} {{ static var {schema}: Swift::Int {{ 0 }} }}'),
+                            dict(site=f'static var {schema} in an extension', role='value', added=added)))
+    return results
+
+
+@rewrite('leaf-access', 'safe', 'Each declaration of the schema that one of those spellings names needs that access too')
+def _(text, rng):
+    """A public leaf named through a public namespace alias loses its access, spelled through the alias and through
+    its own type's name: the macro must refuse both alike, at the leaf."""
+    results = []
+    for alias in re.finditer(r'^\s*public typealias (\w+) = (\w+)$', text, re.M):
+        name, target = alias.group(1), alias.group(2)
+        leaf = re.search(r'public struct (\w+)', text[text.find(f'enum {target}'):])
+        if not leaf:
+            continue
+        lowered = text.replace(f'public struct {leaf.group(1)}', f'struct {leaf.group(1)}', 1)
+        results.append((lowered, dict(site=f'{name}.{leaf.group(1)} internal', role='value', expect='schema-access')))
+        direct = re.sub(r'\b' + name + r'\.' + leaf.group(1) + r'\b', f'{target}.{leaf.group(1)}', lowered)
+        results.append((direct, dict(site=f'{target}.{leaf.group(1)} internal', role='value', expect='schema-access')))
+    return results
+
+
+@rewrite('schema-named-type', 'safe', 'The schema name is reserved or shadowed by a direct member')
+def _(text, rng):
+    """The negative control of `schema-named-value`: a nested type named like the schema shadows it where a type is
+    expected, which the macro refuses at that type's name."""
+    results = []
+    for schema in schema_names(text):
+        opened, _ = schema_opening(text, schema)
+        if opened is not None:
+            results.append((text[:opened] + f'\n    struct {schema}: Swift::Sendable {{}}' + text[opened:],
+                            dict(site=f'struct {schema} inside {schema}', role='value', expect='reserved-names')))
+    return results
+
+
+@rewrite('rebind-alias', 'valid', 'what an unchanged spelling names follows its declaration')
+def _(text, rng):
+    """An alias the schema declares keeps its name and changes what it names (`Swift::Int` to `Swift::Int64`), so
+    every exported spelling that uses it is unchanged and names another type: the spelling probes must see it."""
+    results = []
+    for alias in re.finditer(r'\btypealias\s+(\w+)\s*=\s*Swift::(Int|String)\b', text):
+        # An alias an Input case carries would change the payload its edge declares; those stay.
+        opened = re.search(r'enum\s+Input\b[^{]*\{', text)
+        if opened and re.search(r'\b' + re.escape(alias.group(1)) + r'\b', body_of(text, opened)):
+            continue
+        other = {'Int': 'Swift::Int64', 'String': 'Swift::Substring'}[alias.group(2)]
+        results.append((text[:alias.start(2) - 7] + other + text[alias.end(2):], dict(site=f'{alias.group(1)} = {other}', role='value')))
+    return results
+
+
+@rewrite('schema-to-file', 'eq', 'a schema may be declared in any file of its module')
+def _(text, rng):
+    """The whole schema moved into another source file of its module."""
+    results = []
+    if FILE_MARKER.search(text) or 'func fuzzLocalSchema()' in text:
+        return results
+    module, client = (text.split(CLIENT_MARKER, 1) + [None])[:2] if CLIENT_MARKER in text else (text, None)
+    for match in re.finditer(r'^(?:@available\([^)]*\)\s*\n)?@StateMachine\(', module, re.M):
+        start = match.start()
+        opened = module.find('{', start)
+        end = opened + len(body_of(module, re.compile(r'\{').match(module, opened))) + 2
+        moved = module[start:end]
+        rest = module[:start] + module[end:]
+        new = rest.rstrip('\n') + '\n// fuzz-file: Other.swift\nimport StateMachine\n\n' + moved + '\n'
+        results.append((new + (CLIENT_MARKER + client if client is not None else ''), dict(site='schema in Other.swift', role='value')))
+    return results
+
+
+@rewrite('comment-decoy', 'eq', 'comments and string literals hold no declarations')
+def _(text, rng):
+    """Declaration-like text inside a nested block comment, a raw string, and a multiline string."""
+    decoys = [
+        '/* outer /* inner */ @StateMachine(mode: .shared) enum Decoy {} */',
+        'let fuzzDecoyRaw = #"@Transition(on: Input.go) enum Fake { case x(Int) } "# + "\\"#"',
+        'let fuzzDecoyLines = """\n@Operation(activeIn: [Idle.self])\nenum Fake {}\n"""',
+    ]
+    return [(append_to_module(text, decoy), dict(site=f'decoy {index}', role='value', added=[r'fuzzDecoy']))
+            for index, decoy in enumerate(decoys)]
+
+
+@rewrite('nfc-body', 'valid', 'The macro skips opaque function and closure bodies')
+def _(text, rng):
+    """A decomposed name used only inside an authored function's body, which the macro never reads."""
+    results = []
+    for function in authored_functions_at(text)[:2]:
+        brace = text.find('{', function['after'])
+        # A single-expression body returns its expression; a statement before it would leave it unused.
+        if brace < 0 or 'return' not in body_of(text, re.compile(r'\{').match(text, brace)):
+            continue
+        name = 'caféLocal'
+        results.append((text[:brace + 1] + f' let {name} = 0; _ = {name};' + text[brace + 1:],
+                        dict(site=f'decomposed local in {function["name"]}', role='value')))
+    return results
+
+
+@rewrite('nfc-read', 'safe', 'The macro therefore refuses a name that is not in that form anywhere it reads one')
+def _(text, rng):
+    """The same decomposed name moved where the macro reads it: an Input case."""
+    results = []
+    opened = re.search(r'enum Input: (?:Swift::)?Sendable \{ case ', text)
+    if opened:
+        results.append((text[:opened.end()] + 'caféCase, ' + text[opened.end():],
+                        dict(site='decomposed Input case', role='value', expect='nfc-refusal')))
+    return results
+
+
+@rewrite('parameter-restriction', 'break', 'Use a synchronous nongeneric static function with nonvariadic parameters and no defaults')
+def _(text, rng):
+    """A defaulted or variadic extra parameter on an authored transition, which the macro refuses at that parameter."""
+    results = []
+    for function in authored_functions_at(text)[:2]:
+        if function['attribute'] != 'Transition':
+            continue
+        close = text.rfind(')', function['func_at'], function['after'])
+        if close < 0:
+            continue
+        for extra in (', _ fuzzCount: Swift::Int = 1', ', _ fuzzRest: Swift::Int...'):
+            results.append((text[:close] + extra + text[close:], dict(
+                site=f'{extra.strip(", ")} on {function["name"]}', role='value',
+                refusal=r"Use a synchronous nongeneric static function with (unlabeled, )?nonvariadic parameters and no defaults.*")))
+    return results
+
+
+@rewrite('duplicate-marker', 'break', 'Mark exactly one phase case with @Initial')
+def _(text, rng):
+    """A second `@Initial`, or a dependency repeated in `requires:`."""
+    results = []
+    for case in re.finditer(r'^    (@Terminal )?case\s+`?\w+`?\(', text, re.M):
+        if '@Initial' in text[case.start():text.find('\n', case.start())]:
+            continue
+        results.append((text[:case.start()] + '    @Initial ' + text[case.start() + 4:], dict(
+            site='a second @Initial', role='value', refusal=r'Mark exactly one phase case with @Initial\.')))
+        break
+    for requires in re.finditer(r'requires:\s*\[(Scope\.\w+)', text):
+        results.append((text[:requires.end(1)] + ', ' + requires.group(1) + text[requires.end(1):], dict(
+            site='a repeated dependency', role='value', refusal=r'Remove duplicate references from this metadata list\.')))
+    return results
+
+
+@rewrite('numeric-valid', 'valid', 'admission: .parallel(limit: N) with N of at least 1')
+def _(text, rng):
+    """`.parallel(limit:)` at its lowest valid value."""
+    # A chain of phases that only enough parallel executions reach needs its limit; it is left alone.
+    if 'enum Chain' in text:
+        return []
+    return [(text[:m.start(1)] + '1' + text[m.end(1):], dict(site='limit 1', role='value', behaviour=False))
+            for m in re.finditer(r'\.parallel\(limit:\s*([0-9_]+)\)', text)]
+
+
+@rewrite('numeric-invalid', 'break', 'admission: .parallel(limit: N) with N of at least 1')
+def _(text, rng):
+    """`.parallel(limit:)` past its validity boundaries: zero spelled in hexadecimal, and a literal one above `Int.max`."""
+    results = []
+    for match in re.finditer(r'\.parallel\(limit:\s*([0-9_]+)\)', text):
+        for value in ('0x0', '9223372036854775808'):
+            results.append((text[:match.start(1)] + value + text[match.end(1):], dict(
+                site=f'limit {value}', role='value', refusal=r'Use \.parallel\(limit: N\).*|Admission must be .*')))
+    return results
+
+
 REWRITE_BY_NAME = {r.name: r for r in REWRITES}
+
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Compiling one case.
@@ -2808,14 +3326,46 @@ GRAPH_SPELLED_FIELDS = {'phases': ('payload',), 'inputs': ('payload',), 'operati
 
 
 def schema_paths(text):
-    """Each schema's name as file-scope code spells it: `FuzzOuter.Flow` for one a rewrite nested, none for one declared
-    in a function body."""
-    paths = {}
-    for match in re.finditer(r'(?:// fuzz-outer: (\S+)\n[^\n]*\n)?(?:@available\([^)]*\)\s*\n)?@StateMachine\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?(\w+)`?', text):
-        paths[match.group(2)] = f'{match.group(1)}.{match.group(2)}' if match.group(1) else match.group(2)
+    """Each schema's name as file-scope code spells it: `FuzzOuter.Flow` for one a rewrite nested, `Left.Flow` for one
+    declared in an extension of an enclosing type, none for one declared in a function body."""
+    return {path.split('.')[-1]: path for path in schema_path_list(text)}
+
+
+def schema_path_list(text):
+    """Every schema's path, in declaration order, two schemas of one basename in different enclosing types kept apart."""
+    paths = []
     if 'func fuzzLocalSchema()' in text:
-        return {}
+        return paths
+    mask = code_mask(text)
+    for match in re.finditer(r'(?:// fuzz-outer: (\S+)\n[^\n]*\n)?(?:@available\([^)]*\)\s*\n)?(@StateMachine)\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?(\w+)`?', text):
+        if not mask[match.start(2)]:
+            continue
+        if match.group(1):
+            paths.append(f'{match.group(1)}.{match.group(3)}')
+            continue
+        # The enclosing types the declaration stands in, outermost first, from the braces open before it.
+        enclosing, stack = [], []
+        for opener in re.finditer(r'\b(?:extension|enum|struct|class|actor)\s+(`?[\w.]+`?)[^{;]*\{|[{}]', text[:match.start()]):
+            if not mask[opener.start()]:
+                continue
+            token = opener.group(0)
+            if token == '{':
+                stack.append(None)
+            elif token == '}':
+                if stack:
+                    stack.pop()
+            else:
+                stack.append(opener.group(1).strip('`'))
+        enclosing = [s for s in stack if s]
+        paths.append('.'.join(enclosing + [match.group(3)]))
+
     return paths
+
+
+def module_text(text):
+    """Every source file of the schema's module, joined, without the client section."""
+    files, _ = split_case(text)
+    return '\n'.join(files.values())
 
 
 def split_case(text):
@@ -2868,9 +3418,10 @@ def availability_guard(text):
 HARNESS_MARKER = '// fuzz-harness: the graphs of the schemas this file declares\n'
 
 
-def graph_accessor(text):
-    """A function the schema's own file declares, so it reaches a schema of any access, returning every graph."""
-    graphs = ', '.join(f'{schema}.graph' for schema in schema_paths(text).values())
+def graph_accessor(text, everywhere=None):
+    """A function the schema's own file declares, so it reaches a schema of any access, returning every graph: of the
+    schemas every file of the module declares (`everywhere`), not only this file's."""
+    graphs = ', '.join(f'{schema}.graph' for schema in schema_path_list(everywhere if everywhere is not None else text))
     guard = availability_guard(text)
     body = f'if #available({guard}) {{ return [{graphs}] }}; return []' if guard and graphs else f'[{graphs}]'
     return '\n' + HARNESS_MARKER + f'func fuzzGraphs() -> [StateMachine::StateMachineGraph] {{ {body} }}\n'
@@ -2881,11 +3432,16 @@ def harness(text):
     body = ['        for graph in Fz::fuzzGraphs() { fuzzPrint(graph) }']
     if re.search(r'^func fuzzReport\(\)', text, re.M):
         body.append('        Swift::print("report:", Fz::fuzzReport())')
+    # A report that waits for a managed owner's drivers.
+    asynchronous = re.search(r'^@MainActor func fuzzReportAsync\(\)', text, re.M) is not None
+    if asynchronous:
+        body.append('        Swift::print("report:", await Fz::fuzzReportAsync())')
     guard = availability_guard(text)
     if guard:
         body = [f'        if #available({guard}) {{'] + ['    ' + line for line in body] + ['        }']
     return '\n'.join(['@testable import Fz', 'import StateMachine', 'import Foundation', '',
-                      '@main struct FuzzMain {', '    @MainActor static func main() {'] + body + ['    }', '}', '',
+                      '@main struct FuzzMain {', f"    @MainActor static func main(){' async' if asynchronous else ''} {{"] + body + ['    }', '}', '',
+
                       'func fuzzPrint(_ graph: StateMachine::StateMachineGraph) {',
                       '    let encoder = Foundation::JSONEncoder()',
                       '    encoder.outputFormatting = [.sortedKeys]',
@@ -2915,11 +3471,14 @@ class Toolchain:
         command = self.base()[:1] + sandbox + self.base()[1:] + [
             '-load-plugin-executable', f'{self.plugin}#StateMachineMacros', '-Xfrontend', '-dump-macro-expansions']
         for flag in flags:
-            # A flag replaces the default it overrides: `-default-isolation=MainActor`, `-O`.
+            # A flag replaces the default it overrides: `-default-isolation=MainActor`, `-O`, `-no-warnings-as-errors`.
             if flag.startswith('-default-isolation='):
                 command[command.index('-default-isolation') + 1] = flag.split('=', 1)[1]
             elif flag == '-O':
                 command[command.index('-Onone')] = '-O'
+            elif flag == '-no-warnings-as-errors':
+                command.remove('-warnings-as-errors')
+
             else:
                 command.append(flag)
         sources = [str(s) for s in (source if isinstance(source, (list, tuple)) else [source])]
@@ -3007,6 +3566,10 @@ def demangled_fingerprint(objects, authored):
                       r'FuzzMain|fuzzPrint|fuzzReport|fuzzClient|fuzzGraphs|fuzzHelper|FuzzUnrelated|implicit closure|globalinit|one-time initialization|'
                       r'unsafeMutableAddressor|default argument|variable initialization expression|__derived|hashValue|hash\(into')
     for line in demangled:
+        # A private declaration's context carries its file's discriminator, `(engine in _8D3A…)`, a hash of the file
+        # name: it goes first, so the same member reads alike in any file and a discriminator that happens to
+        # start with a letter is not taken for an underscored name.
+        line = re.sub(r'\((\S+) in _[0-9A-F]+\)', r'\1', line)
         # Underscored members are the expansion's private checks and witnesses, which follow how a spelling reads
         # (a confirmed `Never` needs no check); the interface is everything else.
         if skip.search(line) or re.search(r'(?<![\w])_[A-Za-z]\w*', line):
@@ -3056,7 +3619,8 @@ def classify_located(text, spans=(), case_file='Case.swift'):
     errors = []
     for path, line, column, message in ERROR.findall(text):
         macro = '(from macro' in message
-        message = re.sub(r'\s*\(from macro \'\w+\'\)', '', message).strip()
+        # Without the macro's suffix and the compiler's diagnostic group (`[#NoUsage]`).
+        message = re.sub(r'\s*\[#\w+(?:::\w+)*\]$', '', re.sub(r'\s*\(from macro \'\w+\'\)', '', message).strip())
         name = os.path.basename(path)
         place = 'macro' if macro else ('expansion' if '@__swiftmacro' in path or 'macro expansion' in path else 'authored')
         if place == 'authored' and (name != case_file or (spans and not any(a <= int(line) <= b for a, b in spans))):
@@ -3067,6 +3631,16 @@ def classify_located(text, spans=(), case_file='Case.swift'):
         if error not in errors:
             errors.append(error)
     return errors
+
+
+def columns_of(text):
+    """Each error's (message without the macro's suffix, file name, line) with its column, in the order reported."""
+    found = []
+    for path, line, column, message in ERROR.findall(text):
+        message = re.sub(r'\s*\[#\w+(?:::\w+)*\]$', '', re.sub(r'\s*\(from macro \'\w+\'\)', '', message).strip())
+        found.append(((message, os.path.basename(path), int(line)), int(column)))
+
+    return found
 
 
 def classify(text, spans=()):
@@ -3090,7 +3664,7 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
     harness_from = None
     if toolchain.run:
         harness_from = files['Case.swift'].count('\n') + 2
-        files['Case.swift'] = files['Case.swift'] + graph_accessor(files['Case.swift'])
+        files['Case.swift'] = files['Case.swift'] + graph_accessor(files['Case.swift'], module_text(text))
     sources = []
     for name, content in files.items():
         (directory / name).write_text(content)
@@ -3111,7 +3685,7 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
     located = [(('harness' if harness_from and name == 'Case.swift' and line >= harness_from else place), message, name, line)
                for place, message, name, line in classify_located(log, spans)]
     outcome = dict(seconds=round(elapsed, 2), errors=[(p, m) for p, m, _, _ in located], located=located, command=command,
-                   peak_mb=result.peak_mb,
+                   peak_mb=result.peak_mb, columns=columns_of(log),
                    client_lines=sorted({line for place, _, name, line in located if place == 'client' and name == 'Case.swift'}))
     if code in ('timeout', 'memory', 'launch'):
         outcome['status'] = code
@@ -3166,10 +3740,165 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
         outcome['report'] = next((line[len('report: '):] for line in ran.stdout.splitlines() if line.startswith('report: ')), None)
         outcome['spellings'] = sorted({json.dumps(g, sort_keys=True) for g in graphs})
         outcome['diagram_problems'] = diagram_problems(ran.stdout)
+        outcome['text_problems'] = exported_text_problems(text, graphs)
         if probe is True or (callable(probe) and probe(outcome['spellings'], text)):
-            outcome['spelling_problems'] = check_spellings(toolchain, directory, text, graphs)
+            outcome['spelling_problems'] = check_spellings(toolchain, directory, text, graphs, flags)
+    outcome['inventory_problems'] = inventory_problems(text, outcome, toolchain.run)
     output.unlink(missing_ok=True)
     return outcome
+
+
+# --- What the input declares --------------------------------------------------------------------------------------
+# Counted from the source, so an output that leaves a schema, a field, or a symbol out cannot remove its own check.
+
+def schema_body(text, schema):
+    """The body of the schema `schema` (a basename), or None."""
+    opened, closed = schema_opening(text, schema)
+    return None if opened is None else text[opened:closed]
+
+
+def direct_lines(body):
+    """The lines of `body` at its own brace depth, without comments."""
+    out, depth = [], 0
+    for line in strip_comments(body).split('\n'):
+        if depth == 0:
+            out.append(line)
+        depth += line.count('{') - line.count('}')
+    return out
+
+
+def declared_inventory(text, schema):
+    """What a schema declares: its phases, Input cases, operations, and events, by name, in declaration order."""
+    body = schema_body(text, schema)
+    if body is None:
+        return None
+    phases = []
+    for line in direct_lines(body):
+        found = re.match(r'\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*case\s+(.*)$', line)
+        if found:
+            for item in split_top(found.group(1)):
+                named = re.match(r'\s*`?(\w+)`?\s*\(', item)
+                if named:
+                    phases.append(named.group(1))
+    inputs = []
+    opened = re.search(r'enum\s+Input\b[^{]*\{', body)
+    if opened:
+        for case in re.finditer(r'\bcase\s+([^\n;}]+)', strip_comments(body_of(body, opened))):
+            inputs += [re.match(r'\s*`?(\w+)', item).group(1) for item in split_top(case.group(1)) if re.match(r'\s*`?\w', item)]
+    for extension in re.finditer(r'extension\s+(?:\w+\.)*' + re.escape(schema.partition('#')[0]) + r'\.Input\b[^{]*\{', text):
+        for case in re.finditer(r'\bcase\s+([^\n;}]+)', strip_comments(body_of(text, extension))):
+            inputs += [re.match(r'\s*`?(\w+)', item).group(1) for item in split_top(case.group(1)) if re.match(r'\s*`?\w', item)]
+    def namespaces(marker):
+        found, plain = [], strip_comments(body)
+        for head in re.finditer(r'@(?:StateMachine(?:::|\.))?' + marker + r'\b', plain):
+            index = head.end()
+            if plain[index:index + 1] == '(':
+                depth = 0
+                while index < len(plain):
+                    depth += {'(': 1, ')': -1}.get(plain[index], 0)
+                    index += 1
+                    if depth == 0:
+                        break
+            named = re.match(r'\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?(\w+)', plain[index:])
+            if named:
+                found.append(named.group(1))
+        return found
+    return dict(phases=phases, inputs=inputs, operations=namespaces('Operation'), events=namespaces('Event'))
+
+
+def inventory_problems(text, outcome, ran=True):
+    """A compiled case's output measured against its input: symbol extraction succeeded, every schema the module
+    declares printed a graph, and each graph holds every phase, Input case, operation, and event the schema declares.
+    An empty outcome is a failure."""
+    if outcome.get('status') != 'ok':
+        return []
+    problems = []
+    if not outcome.get('fingerprint'):
+        problems.append('inventory: no generated symbol was extracted')
+    if not ran:
+        return problems
+    source = module_text(text)
+    paths = schema_path_list(source)
+    graphs = [json.loads(line[7:]) for line in outcome.get('run', []) if line.startswith('graph: ')]
+    if not outcome.get('run') and (paths or re.search(r'^func fuzzReport\(\)', text, re.M)):
+        problems.append('inventory: the program printed nothing')
+    names = collections.Counter(g.get('name') for g in graphs)
+    wanted = collections.Counter(path.split('.')[-1] for path in paths)
+    if names != wanted:
+        problems.append(f'inventory: the module declares the schemas {sorted(wanted.elements())}, the run printed graphs of {sorted(names.elements())}')
+    for graph, key in zip(graphs, graph_keys(graphs)):
+        declared = declared_inventory(source, key)
+        if declared is None:
+            continue
+        for field, key in (('phases', 'phases'), ('inputs', 'inputs'), ('operations', 'operations'), ('events', 'events')):
+            got = sorted(record['id'] for record in graph.get(key, []))
+            if got != sorted(declared[field]):
+                problems.append(f"inventory {graph.get('name')} {field}: declared {sorted(declared[field])}, exported {got}")
+    return problems
+
+
+# --- Exported text ----------------------------------------------------------------------------------------------------
+# Each exported type spelling is the author's own text, on one line without comments (ExportingAGraph.md). The expected
+# text comes from the source: the payload as the case writes it, the alias an operation or event namespace declares, or
+# `Swift::Void` and `Swift::Never` for one it omits.
+
+def one_line(spelling):
+    return ' '.join(strip_comments(spelling).split())
+
+
+def namespace_member(text, schema, namespace, member):
+    """The text a namespace of the schema gives `member`: its alias's right-hand side, the member's own name for a
+    nested type, or None."""
+    bodies = []
+    opening = find_schema(text, schema)
+    if opening:
+        inner = re.search(r'enum\s+`?' + re.escape(namespace) + r'`?\s*(?::[^{]*)?\{', body_of(text, opening))
+        if inner:
+            bodies.append(body_of(body_of(text, opening), inner))
+    for extension in re.finditer(r'extension\s+(?:\w+\.)*' + re.escape(schema.partition('#')[0]) + r'\.' + re.escape(namespace) + r'\b[^{]*\{', text):
+        bodies.append(body_of(text, extension))
+    for body in bodies:
+        for line in direct_lines(body):
+            alias = re.search(r'\btypealias\s+`?' + re.escape(member) + r'`?\s*=\s*(.*?)\s*(?:;|$)', line)
+            if alias:
+                return alias.group(1).rstrip('}').strip()
+            if re.search(r'\b(?:struct|enum|class|actor)\s+`?' + re.escape(member) + r'\b', line):
+                return member
+    return None
+
+
+def expected_texts(text, graph, key=None):
+    """The text each spelled field of a graph must export, by site; `key` tells apart schemas of one basename."""
+    schema = key or graph.get('name', '')
+    phases, inputs = authored_payloads(text, schema)
+    expected = {}
+    for phase in graph.get('phases', []):
+        if phase['id'] in phases:
+            expected[f"{schema} phase {phase['id']} payload"] = (phase.get('payload'), phases[phase['id']])
+    for case in graph.get('inputs', []):
+        if case['id'] in inputs:
+            expected[f"{schema} input {case['id']} payload"] = (case.get('payload'), inputs[case['id']])
+    for operation in graph.get('operations', []):
+        for field, member, default in (('input', 'Input', 'Swift::Void'), ('output', 'Output', 'Swift::Void'),
+                                       ('failure', 'Failure', 'Swift::Never'), ('key', 'Key', None)):
+            authored = namespace_member(text, schema, operation['id'], member) or default
+            expected[f"{schema} operation {operation['id']} {field}"] = (operation.get(field), authored)
+    for event in graph.get('events', []):
+        authored = namespace_member(text, schema, event['id'], 'Payload') or 'Swift::Void'
+        expected[f"{schema} event {event['id']} payload"] = (event.get('payload'), authored)
+    return expected
+
+
+def exported_text_problems(text, graphs):
+    """Each spelled field whose exported text is not the author's own, on one line without comments."""
+    source = module_text(text)
+    problems = []
+    keys = graph_keys(graphs)
+    for graph in graphs:
+        for site, (exported, authored) in sorted(expected_texts(source, graph, keys[graphs.index(graph)]).items()):
+            if (exported is None) != (authored is None) or (exported is not None and one_line(exported) != one_line(authored)):
+                problems.append(f'{site}: exported text {exported!r}, the author wrote {authored!r}')
+    return problems
 
 
 def raw_graphs(stdout):
@@ -3204,7 +3933,7 @@ def split_top(text, braces=False):
 
 def authored_payloads(text, schema):
     """The authored payload spellings of a schema's phases and Input cases, by case name."""
-    opening = re.search(r'enum\s+`?' + re.escape(schema) + r'`?[^{]*\{', text)
+    opening = find_schema(text, schema)
     if not opening:
         return {}, {}
     body = body_of(text, opening)
@@ -3230,7 +3959,7 @@ def strip_comments(text):
 def scope_members(text, schema, scope):
     """Names declared directly in a namespace of the schema (`Input`, or an operation), which a spelling written there
     finds before the schema's own members."""
-    opening = re.search(r'enum\s+`?' + re.escape(schema) + r'`?[^{]*\{', text)
+    opening = find_schema(text, schema)
     if not opening:
         return set()
     inner = re.search(r'enum\s+`?' + re.escape(scope) + r'`?\s*(?::[^{]*)?\{', body_of(text, opening))
@@ -3238,7 +3967,7 @@ def scope_members(text, schema, scope):
         return set()
     bodies = [body_of(body_of(text, opening), inner)]
     # Members an extension of the namespace declares are members too.
-    for extension in re.finditer(r'extension\s+(?:\w+\.)*' + re.escape(schema) + r'\.' + re.escape(scope) + r'\b[^{]*\{', text):
+    for extension in re.finditer(r'extension\s+(?:\w+\.)*' + re.escape(schema.partition('#')[0]) + r'\.' + re.escape(scope) + r'\b[^{]*\{', text):
         bodies.append(body_of(text, extension))
     return {name for body in bodies for name in re.findall(r'(?:struct|enum|class|typealias|protocol)\s+`?([^\s`<:=({]+)`?', body)}
 
@@ -3274,34 +4003,58 @@ def member_opening(text, start, end, name):
     return None
 
 
+def find_schema(text, schema):
+    """The declaration of the schema `schema` up to its opening brace: `Flow` names the first schema of that basename,
+    `Flow#1` the second, so two schemas of one basename in different enclosing types stay apart."""
+    name, _, occurrence = schema.partition('#')
+    matches = list(re.finditer(r'@StateMachine\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?' + re.escape(name) + r'`?[^{]*\{', text))
+    index = int(occurrence or 0)
+    if index < len(matches):
+        return matches[index]
+    return re.search(r'enum\s+`?' + re.escape(name) + r'`?[^{]*\{', text) if index == 0 else None
+
+
+def graph_keys(graphs):
+    """Each graph's schema key, in order: its name, with `#k` for the k-th later graph of the same name."""
+    seen = collections.Counter()
+    keys = []
+    for graph in graphs:
+        name = graph.get('name', '')
+        keys.append(name if not seen[name] else f'{name}#{seen[name]}')
+        seen[name] += 1
+    return keys
+
+
 def schema_opening(text, schema):
     """The index just past the `{` of the schema's body, and the index of its closing brace."""
-    for match in re.finditer(r'@StateMachine\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?' + re.escape(schema) + r'`?[^{]*\{', text):
-        return match.end(), match.end() + len(body_of(text, match))
-    return None, None
+    match = find_schema(text, schema)
+    if match is None or '@StateMachine' not in match.group(0):
+        return None, None
+    return match.end(), match.end() + len(body_of(text, match))
 
 
-def spelling_probes(text, graphs, scope='written'):
+def spelling_probes(text, graphs, scope='written', keys=None, start=0):
     """Probes that read each type spelling a graph exports, exactly as exported, in the scope the guide says it is
     meant in, beside the authored type read where it is declared. Returns the probe source, their labels, and the
     records no probe could be made for. With `scope='schema'`, every exported spelling is read at the schema's scope
     instead: the contract the macro documented before exported spellings followed the scope they are written in."""
     insertions, labels, missing = [], [], []
-    for graph in graphs:
+    keys = keys or graph_keys(graphs)
+    for graph, key in zip(graphs, keys):
         schema = graph.get('name')
         if not schema:
             continue
-        opened, closed = schema_opening(text, schema)
+        opened, closed = schema_opening(text, key)
         if opened is None:
             missing.append(f'{schema}: no schema declaration to probe')
             continue
-        phases, inputs = authored_payloads(text, schema)
+        phases, inputs = authored_payloads(text, key)
 
         def add(site, exported, exported_at, authored, authored_at):
             if exported_at is None or authored_at is None:
                 missing.append(f'{site}: no scope to read it in')
                 return
-            index = len(labels)
+            index = start + len(labels)
             labels.append(dict(site=site, exported=exported))
             insertions.append((exported_at if scope == 'written' else opened, f'static func _fuzzSpell{index}e(_: ({exported}).Type) {{}}'))
             insertions.append((authored_at, f'static func _fuzzSpell{index}a(_: ({authored}).Type) {{}}'))
@@ -3321,7 +4074,7 @@ def spelling_probes(text, graphs, scope='written'):
             add(f"{schema} input {case['id']} payload", case['payload'], input_at, inputs[case['id']], input_at)
         for operation in graph.get('operations', []):
             at = member_opening(text, opened, closed, operation['id'])
-            members = scope_members(text, schema, operation['id'])
+            members = scope_members(text, key, operation['id'])
             for field, alias, default in (('input', 'Input', 'Swift::Void'), ('output', 'Output', 'Swift::Void'),
                                           ('failure', 'Failure', 'Swift::Never'), ('key', 'Key', None)):
                 if operation.get(field) is None:
@@ -3335,45 +4088,72 @@ def spelling_probes(text, graphs, scope='written'):
                 add(f"{schema} operation {operation['id']} {field}", operation[field], at, authored, at)
         for event in graph.get('events', []):
             at = member_opening(text, opened, closed, event['id'])
-            authored = 'Payload' if 'Payload' in scope_members(text, schema, event['id']) else 'Swift::Void'
+            authored = 'Payload' if 'Payload' in scope_members(text, key, event['id']) else 'Swift::Void'
             add(f"{schema} event {event['id']} payload", event['payload'], at, authored, at)
-    expected = sum(len(g.get('phases', [])) + sum(1 for c in g.get('inputs', []) if c.get('payload') is not None)
-                   + sum(3 + (o.get('key') is not None) for o in g.get('operations', [])) + len(g.get('events', []))
-                   for g in graphs)
+    # Counted from what the schemas declare, not from what the graphs hold, so a graph that drops a record cannot
+    # drop its probe.
+    expected = 0
+    for g, key in zip(graphs, keys):
+        declared = declared_inventory(text, key) or dict(phases=[], inputs=[], operations=[], events=[])
+        _, payloads = authored_payloads(text, key)
+        keyed = sum(1 for o in declared['operations'] if 'Key' in scope_members(text, key, o))
+        expected += (len(declared['phases']) + sum(1 for i in declared['inputs'] if i in payloads)
+                     + 3 * len(declared['operations']) + keyed + len(declared['events']))
     if len(labels) + len(missing) < expected:
-        missing.append(f'graph records: {expected} spelled fields, {len(labels)} probed')
+        missing.append(f'graph records: {expected} spelled fields declared, {len(labels)} probed')
     source = text
     for at, probe in sorted(insertions, key=lambda item: -item[0]):
         source = source[:at] + '\n        ' + probe + '\n' + source[at:]
     return source, labels, missing
 
 
-def check_spellings(toolchain, directory, text, graphs):
-    """Compiles the case with spelling probes; returns problems, each `site: detail`: a spelling that names another
-    type, one that names none, a probe that is missing, or probes that do not compile."""
+def check_spellings(toolchain, directory, text, graphs, flags=()):
+    """Compiles the case with spelling probes, with the case's own flags; returns problems, each `site: detail`: a
+    spelling that names another type, one that names none, a probe that is missing, or probes that do not compile."""
     files, _ = split_case(text)
-    probed, labels, missing = spelling_probes(files['Case.swift'], graphs, toolchain.spelling_scope)
+    # Each graph is probed in the file that declares its schema: the k-th schema of its basename in the module, in
+    # file order.
+    found, counts = {name: [] for name in files}, collections.Counter()
+    for graph in graphs:
+        name, k = graph.get('name', ''), counts[graph.get('name', '')]
+        counts[name] += 1
+        for file, content in files.items():
+            here = sum(1 for _ in re.finditer(r'@StateMachine\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?' + re.escape(name) + r'`?[^{]*\{', content))
+            if k < here:
+                found[file].append((graph, name if k == 0 else f'{name}#{k}'))
+                break
+            k -= here
+        else:
+            found['Case.swift'].append((graph, name))
+    probed_files, labels, missing = {}, [], []
+    for file, content in files.items():
+        chosen = found[file]
+        source, more, absent = spelling_probes(content, [g for g, _ in chosen], toolchain.spelling_scope, [k for _, k in chosen], len(labels))
+        probed_files[file] = source
+        labels += more
+        missing += absent
     problems = list(missing)
     if not labels:
         return problems
     sources = []
     for name, content in files.items():
-        (directory / f'Probe-{name}').write_text(probed if name == 'Case.swift' else content)
+        (directory / f'Probe-{name}').write_text(probed_files[name])
         sources.append(directory / f'Probe-{name}')
     plain = Toolchain.__new__(Toolchain)
     plain.__dict__.update(toolchain.__dict__)
-    command = plain.command(sources, directory / 'Spellings.o', link=False)
+    command = plain.command(sources, directory / 'Spellings.o', link=False, flags=flags)
     command.remove('-dump-macro-expansions')
     command.remove('-Xfrontend')
     command.insert(command.index('-c'), '-wmo')
     result = watched(command, toolchain.timeout)
     if result.verdict != 'ok':
         return problems + [f'spelling probes: the compilation {result.verdict} ({result.seconds}s, {result.peak_mb} MB)']
-    lines = probed.split('\n')
     if result.returncode != 0:
         named = []
         for path, line, column, message in ERROR.findall(result.stdout):
-            source_line = lines[int(line) - 1] if path.endswith('Probe-Case.swift') and int(line) <= len(lines) else ''
+            file = os.path.basename(path)[len('Probe-'):] if os.path.basename(path).startswith('Probe-') else None
+            lines = probed_files.get(file, '').split('\n')
+            source_line = lines[int(line) - 1] if file and int(line) <= len(lines) else ''
             probe = re.search(r'_fuzzSpell(\d+)([ea])', source_line)
             if probe and int(probe.group(1)) < len(labels):
                 label = labels[int(probe.group(1))]
@@ -3430,7 +4210,10 @@ DOT_KEYWORDS = {'node', 'edge', 'graph', 'digraph', 'subgraph', 'strict'}
 def mermaid_label(text):
     """Decodes a label the reader accepts (letters, digits, `_`, and decimal entity codes), or None."""
     # Mermaid's own placeholders for entity codes are `ß` and `ﬂ`, so a label holds them only as codes.
-    if not re.fullmatch(r'(?:[^\W]|#\d+;)*', text) or re.search('[\u00df\ufb02]', text):
+    # A Swift identifier such as `x` followed by U+05B0 keeps an alphabetic combining mark that NFC leaves
+    # decomposed, which the library writes as itself; so a letter's combining marks are accepted too.
+    plain = all(c.isalnum() or c == '_' or unicodedata.category(c) in ('Mn', 'Mc') for c in re.sub(r'#\d+;', '', text))
+    if not plain or re.search('[\u00df\ufb02]', text):
         return None
     return re.sub(r'#(\d+);', lambda m: chr(int(m.group(1))), text)
 
@@ -3498,25 +4281,32 @@ def dot_string(text):
 
 
 def read_dot(text):
-    """(name, nodes as (name, terminal), edges as (source, destination, label, dashed)) or a problem string."""
+    """(name, nodes as (label, terminal), edges as (source, destination, label, dashed)) or a problem string. Every
+    phase is a node `p0`, `p1`, ... in declaration order, labeled with its name; the entry point is the point node
+    `entry`, which an edge names as the source `None`."""
     if not text.endswith('\n'):
         return 'dot: the rendering does not end with a line break'
     lines = text[:-1].split('\n')
     head = re.fullmatch(r'digraph ' + DOT_STRING + r' \{', lines[0])
-    if not head or lines[-1] != '}' or lines[1] != '    "*" [shape=point];':
+    if not head or lines[-1] != '}' or len(lines) < 3 or lines[1] != '    entry [shape=point];':
         return f'dot: unreadable frame {lines[0]!r} … {lines[-1]!r}'
-    name, nodes, edges = dot_string(head.group(1)), [], []
+    name, nodes, edges, labels = dot_string(head.group(1)), [], [], {}
     for number, line in enumerate(lines[2:-1], 3):
-        match = re.fullmatch(r'    ' + DOT_STRING + r'( \[peripheries=2\])?;', line)
+        match = re.fullmatch(r'    (p\d+) \[label=' + DOT_STRING + r'(, peripheries=2)?\];', line)
         if match:
-            nodes.append((dot_string(match.group(1)), bool(match.group(2))))
+            if match.group(1) != f'p{len(nodes)}' or edges:
+                return f'dot line {number}: node {match.group(1)!r} out of declaration order'
+            labels[match.group(1)] = dot_string(match.group(2))
+            nodes.append((labels[match.group(1)], bool(match.group(3))))
             continue
-        match = re.fullmatch(r'    ' + DOT_STRING + r' -> ' + DOT_STRING + r'(?: \[label=' + DOT_STRING + r'(, style=dashed)?\])?;', line)
+        match = re.fullmatch(r'    (entry|p\d+) -> (p\d+)(?: \[label=' + DOT_STRING + r'(, style=dashed)?\])?;', line)
         if not match:
             return f'dot line {number}: unreadable line {line!r}'
-        edges.append((dot_string(match.group(1)), dot_string(match.group(2)),
+        if match.group(1) != 'entry' and match.group(1) not in labels or match.group(2) not in labels:
+            return f'dot line {number}: an edge names an undeclared node'
+        edges.append((None if match.group(1) == 'entry' else labels[match.group(1)], labels[match.group(2)],
                       dot_string(match.group(3)) if match.group(3) is not None else None, bool(match.group(4))))
-    if None in [name] + [n for n, _ in nodes] + [x for e in edges for x in e[:3] if x is not None]:
+    if None in [name] + [n for n, _ in nodes] + [x for e in edges for x in e[1:3] if x is not None]:
         return 'dot: a quoted string with an escape Graphviz does not read as itself'
     return name, nodes, edges
 
@@ -3537,19 +4327,27 @@ def check_diagrams(graph, mermaid, dot):
         problems.append(f'{name} {read}')
     else:
         states, transitions = read
-        label = lambda token: None if token == '[*]' else states.get(token, token)
+        # Every phase is declared once, in declaration order, with an internal identifier of its own and the authored
+        # name as its label; a transition names states only by those identifiers.
+        undeclared = sorted({t for a, b, _ in transitions for t in (a, b) if t != '[*]' and t not in states})
+        if undeclared:
+            problems.append(f'{name} mermaid: transitions name undeclared states {undeclared[:4]}')
+        if list(states.values()) != [p['id'] for p in graph['phases']]:
+            problems.append(f'{name} mermaid: declares the states {list(states.values())}, the graph {[p["id"] for p in graph["phases"]]}')
+        if any(identifier in [p['id'] for p in graph['phases']] and identifier != label for identifier, label in states.items()):
+            problems.append(f'{name} mermaid: an internal state identifier is another phase\'s name')
+        label = lambda token: None if token == '[*]' else states.get(token, f'<undeclared {token}>')
         got = [(label(a), label(b), l) for a, b, l in transitions]
         if got != expected:
             problems.append(f'{name} mermaid: describes {got[:6]} …, the graph {expected[:6]} …')
-        if states and sorted(states.values()) != sorted(set(p['id'] for p in graph['phases']) | {x for t in expected for x in t[:2] if x}):
-            problems.append(f'{name} mermaid: declares the states {sorted(states.values())}')
     read = read_dot(dot)
     if isinstance(read, str):
         problems.append(f'{name} {read}')
     else:
         title, nodes, edges = read
-        got = [(None if a == '*' else a, b, l if not (a == '*' and l is None) else None) for a, b, l, _ in edges]
-        want = [(a, b, l) for a, b, l in expected if b is not None]
+        # A restoration entrance is the dashed edge from the entry point; every other edge is solid.
+        got = [(a, b, l, dashed) for a, b, l, dashed in edges]
+        want = [(a, b, l, a is None and l == 'restored') for a, b, l in expected if b is not None]
         if title != name or nodes != [(p['id'], p['id'] in graph.get('terminal', [])) for p in graph['phases']] or got != want:
             problems.append(f'{name} dot: describes {title!r} {nodes[:4]} {got[:4]} …, the graph {want[:4]} …')
     return problems
@@ -3588,14 +4386,53 @@ def movable_labels(line, text):
     return order, [(i, l) for i, l in enumerate(labels) if l in order]
 
 
+OWNER_TYPES = {'.owned': 'Owned', '.local': 'Local', '.shared': 'Shared', '.actorHost': 'ActorHost',
+               '.mainActorHost': 'MainActorHost', '.isolatedHost': 'IsolatedHost'}
+MANAGED = {'Shared', 'ActorHost', 'MainActorHost', 'IsolatedHost'}
+
+
+def selected_owners(text):
+    """Each schema's path with the owner types its attribute selects, from the source."""
+    found = []
+    for match in re.finditer(r'@StateMachine\(mode: (\.\w+)(?:, owners: \[([^\]]*)\])?\)', text):
+        owners = [o.strip() for o in (match.group(2) or '').split(',') if o.strip()] or DEFAULT_OWNERS.get(match.group(1), ['.owned'])
+        name = re.search(r'enum\s+`?(\w+)', text[match.end():])
+        if name:
+            found.append((name.group(1), [OWNER_TYPES[o] for o in owners if o in OWNER_TYPES]))
+    return found
+
+
 def label_order_problems(fingerprint, text):
     """Each initializer whose driver and handler labels are not in the order the guide documents: one driver per
-    operation, in the order the operations are declared, then one handler per event, in theirs."""
+    operation, in the order the operations are declared, then one handler per event, in theirs; and each managed
+    owner of a schema with operations or events that has no initializer taking all of them."""
     problems = []
     for line in fingerprint:
         order, movable = movable_labels(line, text)
         if movable and [l for _, l in movable] != [l for l in order if l in {m for _, m in movable}]:
             problems.append(f"labels {line.split('(')[0]}: {[l for _, l in movable]}, declared {[l for l in order if l in {m for _, m in movable}]}")
+    source = module_text(text) if CLIENT_MARKER in text or FILE_MARKER.search(text) else text
+    reachable = {path.split('.')[-1] for path in schema_path_list(source)}
+    for schema, owners in selected_owners(source):
+        declared = declared_inventory(source, schema)
+        # A schema in a function body generates no symbol a module exports.
+        if not declared or schema not in reachable:
+            continue
+        wanted = [f'{lower_first(o)}Driver' for o in declared['operations']] + [f'on{e}' for e in declared['events']]
+        if not wanted:
+            continue
+        drivers = [f'{lower_first(o)}Driver' for o in declared['operations']]
+        handlers = [f'on{e}' for e in declared['events']]
+        bundle = [lower_first(o) for o in declared['operations']]
+        takes = lambda line, labels: [l for l in re.findall(r'(\w+):', line.split('init(', 1)[-1]) if l in labels] == labels
+        for owner in sorted(set(owners) & MANAGED):
+            inits = [l for l in fingerprint if re.search(r'\b' + re.escape(schema) + r'\.' + owner + r'\.(?:__allocating_)?init\(', l)]
+            bundles = [l for l in fingerprint if re.search(r'\b' + re.escape(schema) + r'\.' + owner + r'\.Drivers\.(?:__allocating_)?init\(', l)]
+            # One driver per operation, directly or in the owner's `Drivers` bundle, and one handler per event.
+            has_drivers = not drivers or any(takes(l, drivers) for l in inits) or any(takes(l, bundle) for l in bundles)
+            has_handlers = not handlers or any(takes(l, handlers) for l in inits)
+            if not inits or not has_drivers or not has_handlers:
+                problems.append(f'labels {schema}.{owner}: no initializer takes {drivers or bundle} and {handlers}')
     return problems
 
 
@@ -3647,7 +4484,7 @@ def run_lines(lines, keys):
 # Oracles.
 
 def quoted_names(message):
-    return [n.lstrip('@.') for n in re.findall(r"'([^']+)'", message)]
+    return [n.lstrip('@.').strip('`') for n in re.findall(r"'([^']+)'", message)]
 
 
 def declaration_span(lines, line):
@@ -3710,23 +4547,154 @@ def site_kind(case, line, message, name):
     return None
 
 
-def refusal_matches(pattern, case, variant, exact=False):
-    """Whether the variant is refused with a diagnostic matching `pattern` at the changed site; with `exact`, also
-    that nothing else accompanies it but what a refused expansion leaves undeclared."""
+TOKEN = re.compile(r"@?`[^`]+`|@?[^\W\d][\w.]*|#if\b|\.\w+")
+# Refusals of a whole schema, which stand at its attribute or its name rather than at a token a rewrite changed.
+SCHEMA_WIDE = r"Generic schemas|The macro cannot read this schema|@StateMachine requires"
+
+
+def anchored_token(case, name, line, column, message, token=None):
+    """Whether the diagnostic stands at the token it names: the token at its line and column is one the message
+    quotes (an attribute with its `@`, a member with its leading dot), or matches the entry's `token`. A
+    diagnostic whose column is unknown, or one in a file the case does not hold, does not stand at a token."""
+    if column is None:
+        return False
+    files, _ = split_case(case['text'])
+    lines = files.get(name, '').split('\n')
+    if not 0 < line <= len(lines):
+        return False
+    source_line = lines[line - 1]
+    # The compiler counts columns in UTF-8 bytes; the line is read in characters.
+    column = len(source_line.encode('utf-8')[:column - 1].decode('utf-8', errors='ignore')) + 1
+    # A diagnostic stands at the start of a token, never inside one.
+    word = lambda character: character.isalnum() or character == '_'
+    if column > 1 and word(source_line[column - 2:column - 1] or ' ') and word(source_line[column - 1:column] or ' '):
+        return False
+    # At text the rewrite changed, character by character, or at the token whose inside it changed: a generic clause
+    # it added, a list it emptied.
+    if name == 'Case.swift' and any(a - 1 <= column <= b for a, b in changed_columns(case).get(line, [])):
+        return token is None or (TOKEN.match(source_line, column - 1) and re.fullmatch(token, TOKEN.match(source_line, column - 1).group(0)))
+    # A bracketed expression, or a declaration's name with its parameter or argument list, stands for the
+    # whole of it: the diagnostic is at the token when the rewrite changed something inside, or when the
+    # extent names what the message names.
+    start = column - 1
+    end = start + (TOKEN.match(source_line, start).end() - start if TOKEN.match(source_line, start) else 0)
+    if source_line[end:end + 1] in ('(', '<', '[') or source_line[start:start + 1] in ('(', '['):
+        opener = source_line[end] if source_line[end:end + 1] in ('(', '<', '[') else source_line[start]
+        closer = {'(': ')', '<': '>', '[': ']'}[opener]
+        depth, cursor = 0, end if source_line[end:end + 1] == opener else start
+        while cursor < len(source_line):
+            depth += (source_line[cursor] == opener) - (source_line[cursor] == closer)
+            cursor += 1
+            if depth == 0:
+                break
+        extent = source_line[start:cursor]
+        if name == 'Case.swift' and any(column <= a and b <= cursor + 1 for a, b in changed_columns(case).get(line, [])):
+            return token is None
+        payloads = dict(re.findall(r'\bcase\s+`?(\w+)`?\s*\(\s*(\w+)', case['text']))
+        declared = set(re.findall(r'\b(?:struct|enum|class|actor|typealias|protocol|case|func)\s+`?(\w+)', case['text']))
+        named = set(quoted_names(message)) | {payloads[n] for n in quoted_names(message) if n in payloads}
+        named |= set(re.findall(r'\b[A-Z]\w*\b', message)) & declared
+        if token is None and any(re.search(r'(?<![\w])' + re.escape(n) + r'(?![\w])', extent) for n in named if n):
+            return True
+    found = TOKEN.match(source_line, column - 1)
+    if not found:
+        return False
+    text = found.group(0)
+    # A member expression (`.parallel(limit: 0x0)`) whose arguments the rewrite changed.
+    if text.startswith('.') and name == 'Case.swift' and source_line[found.end():found.end() + 1] == '(':
+        depth, end = 0, found.end()
+        while end < len(source_line):
+            depth += {'(': 1, ')': -1}.get(source_line[end], 0)
+            end += 1
+            if depth == 0:
+                break
+        if any(column <= a and b <= end + 1 for a, b in changed_columns(case).get(line, [])):
+            return True
+    if token is not None:
+        return re.fullmatch(token, text) is not None
+    bare = text.lstrip('@.').strip('`')
+    # A qualified token (`Box.Hidden`) stands at its first component.
+    if bare in quoted_names(message) or bare.split('.')[0] in quoted_names(message):
+        return True
+    # A refusal of the whole schema stands at its attribute or its name.
+    if re.match(SCHEMA_WIDE, message) and (text == '@StateMachine' or bare in schema_names(case['text'])):
+        return True
+    # A parameter whose type names a quoted phase, by its name or its payload: a source parameter.
+    parameter = re.match(r'(?:_|\w+)(?:\s+\w+)?\s*:\s*([^,)]*)', source_line[column - 1:])
+    if parameter:
+        payloads = dict(re.findall(r'\bcase\s+`?(\w+)`?\s*\(\s*(\w+)', case['text']))
+        named = set(quoted_names(message)) | {payloads[n] for n in quoted_names(message) if n in payloads}
+        if any(re.search(r'(?<![\w])' + re.escape(n) + r'(?![\w])', parameter.group(1)) for n in named):
+            return True
+    # Or at text the rewrite wrote, which the seed nowhere holds: the payload a phase alias replaced, for one.
+    seed = SEED_TEXTS.get(case.get('seed'), None)
+    if seed is None or line not in rewritten_lines(case):
+        return False
+    if re.search(r'(?<![\w])' + re.escape(text) + r'(?![\w])', seed) is None:
+        return True
+    # Or at a default value's construction on a changed line, which a refusal of the construction names by the
+    # type it returns ("… returns FuzzAlias …"), declared on that line.
+    declared = set(re.findall(r'\b(?:struct|enum|class|actor|typealias|protocol|case|func)\s+`?(\w+)', case['text']))
+    named = set(re.findall(r'\b[A-Za-z_]\w*\b', message)) & declared
+    default = source_line[:column - 1].rstrip().endswith('=')
+    return default and any(re.search(r'(?<![\w])' + re.escape(n) + r'(?![\w])', source_line) for n in named)
+
+
+
+
+_CHANGED_COLUMNS = {}
+
+
+def changed_columns(case):
+    """For each line of the case's primary file a rewrite changed, the column ranges (1-based, inclusive) of the
+    characters it wrote; a line it added whole is changed from its first column to its last."""
+    import difflib
+    key = (case.get('seed'), case['text'])
+    if key in _CHANGED_COLUMNS:
+        return _CHANGED_COLUMNS[key]
+    seed = split_case(SEED_TEXTS.get(case.get('seed'), ''))[0]['Case.swift'].split('\n')
+    text = split_case(case['text'])[0]['Case.swift'].split('\n')
+    found = {}
+    for tag, a1, a2, b1, b2 in difflib.SequenceMatcher(None, seed, text, autojunk=False).get_opcodes():
+        if tag == 'equal':
+            continue
+        for offset, index in enumerate(range(b1, b2)):
+            before = seed[a1 + offset] if tag == 'replace' and a1 + offset < a2 else None
+            after = text[index]
+            if before is None:
+                found[index + 1] = [(1, len(after) + 1)]
+                continue
+            spans = []
+            for op, c1, c2, d1, d2 in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+                if op != 'equal':
+                    spans.append((d1 + 1, max(d2, d1 + 1)))
+            found[index + 1] = spans
+    _CHANGED_COLUMNS[key] = found
+    return found
+
+
+def column_of(variant, message, name, line):
+    return next((column for key, column in variant.get('columns', []) if key == (message, name, line)), None)
+
+
+def refusal_matches(pattern, case, variant, exact=False, token=None, consequent=None):
+    """Whether the variant is refused with a diagnostic whose whole message matches `pattern`, at the changed site and
+    at the token it names; with `exact`, also that every other diagnostic and error is the same refusal, one the
+    refused expansion leaves behind (CASCADE), a listed consequence (`consequent`), or a documented consequence of
+    the case's other rewrites."""
     located = variant.get('located', [])
     macro = [(m, line, name) for p, m, name, line in located if p == 'macro']
-    if not any(re.search(pattern, m) and at_site(case, line, m, name) for m, line, name in macro):
+    primary = [(m, line, name) for m, line, name in macro if re.fullmatch(pattern, m) and at_site(case, line, m, name)
+               and anchored_token(case, name, line, column_of(variant, m, name, line), m, token)]
+    if not primary:
         return False
     if not exact:
         return True
-    if any(not re.search(pattern, m) for m, _, _ in macro):
-        return False
-    # Besides the refusal: names the refused expansion leaves undeclared, the harness's references to them, Swift's own
-    # error at the declaration the rewrite changed, or a documented consequence of the case's rewrites.
-    lines, changed = case['text'].split('\n'), rewritten_lines(case)
-    documented = [e['pattern'] for e in LIMITS if any(re.search(e['rewrites'], n) for n in case['rewrites'])]
-    return all(p in ('macro', 'harness') or CASCADE.search(m) or (name == 'Case.swift' and declaration_span(lines, line) & changed)
-               or any(re.search(d, m) for d in documented) for p, m, name, line in located)
+    entries = [e for e in LIMITS if any(re.search(e['rewrites'], n) for n in case['rewrites'])]
+    documented = [e['pattern'] for e in entries] + [e['consequent'] for e in entries if e.get('consequent')]
+    allowed = lambda m: (re.fullmatch(pattern, m) or CASCADE.search(m) or (consequent and re.fullmatch(consequent, m))
+                         or any(re.fullmatch(d, m) for d in documented))
+    return all(allowed(m) for p, m, name, line in located)
 
 
 def limit_for(case, observed, detail, role, variant=None):
@@ -3741,10 +4709,23 @@ def limit_for(case, observed, detail, role, variant=None):
         if entry.get('role') and not re.fullmatch(entry['role'], role):
             continue
         if observed == 'macro-diagnostic' and isinstance(case, dict) and variant is not None:
-            if refusal_matches(entry['pattern'], case, variant, entry.get('exact', False)):
+            if refusal_matches(entry['pattern'], case, variant, entry.get('exact', False), entry.get('token')):
                 return entry['id']
             continue
-        if re.search(entry['pattern'], detail):
+        # Every line of the difference must be the documented one: each message, or for an interface each signature
+        # added matches the pattern and each one removed reappears, respelled, among those added, so that no member
+        # is lost beside the documented change.
+        details = detail if isinstance(detail, list) else [detail]
+        if observed == 'interface' and details and all(d[:1] in '+-' for d in details):
+            added = [d[1:] for d in details if d.startswith('+')]
+            removed = [d[1:] for d in details if d.startswith('-')]
+            member = lambda line: line.split('(')[0]
+            if added and all(re.search(entry['pattern'], a) for a in added) and all(member(r) in {member(a) for a in added} for r in removed):
+                return entry['id']
+            continue
+        consequent = entry.get('consequent')
+        if details and any(re.search(entry['pattern'], d) for d in details) and all(
+            re.search(entry['pattern'], d) or (consequent and re.fullmatch(consequent, d)) for d in details):
             return entry['id']
     return None
 
@@ -3795,7 +4776,8 @@ _REWRITTEN = {}
 
 
 def problems_of(outcome):
-    return (outcome.get('spelling_problems', []) + outcome.get('diagram_problems', []) + outcome.get('label_problems', [])) if outcome else []
+    return (outcome.get('spelling_problems', []) + outcome.get('diagram_problems', []) + outcome.get('label_problems', [])
+            + outcome.get('text_problems', []) + outcome.get('inventory_problems', [])) if outcome else []
 
 
 def problem_site(problem):
@@ -3820,6 +4802,12 @@ def judge(case, base, control, variant, prefix=None):
     kinds = case['kinds']
     names = case['rewrites']
     role = case.get('role', 'value')
+    # A crash, a cap, a timeout, or a failed execution fails whatever else the case meets: no allowance of its other
+    # rewrites stands in front of it.
+    if variant['status'] in RESOURCE_FAILURES:
+        return 'fail', 'no crash, hang, or memory past the cap', describe(variant)
+    if variant['status'] in RUN_FAILURES:
+        return 'fail', 'a program that links and runs to completion, or a rejection before it', describe(variant)
     if prefix is not None:
         verdict, expected, observed = prefix
         if verdict == 'fail':
@@ -3830,13 +4818,9 @@ def judge(case, base, control, variant, prefix=None):
     # Swift rejecting client code where a rewrite changed it is the rewrite's error, not the macro's.
     if variant['status'] == 'client-error' and set(variant.get('client_lines', [])[:1]) & rewritten_lines(case):
         return 'artefact', 'valid rewritten client code', describe(variant)
-    if variant['status'] in RESOURCE_FAILURES:
-        return 'fail', 'no crash, hang, or memory past the cap', describe(variant)
-    if variant['status'] in RUN_FAILURES:
-        return 'fail', 'a program that links and runs to completion, or a rejection before it', describe(variant)
     if case.get('expect'):
         entry = next(e for e in LIMITS if e['id'] == case['expect'])
-        if variant['status'] == 'macro-diagnostic' and refusal_matches(entry['pattern'], case, variant, True):
+        if variant['status'] == 'macro-diagnostic' and refusal_matches(entry['pattern'], case, variant, True, entry.get('token')):
             return f"limit:{entry['id']}", f"exactly the documented refusal ({entry['id']})", describe(variant)
         # Another rewrite of the composition may meet a documented refusal of its own first.
         others = dict(case, rewrites=[n for n in names if not re.search(entry['rewrites'], n)])
@@ -3851,24 +4835,30 @@ def judge(case, base, control, variant, prefix=None):
     if 'break' in kinds:
         if variant['status'] == 'ok':
             return 'fail', 'rejected (invalid under the documented grammar)', 'compiles'
-        pattern = BREAK_EXPECT.get(case.get('breaking') or last_special(case))
-        # A graph-level diagnostic stands at the schema's attribute: there it meets the documented message alone.
-        lines = case['text'].split('\n')
-        graph_level = pattern and any(p == 'macro' and re.search(pattern, m) and name == 'Case.swift' and 0 < line <= len(lines)
-                                      and lines[line - 1].lstrip().startswith('@StateMachine(') for p, m, name, line in variant.get('located', []))
-        # The macro also reports some checks through the expansion, as an unavailable witness with its message.
-        expansion_check = pattern and any(p == 'expansion' and re.search(pattern, m) for p, m, _, _ in variant.get('located', []))
-        if pattern and not graph_level and not expansion_check and not refusal_matches(pattern, case, variant):
-            return 'fail', f'rejected with the documented diagnostic at the changed site: {pattern}', describe(variant)
+        # The rewrite's own finding, naming what it changed, or the rewrite's documented message; either at the token
+        # it names, with nothing beside it but what the refused expansion and the broken graph leave behind.
+        pattern = case.get('refusal') or BREAK_EXPECT.get(case.get('breaking') or last_special(case))
+        if pattern is None:
+            return 'fail', 'a breaking rewrite with a documented rejection', describe(variant)
+        # The macro reports some checks through the expansion, as an unavailable witness that carries the message.
+        witnessed = [m for p, m, _, _ in variant.get('located', []) if p == 'expansion' and re.fullmatch(r"'[^']*' is unavailable: (.*)", m)
+                     and re.fullmatch(pattern, re.fullmatch(r"'[^']*' is unavailable: (.*)", m).group(1))]
+        if witnessed and all(p != 'macro' for p, _, _, _ in variant.get('located', [])):
+            return 'pass', 'rejected through the expansion', describe(variant)
+        if not refusal_matches(pattern, case, variant, True, consequent=GRAPH_CONSEQUENCES):
+            return 'fail', f'rejected with exactly the documented diagnostic at the token it names: {pattern}', describe(variant)
         return 'pass', 'rejected', describe(variant)
     if 'diag' in kinds:
-        # Valid Swift the guide calls unsupported: the macro itself must say so, where the case changed it.
-        if variant['status'] == 'macro-diagnostic' and refusal_matches(r'.', case, variant):
+        # Valid Swift the guide calls unsupported: the macro itself must say so, with its documented message, at the
+        # token the case changed.
+        pattern = DIAG_EXPECT.get(last_special(case))
+        if variant['status'] == 'macro-diagnostic' and pattern and refusal_matches(pattern, case, variant, True, consequent=DIAG_CONSEQUENCES):
             return 'pass', 'a macro diagnostic', describe(variant)
-        return 'fail', 'a macro diagnostic at the changed site (Swift accepts it; the guide calls it unsupported)', describe(variant)
+        return 'fail', f'the documented macro diagnostic at the changed token, alone (Swift accepts it; the guide calls it unsupported): {pattern}', describe(variant)
     if 'safe' in kinds:
-        # Valid Swift the guide neither supports nor rules out: compile, or refuse with a macro diagnostic.
-        if variant['status'] == 'ok' or (variant['status'] == 'macro-diagnostic' and refusal_matches(r'.', case, variant)):
+        # Valid Swift the guide neither supports nor rules out: compile, or refuse with a macro diagnostic at the token
+        # it names.
+        if variant['status'] == 'ok' or (variant['status'] == 'macro-diagnostic' and refusal_matches(r'.+', case, variant)):
             return 'pass', 'compiles or a macro diagnostic', describe(variant)
         if variant['status'] == 'expansion-error':
             entry = limit_for(case, 'expansion-error', ' | '.join(m for p, m in variant['errors'] if p == 'expansion'), role)
@@ -3913,6 +4903,10 @@ def judge(case, base, control, variant, prefix=None):
                 return 'fail', f"compiles with a signature matching {case['signature']}", f"compiles with {found[:2]}"
             return 'pass', 'compiles with two failures', 'compiles'
         if variant['status'] == 'ok':
+            # A variation changes no behaviour a domain seed pins.
+            expected_report = EXPECTED_REPORTS.get(case['seed'])
+            if expected_report is not None and variant.get('report') != expected_report:
+                return 'fail', f'compiles and prints the pinned report {expected_report!r}', f"report {variant.get('report')!r}"
             return 'pass', 'compiles', 'compiles'
         if variant['status'] == 'macro-diagnostic':
             entry = limit_for(case, 'macro-diagnostic', '', role, variant)
@@ -3931,8 +4925,8 @@ def judge(case, base, control, variant, prefix=None):
         return 'artefact', 'as the seed', describe(variant)
     if variant['status'] in ('expansion-error', 'client-error'):
         place = 'expansion' if variant['status'] == 'expansion-error' else 'client'
-        message = ' | '.join(m for p, m in variant['errors'] if p == place)
-        entry = limit_for(case, variant['status'], message, role)
+        messages = sorted({m for p, m in variant['errors'] if p == place})
+        entry = limit_for(case, variant['status'], messages, role)
         if entry:
             return f'limit:{entry}', 'as the seed, or a documented limit', describe(variant)
     if variant['status'] != 'ok':
@@ -3941,13 +4935,23 @@ def judge(case, base, control, variant, prefix=None):
     same, why = same_outcome(reference, variant, case.get('mapping', {}), case.get('behaviour', True), case.get('run_mapping'), order_free(case), case.get('added', ()), case['text'])
     if same:
         return 'pass', 'as the seed', 'same signatures, graph, and output'
-    entry = limit_for(case, 'interface', why, role)
+    entry = limit_for(case, 'interface', interface_difference(reference, variant, case.get('mapping', {}), case.get('added', ()))
+                      or [why], role)
     if entry:
         return f'limit:{entry}', 'as the seed, or a documented limit', why
     return 'fail', 'as the seed: same generated signatures, graph, and output', why
 
 
+def interface_difference(reference, variant, mapping, added=()):
+    """Every generated signature one outcome has and the other lacks, each marked `-` or `+`."""
+    keep = lambda line: not any(re.search(pattern, line) for pattern in added)
+    a = {line for line in apply_mapping(reference.get('fingerprint', []), mapping) if keep(line)}
+    b = {line for line in variant.get('fingerprint', []) if keep(line)}
+    return [f'-{line}' for line in sorted(a - b)] + [f'+{line}' for line in sorted(b - a)]
+
+
 def run_difference(a, b):
+
     for left, right in zip(a, b):
         if left == right:
             continue
@@ -3970,6 +4974,61 @@ def run_difference(a, b):
     return f'{len(a)} lines vs {len(b)} lines'
 
 
+def declared_position(text, key, item, owner=None):
+    """Where `text` declares a graph list's item: the offset of the declaration or reference that orders it, or None."""
+    name = item.get('id') if isinstance(item, dict) else item
+    if not isinstance(name, str):
+        return None
+    if key in ('phases', 'terminal', 'restorable'):
+        found = re.search(r'\bcase\s+`?' + re.escape(name) + r'`?\s*\(', text)
+    elif key in ('inputs', 'scopes'):
+        opened = re.search(r'enum\s+' + ('Input' if key == 'inputs' else 'Scope') + r'\b[^{]*\{', text)
+        found = opened and re.compile(r'(?:\bcase\s+|,\s*)`?' + re.escape(name) + r'`?\b').search(text, opened.end())
+    elif key in ('operations', 'events'):
+        found = re.search(r'\benum\s+`?' + re.escape(name) + r'`?\b', text)
+    elif key in ('edges', 'routers', 'candidates'):
+        # By the function that declares it: an edge or router is `<phase>.<name>`.
+        function = item.get('name') if isinstance(item, dict) else name.split('.', 1)[-1]
+        found = function and re.search(r'\bfunc\s+`?' + re.escape(function) + r'`?\s*[(<]', text)
+    elif key == 'activeIn':
+        found = re.search(r'\bcase\s+`?' + re.escape(name) + r'`?\s*\(', text)
+    else:
+        found = None
+    return found.start() if found else None
+
+
+# Lists of an edge or an operation whose order StateMachineGraph documents nowhere.
+UNORDERED_LISTS = {'starts', 'emits', 'cancels', 'invalidates', 'requires'}
+
+
+def in_declaration_order(graph, text, keys):
+    """The reference graph with every list under `keys` put in the order `text` declares its items: a rewrite that
+    reorders declarations must reorder these lists exactly so, so each variant's lists derive from its own source."""
+    def arrange(value, key, owner):
+        if isinstance(value, dict):
+            anchor = owner
+            if value.get('name') and value.get('source') is not None:
+                function = re.search(r'\bfunc\s+`?' + re.escape(value['name']) + r'`?\s*[(<]', text)
+                anchor = text.rfind('\n    @', 0, function.start()) if function else owner
+            elif value.get('activeIn') is not None:
+                namespace = re.search(r'\benum\s+`?' + re.escape(value.get('id', '')) + r'`?\b', text)
+                anchor = text.rfind('@', 0, namespace.start()) if namespace else owner
+            return {k: arrange(v, k, anchor) for k, v in value.items()}
+        if isinstance(value, list):
+            items = [arrange(v, key, owner) for v in value]
+            if key not in keys:
+                return items
+            if key in UNORDERED_LISTS:
+                # The graph documents no order for these; they compare as collections on both sides.
+                return sorted(items, key=lambda v: json.dumps(v, sort_keys=True))
+            positions = [declared_position(text, key, v, owner) for v in value]
+            if any(p is None for p in positions):
+                return items
+            return [v for _, _, v in sorted(zip(positions, range(len(items)), items), key=lambda t: (t[0], t[1]))]
+        return value
+    return arrange(graph, None, None)
+
+
 def same_outcome(reference, variant, mapping, behaviour, run_mapping=None, order_free=(), added=(), text=None, graphs_only=False):
     """Whether two outcomes agree, with the control's names mapped onto the variant's (`run_mapping`, when given,
     for the printed output, whose graph names a nested schema by its own name). Under a reordering of members, the
@@ -3990,13 +5049,21 @@ def same_outcome(reference, variant, mapping, behaviour, run_mapping=None, order
         added = sorted(b - a)[:4]
         return False, 'signatures differ: -' + ' -'.join(removed) + ' +' + ' +'.join(added)
     keys = set().union(*[DECLARATION_ORDERED[k] for k in order_free]) if order_free else set()
-    ra = run_lines(apply_mapping(reference.get('run', []), run_mapping), keys)
-    rb = run_lines(variant.get('run', []), keys)
+    # Under a reordering, the reference's declaration-ordered lists are put in the variant's own declaration order;
+    # the variant's lists are compared as they are, so a generator that sorts them does not pass.
+    source = module_text(text) if text is not None else None
+    ra = [('graph: ' + json.dumps(in_declaration_order(json.loads(line[7:]), source, keys), sort_keys=True, ensure_ascii=False)
+           if line.startswith('graph: ') and keys and source is not None else line)
+          for line in apply_mapping(reference.get('run', []), run_mapping)]
+    unordered = keys & UNORDERED_LISTS
+    rb = [('graph: ' + json.dumps(unorder(json.loads(line[7:]), unordered), sort_keys=True, ensure_ascii=False)
+           if line.startswith('graph: ') and unordered else line) for line in variant.get('run', [])]
+
     if graphs_only and ra != rb:
         # A renamed phase reaches the report through the owner (edge IDs, phase names), but a report may also print
         # the old name as text of its own: either reading of each report line will do.
-        plain = run_lines([apply_mapping([line], run_mapping)[0] if line.startswith('graph: ') else line
-                           for line in reference.get('run', [])], keys)
+        plain = [line for line in ra]
+
         ra = [b if b in (m, q) else m for m, q, b in zip(ra, plain, rb)] if len(ra) == len(rb) else ra
     if behaviour and ra != rb:
         return False, 'run output differs: ' + run_difference(ra, rb)
@@ -4540,7 +5607,8 @@ def _outcome(result, text, started):
     status = ('memory' if code == 'memory' else 'timeout' if code == 'timeout' else 'launch' if code == 'launch' else
               'crash' if CRASH.search(log) or (isinstance(code, int) and code < 0) else 'ok' if code == 0 else
               'macro-diagnostic' if any(p == 'macro' for p, _ in errors) else 'expansion-error' if any(p == 'expansion' for p, _ in errors) else 'error')
-    outcome = dict(status=status, errors=errors, seconds=round(time.monotonic() - started, 2), peak_mb=result.peak_mb)
+    outcome = dict(status=status, errors=errors, seconds=round(time.monotonic() - started, 2), peak_mb=result.peak_mb,
+                   columns=columns_of(log))
     if status in ('memory', 'timeout'):
         outcome['crash'] = f'{"over memory cap" if status == "memory" else "timeout"} ({result.peak_mb} MB, {result.seconds}s)'
     return outcome
@@ -4643,17 +5711,68 @@ def plugin_parser_problem(toolchain, output):
 
 
 # The guide's size limits, each checked in the heaviest owner set: every owner the shared mode generates.
+def construct_effect_mix(n):
+    """`n` effect cases as a mix: 170 keyed operations, each cancelled by an edge (two effect cases each), and the
+    rest events, so the limit is crossed by its mix, not by one construct."""
+    keyed = 170
+    events = n - 3 * keyed
+    operations = '\n'.join(f'    @Operation(activeIn: [Idle.self])\n    enum Op{i} {{ typealias Key = Int }}' for i in range(keyed))
+    notes = '\n'.join(f'    @Event\n    enum Note{i} {{}}' for i in range(events))
+    starts = ', '.join(f'Op{i}.self' for i in range(keyed))
+    emits = ', '.join(f'Note{i}.self' for i in range(events))
+    successes = '\n'.join(f'    @Transition(onSuccess: Op{i}.self)\n    fileprivate static func done{i}(_ source: Idle) -> Idle {{ source }}'
+                          for i in range(keyed))
+    return _schema(f"""    struct Idle: Sendable {{}}
+    @Initial case idle(Idle)
+    enum Input: Sendable {{ case go, stop }}
+{operations}
+{notes}
+    @Transition(on: Input.go, starts: [{starts}], emits: [{emits}])
+    fileprivate static func go(_ source: Idle) -> Change<Idle, Effect.Go> {{ Change(source, effects: []) }}
+    @Transition(on: Input.stop, cancels: [{starts}])
+    fileprivate static func stop(_ source: Idle) -> Change<Idle, Effect.Stop> {{ Change(source, effects: []) }}
+{successes}""")
+
+
 SIZE_LIMITS = {'phases': (construct_phases, 600), 'inputs': (construct_inputs, 512),
-               'operations': (construct_operations, 256), 'effect cases': (construct_events, 512)}
+               'operations': (construct_operations, 256), 'effect cases': (construct_events, 512),
+               'effect mix': (construct_effect_mix, 512)}
 
 
 def all_owners(text):
     return re.sub(r'@StateMachine\(mode: \.shared, owners: \[[^\]]*\]\)', '@StateMachine(mode: .shared)', text)
 
 
+SIZE_WORDS = {'phases': ('phases', 'Snapshot'), 'inputs': ('input cases', 'Input'), 'operations': ('operations', 'Completion'),
+              'effect cases': ('operations, cancellations, and events', 'Effect'),
+              'effect mix': ('operations, cancellations, and events', 'Effect')}
+
+
+
+def size_refusal_problem(outcome, text, construct, count, limit):
+    """Why a schema one past a limit was not refused exactly as documented: the one macro diagnostic must name the
+    construct, the count it declares, and the bound, and stand at the schema's name. None when it was."""
+    what, generated = SIZE_WORDS[construct]
+    message = (f'This schema declares {count} {what}; the macro accepts at most {limit}, because Swift checks a switch over '
+               f'its {generated} cases only within a fixed budget and type-checks a larger expansion slowly. Split the graph '
+               f'into several schemas.')
+    if outcome.get('status') != 'macro-diagnostic':
+        return f'not refused: {describe(outcome)}'
+    macro = [m for p, m in outcome.get('errors', []) if p == 'macro']
+    if macro != [message]:
+        return f'refused with {macro[:2]}, not {message!r}'
+    lines = text.split('\n')
+    at = next(((index + 1, line.index('Flow') + 1) for index, line in enumerate(lines) if re.search(r'\benum Flow\b', line)), None)
+    where = [(line, column) for (m, _, line), column in outcome.get('columns', []) if m == message]
+    if at is None or where != [at]:
+        return f'refused at {where}, not at the schema name {at}'
+    return None
+
+
 def run_size_limits(toolchain, output, cap):
     """At each documented limit the expansion compiles within the time and memory caps; one past it, the macro
-    refuses it with the size-limit diagnostic. One compilation at a time."""
+    refuses it with exactly the size-limit diagnostic for that construct, count, and bound, at the schema's name. One
+    compilation at a time."""
     bounded = Toolchain.__new__(Toolchain)
     bounded.__dict__.update(toolchain.__dict__)
     bounded.timeout = cap
@@ -4662,10 +5781,11 @@ def run_size_limits(toolchain, output, cap):
     for name, (generate, limit) in SIZE_LIMITS.items():
         at = measure_macro(bounded, output / 'limits' / f'{name}-{limit}', all_owners(generate(limit)), 1)
         over = measure_macro(bounded, output / 'limits' / f'{name}-{limit + 1}', all_owners(generate(limit + 1)), 1)
-        messages = [m for p, m in over['errors'] if p == 'macro']
         under_ok = at['status'] == 'ok'
-        over_ok = over['status'] == 'macro-diagnostic' and any(re.search(pattern, m) for m in messages)
+        problem = size_refusal_problem(over, all_owners(generate(limit + 1)), name, limit + 1, limit)
+        over_ok = problem is None
         verdict = 'pass' if under_ok and over_ok else 'fail'
+
         rows.append(f"| {name} | {limit} | {describe(at)} ({at['seconds']}s, {at.get('peak_mb', '-')} MB) | "
                     f"{describe(over)[:160]} | {verdict} |")
         results.append(dict(id=f'size-limit-{name}', verdict=verdict,
@@ -4698,13 +5818,16 @@ def run_ceilings(toolchain, output, jobs, cap, limit, only=''):
                 # crashing, is a failure of its own, whatever size it happens at.
                 if outcome['status'] in RESOURCE_FAILURES:
                     kind = 'resource'
-                elif outcome['status'] == 'macro-diagnostic' and messages and all(re.search(pattern, m) for m in messages):
+                elif outcome['status'] == 'macro-diagnostic' and len(messages) == 1 and re.fullmatch(pattern, messages[0]):
                     kind = 'refusal'
+                elif all(re.search(SWIFT_LIMITS, m) for p, m in outcome.get('errors', [])) and outcome.get('errors'):
+                    kind = 'swift-limit'
                 else:
                     kind = 'error'
                 break
             good, size = size, size * 2
-        verdict = 'fail' if kind == 'resource' or (kind == 'error' and failing <= CEILING_FLOOR) else 'pass'
+        # Above the guaranteed floor only Swift's own documented limits may stop a construct; any other error fails.
+        verdict = 'fail' if kind in ('resource', 'error') or (kind == 'swift-limit' and failing <= CEILING_FLOOR) else 'pass'
         found.append(dict(construct=name, ceiling=good, failing=failing, stopped=reason, kind=kind, verdict=verdict,
                           timings=at, limit=min(limit, CEILING_LIMITS.get(name, limit))))
     lines = ['| Construct | Compiles up to | First failing size | Macro time / peak memory at the largest | What stops it | Verdict |',
@@ -4712,7 +5835,9 @@ def run_ceilings(toolchain, output, jobs, cap, limit, only=''):
     for row in found:
         largest = row['timings'].get(row['ceiling'], {})
         reach = (f"at least {row['ceiling']}" if row['failing'] is None else f"{row['ceiling'] or '< 8'}")
-        stopped = {'resource': 'resource failure: ', 'refusal': 'documented refusal: ', 'error': 'error: '}.get(row['kind'], '')
+        stopped = {'resource': 'resource failure: ', 'refusal': 'documented refusal: ', 'swift-limit': "Swift's own limit: ",
+                   'error': 'error: '}.get(row['kind'], '')
+
         lines.append(f"| {row['construct']} | {reach} | {row['failing'] or '-'} | {largest.get('macro_seconds', '-')}s / "
                      f"{largest.get('peak_mb', '-')} MB | {stopped}{(row['stopped'] or 'nothing up to the search limit')[:200]} | {row['verdict']} |")
     (output / 'ceilings.md').write_text('\n'.join(lines) + '\n')
@@ -4720,8 +5845,10 @@ def run_ceilings(toolchain, output, jobs, cap, limit, only=''):
 
 
 # Sizes at or below which any failure to compile fails a ceiling search; above it, Swift's own limits (its check of a
-# generated switch, its parser's nesting limit) may stop a construct the guide sets no limit for.
+# generated switch, its parser's nesting limit) may stop a construct the guide sets no limit for, and only those.
 CEILING_FLOOR = 256
+SWIFT_LIMITS = (r'the compiler is unable to type-check this expression in reasonable time|reasonable time|'
+                r'parser (?:limit|nesting)|too complex|exceeds? (?:the )?(?:maximum|limit)|nesting level|nested too deeply')
 # Search limits of constructs past which Swift itself, not the macro, takes unbounded time: plain Swift type-checks a
 # 24-deep nested array type in about 9 s, and its parser refuses 256 levels of nesting.
 CEILING_LIMITS = {'nesting': 16, 'namespaces': 128}
@@ -4766,7 +5893,7 @@ def self_test_graph():
             'initial': 'idle', 'terminal': ['busy'], 'restorable': [],
             'phases': [{'id': 'idle', 'payload': 'Idle'}, {'id': 'busy', 'payload': 'Busy'}],
             'inputs': [{'id': 'go', 'payload': 'Detail'}, {'id': 'stop'}], 'scopes': [], 'operations': [],
-            'events': [{'id': 'Logged', 'effect': 'logged', 'payload': 'Detail'}, {'id': 'Closing', 'effect': 'closing', 'payload': 'Void'}],
+            'events': [{'id': 'Logged', 'effect': 'logged', 'payload': 'Detail'}, {'id': 'Closing', 'effect': 'closing', 'payload': 'Swift::Void'}],
             'edges': [{'id': 'idle.go', 'name': 'go', 'source': 'idle', 'destination': 'busy', 'trigger': {'input': {'_0': 'go'}},
                        'starts': [], 'cancels': [], 'emits': ['Logged', 'Closing'], 'invalidates': []},
                       {'id': 'idle.stop', 'name': 'stop', 'source': 'idle', 'destination': 'busy', 'trigger': {'input': {'_0': 'stop'}},
@@ -4774,11 +5901,20 @@ def self_test_graph():
             'routers': []}
 
 
-def synthetic(graph=None, fingerprint=(), report='planted', **extra):
+PLANT_SYMBOL = 'Fz.Plant.Owned.go(_: Fz.Plant.Owned<Fz.Plant.Idle>) -> Fz.Plant.Owned<Fz.Plant.Busy>'
+
+
+def synthetic(graph=None, fingerprint=(PLANT_SYMBOL,), report='planted', text=None, **extra):
+    """An outcome as a compilation of the self-test schema (or `text`) that printed `graph` would give, with its
+    inventory and exported text checked against that source."""
     graph = graph or self_test_graph()
     lines = normalize_run('graph: ' + json.dumps(graph, sort_keys=True) + f'\nreport: {report}')
-    return dict(dict(status='ok', errors=[], located=[], fingerprint=list(fingerprint), run=lines, report=report,
-                     spelling_problems=[], diagram_problems=[], label_problems=[], seconds=0.0), **extra)
+    outcome = dict(dict(status='ok', errors=[], located=[], fingerprint=list(fingerprint), run=lines, report=report,
+                        spelling_problems=[], diagram_problems=[], label_problems=[], seconds=0.0), **extra)
+    source = text or SELF_TEST_SCHEMA
+    outcome.setdefault('inventory_problems', inventory_problems(source, outcome))
+    outcome.setdefault('text_problems', exported_text_problems(source, [graph]))
+    return outcome
 
 
 def self_case(text, rewrites=('paren',), kinds=('eq',), **extra):
@@ -4790,8 +5926,8 @@ def self_case(text, rewrites=('paren',), kinds=('eq',), **extra):
 OLD_MERMAID = 'stateDiagram-v2\n    [*] --> {0}\n    {0} --> busy : go\n    {0} --> busy : stop\n    busy --> [*]\n'
 NEW_MERMAID = ('stateDiagram-v2\n    state "{0}" as p0\n    state "busy" as p1\n    [*] --> p0\n    p0 --> p1 : go\n    p0 --> p1 : stop\n'
                '    p1 --> [*]\n')
-DOT = ('digraph "Plant" {{\n    "*" [shape=point];\n    "{0}";\n    "busy" [peripheries=2];\n    "*" -> "{0}";\n'
-       '    "{0}" -> "busy" [label="go"];\n    "{0}" -> "busy" [label="stop"];\n}}\n')
+DOT = ('digraph "Plant" {{\n    entry [shape=point];\n    p0 [label="{0}"];\n    p1 [label="busy", peripheries=2];\n'
+       '    entry -> p0;\n    p0 -> p1 [label="go"];\n    p0 -> p1 [label="stop"];\n}}\n')
 INIT = ('Fz.Plant.MainActorHost.init(_: Fz.Plant.Idle, {0}, configuration: StateMachine.Configuration) -> Fz.Plant.MainActorHost')
 
 
@@ -4815,7 +5951,8 @@ def self_tests(toolchain, output):
     respelled = self_test_graph()
     respelled['inputs'][0]['payload'] = 'Self.Detail'
     check('swapped trigger', 'graph comparison', judge(case, base, None, synthetic(swapped))[0],
-          judge(case, base, None, synthetic(respelled))[0])
+          judge(case, base, None, synthetic())[0])
+    check('respelled export', 'exported text', judge(case, base, None, synthetic(respelled))[0], judge(case, base, None, synthetic())[0])
     check('input trigger read as failure', 'graph comparison', judge(case, base, None, synthetic(failure))[0],
           judge(case, base, None, synthetic())[0])
     keyed = self_test_graph()
@@ -4868,8 +6005,10 @@ def self_tests(toolchain, output):
     attribute_line = base_text.split('\n').index('    fileprivate static func stop(_ source: Idle) -> Busy { Busy() }') + 1
     refused_text = base_text.replace('    fileprivate static func stop(', '    @MainActor fileprivate static func stop(')
     message = "Remove '@MainActor': generated code calls this function from nonisolated code and from every owner, so it takes only ..."
-    refusal = lambda line, extra=(): dict(status='macro-diagnostic', errors=[('macro', message)] + [(p, m) for p, m, _, _ in extra],
-                                          located=[('macro', message, 'Case.swift', line)] + list(extra))
+    # The refusal stands at the attribute, column 5 of its line, unless a test moves it.
+    refusal = lambda line, extra=(), column=5, text=message: dict(
+        status='macro-diagnostic', errors=[('macro', text)] + [(p, m) for p, m, _, _ in extra],
+        located=[('macro', text, 'Case.swift', line)] + list(extra), columns=[((text, 'Case.swift', line), column)])
     refused_case = self_case(refused_text, rewrites=['declaration-attributes'], kinds=['safe'], expect='custom-attribute')
     check('refusal away from the changed site', 'refusal site', judge(refused_case, base, None, refusal(3))[0],
           judge(refused_case, base, None, refusal(attribute_line))[0])
@@ -4879,17 +6018,38 @@ def self_tests(toolchain, output):
     aliased = base_text.replace('@Initial case idle(Idle)', '@Initial case idle(FuzzAlias)')
     alias_case = self_case(aliased, rewrites=['alias-local'], role='phase')
     phase_line = aliased.split('\n').index('    @Initial case idle(FuzzAlias)') + 1
-    other = dict(status='macro-diagnostic', errors=[('macro', 'Some other refusal.')], located=[('macro', 'Some other refusal.', 'Case.swift', phase_line)])
-    alias = dict(status='macro-diagnostic', errors=[('macro', phase_message)], located=[('macro', phase_message, 'Case.swift', phase_line)])
+    alias_column = aliased.split('\n')[phase_line - 1].index('FuzzAlias') + 1
+    other = dict(status='macro-diagnostic', errors=[('macro', 'Some other refusal.')], located=[('macro', 'Some other refusal.', 'Case.swift', phase_line)],
+                 columns=[(('Some other refusal.', 'Case.swift', phase_line), alias_column)])
+    alias = dict(status='macro-diagnostic', errors=[('macro', phase_message)], located=[('macro', phase_message, 'Case.swift', phase_line)],
+                 columns=[((phase_message, 'Case.swift', phase_line), alias_column)])
     check('phase alias refused for another reason', 'limit message', judge(alias_case, base, None, other)[0], judge(alias_case, base, None, alias)[0])
-    broken = self_case(base_text.replace('@Terminal case busy', 'case busy'), rewrites=['terminal-flip'], kinds=['break'])
-    busy_line = base_text.split('\n').index('    @Terminal case busy(Busy)') + 1
     unexit = "Phase 'busy' has no outgoing transitions; mark it '@Terminal' or declare a transition from it."
+    broken = self_case(base_text.replace('@Terminal case busy', 'case busy'), rewrites=['terminal-flip'], kinds=['break'],
+                       refusal=r"Phase 'busy' has no outgoing transitions; mark it '@Terminal' or declare a transition from it\.")
+    busy_line = base_text.split('\n').index('    @Terminal case busy(Busy)') + 1
+    busy_column = base_text.replace('@Terminal case busy', 'case busy').split('\n')[busy_line - 1].index('busy') + 1
+    finding = lambda text, column=busy_column, extra=(): dict(
+        status='macro-diagnostic', errors=[('macro', text)] + [(p, m) for p, m, _, _ in extra],
+        located=[('macro', text, 'Case.swift', busy_line)] + list(extra), columns=[((text, 'Case.swift', busy_line), column)])
     check('breaking rewrite rejected only by the linker', 'rejection', judge(broken, base, None, dict(status='link-error', errors=[('link', 'undefined symbol')], located=[]))[0],
-          judge(broken, base, None, dict(status='macro-diagnostic', errors=[('macro', unexit)], located=[('macro', unexit, 'Case.swift', busy_line)]))[0])
-    check('breaking rewrite rejected with another diagnostic', 'documented rejection',
-          judge(broken, base, None, dict(status='macro-diagnostic', errors=[('macro', 'Unrelated.')], located=[('macro', 'Unrelated.', 'Case.swift', busy_line)]))[0],
-          judge(broken, base, None, dict(status='macro-diagnostic', errors=[('macro', unexit)], located=[('macro', unexit, 'Case.swift', busy_line)]))[0])
+          judge(broken, base, None, finding(unexit))[0])
+    check('breaking rewrite rejected with another diagnostic', 'documented rejection', judge(broken, base, None, finding('Unrelated.'))[0],
+          judge(broken, base, None, finding(unexit))[0])
+    other_phase = "Phase 'idle' has no outgoing transitions; mark it '@Terminal' or declare a transition from it."
+    check('breaking rewrite refused for a phase it did not change (broad graph-validity match)', 'exact finding',
+          judge(broken, base, None, finding(other_phase))[0], judge(broken, base, None, finding(unexit))[0])
+    check('breaking rewrite refused at another token of the line', 'refusal token', judge(broken, base, None, finding(unexit, column=15))[0],
+          judge(broken, base, None, finding(unexit))[0])
+    check('refusal whose message only starts as documented', 'whole message',
+          judge(refused_case, base, None, refusal(attribute_line, text="Remove '@MainActor'"))[0],
+          judge(refused_case, base, None, refusal(attribute_line))[0])
+    check('exact refusal beside a Swift error at the changed declaration', 'consequent diagnostics',
+          judge(refused_case, base, None, refusal(attribute_line, [('authored', "cannot convert value of type 'Int' to specified type 'String'", 'Case.swift', attribute_line)]))[0],
+          judge(refused_case, base, None, refusal(attribute_line))[0])
+    check('refusal at the right line, wrong column', 'refusal token', judge(refused_case, base, None, refusal(attribute_line, column=17))[0],
+          judge(refused_case, base, None, refusal(attribute_line))[0])
+
     composed = self_case(refused_text, rewrites=['paren', 'declaration-attributes'], kinds=['eq', 'safe'], expect='custom-attribute')
     check('composed case whose other rewrites fail alone', 'composed control',
           judge(composed, base, None, refusal(attribute_line), ('fail', 'as the seed', 'signatures differ'))[0],
@@ -4948,9 +6108,11 @@ func fuzzReport() -> String { "stub" }
         typealias Payload = Detail
     }''')
     reordered = self_case(swapped_text, rewrites=['reorder-members'])
+    swapped_events = self_test_graph()
+    swapped_events['events'] = swapped_events['events'][::-1]
     check('reordered events, labels kept in the old order', 'ordered label comparison',
-          judge(reordered, synthetic(fingerprint=[right_init]), None, synthetic(fingerprint=[right_init]))[0],
-          judge(reordered, synthetic(fingerprint=[right_init]), None, synthetic(fingerprint=[wrong_init]))[0])
+          judge(reordered, synthetic(fingerprint=[right_init]), None, synthetic(swapped_events, fingerprint=[right_init]))[0],
+          judge(reordered, synthetic(fingerprint=[right_init]), None, synthetic(swapped_events, fingerprint=[wrong_init]))[0])
 
     # (7) Diagrams.
     graph = self_test_graph()
@@ -4958,10 +6120,10 @@ func fuzzReport() -> String { "stub" }
     check('Mermaid state named note', 'Mermaid reader', 'fail' if check_diagrams(noted, OLD_MERMAID.format('note'), DOT.format('note')) else 'pass',
           'pass' if not check_diagrams(noted, NEW_MERMAID.format('note'), DOT.format('note')) else 'fail')
     check('Mermaid describing another graph', 'Mermaid structure', 'fail' if check_diagrams(graph, NEW_MERMAID.format('idle').replace('p0 --> p1 : stop', 'p1 --> p0 : stop'), DOT.format('idle')) else 'pass',
-          'pass' if not check_diagrams(graph, OLD_MERMAID.format('idle'), DOT.format('idle')) else 'fail')
+          'pass' if not check_diagrams(graph, NEW_MERMAID.format('idle'), DOT.format('idle')) else 'fail')
     check('DOT name with an unescaped quote', 'DOT reader', 'fail' if check_diagrams(graph, NEW_MERMAID.format('idle'), DOT.replace('"Plant"', '"Pl"ant"').format('idle')) else 'pass',
           'pass' if not check_diagrams(graph, NEW_MERMAID.format('idle'), DOT.format('idle')) else 'fail')
-    check('DOT edge missing', 'DOT structure', 'fail' if check_diagrams(graph, NEW_MERMAID.format('idle'), DOT.format('idle').replace('    "idle" -> "busy" [label="stop"];\n', '')) else 'pass',
+    check('DOT edge missing', 'DOT structure', 'fail' if check_diagrams(graph, NEW_MERMAID.format('idle'), DOT.format('idle').replace('    p0 -> p1 [label="stop"];\n', '')) else 'pass',
           'pass' if not check_diagrams(graph, NEW_MERMAID.format('idle'), DOT.format('idle')) else 'fail')
 
     # (8) Resources.
@@ -4992,7 +6154,123 @@ func fuzzReport() -> String { "stub" }
     finally:
         globals()['measure_macro'] = real_measure
     check('ceiling stopped by a timeout', 'ceiling verdict', timed_out['verdict'], refused['verdict'])
+    globals()['measure_macro'] = lambda *a, **k: dict(status='error', errors=[('authored', 'some unrelated error')], seconds=1, peak_mb=10, macro_seconds=0)
+    try:
+        errored = run_ceilings(toolchain, output / 'self-test' / 'ceilings-error', 1, 1, 1024, '^phases$')[0]
+    finally:
+        globals()['measure_macro'] = real_measure
+    check('ceiling stopped by an arbitrary compiler error', 'ceiling verdict', errored['verdict'], refused['verdict'])
+
+    # (9) Exported text, against the author's own.
+    selfish = base_text.replace('@Initial case idle(Idle)', '@Initial case idle(Self.Idle)')
+    check('exported text drops Self.', 'exported text', 'fail' if exported_text_problems(selfish, [self_test_graph()]) else 'pass',
+          'pass' if not exported_text_problems(base_text, [self_test_graph()]) else 'fail')
+    parenthesized = base_text.replace('case go(Detail), stop', 'case go((Detail)), stop')
+    check('exported text drops parentheses', 'exported text', 'fail' if exported_text_problems(parenthesized, [self_test_graph()]) else 'pass',
+          'pass' if not exported_text_problems(parenthesized, [json.loads(json.dumps(self_test_graph()).replace('"payload": "Detail"}, {"id": "stop"', '"payload": "(Detail)"}, {"id": "stop"'))]) else 'fail')
+    defaulted = self_test_graph()
+    defaulted['events'][1]['payload'] = 'Void'
+    check('omitted payload not spelled through the standard module', 'exported text', 'fail' if exported_text_problems(base_text, [defaulted]) else 'pass',
+          'pass' if not exported_text_problems(base_text, [self_test_graph()]) else 'fail')
+
+    # (10) What the input declares.
+    check('successful outcome with no symbols and no output', 'inventory', 'fail' if seed_problems('selftest', synthetic(fingerprint=[], run=[])) else 'pass',
+          'pass' if not seed_problems('selftest', base) else 'fail')
+    dropped = self_test_graph()
+    dropped['phases'] = dropped['phases'][:1]
+    check('graph that leaves a declared phase out', 'inventory', 'fail' if inventory_problems(base_text, synthetic(dropped)) else 'pass',
+          'pass' if not inventory_problems(base_text, base) else 'fail')
+    two = base_text + '\n// fuzz-file: Other.swift\nimport StateMachine\n\n' + base_text.split('\n', 2)[2].replace('enum Plant', 'enum Other').split('extension Plant')[0]
+    check('schema in another file without a graph', 'inventory', 'fail' if inventory_problems(two, base) else 'pass',
+          'pass' if not inventory_problems(base_text, base) else 'fail')
+    check('probe count read from the graph, not the input', 'probe count', 'fail' if spelling_probes(base_text, [dropped])[2] else 'pass',
+          'pass' if not spelling_probes(base_text, [self_test_graph()])[2] else 'fail')
+
+    # (11) What decides whether a case is probed.
+    check('alias right-hand side changed under an unchanged spelling', 'probe cache',
+          'fail' if declaration_signature('typealias T = Int\n') != declaration_signature('typealias T = String\n') else 'pass',
+          'pass' if declaration_signature('typealias T = Int\n') == declaration_signature('typealias T = Int\n') else 'fail')
+    check('import changed under an unchanged spelling', 'probe cache',
+          'fail' if declaration_signature('import Foundation\n') != declaration_signature('import Darwin\n') else 'pass',
+          'pass' if declaration_signature('import Foundation\n') == declaration_signature('import Foundation\n') else 'fail')
+
+    # (12) A crash before any allowance, and through reduction.
+    crashing = dict(status='crash', crash='Stack dump:', errors=[], located=[])
+    check('crash behind a documented limit of the other rewrites', 'judgment order',
+          judge(case, base, None, crashing, ('limit:phase-alias', 'a documented limit', 'x'))[0],
+          judge(case, base, None, base, ('limit:phase-alias', 'a documented limit', 'x'))[0])
+    check('reduction to a case that fails another way', 'reduction',
+          'fail' if not same_failure(dict(expected='E', status='crash'), dict(status='ok'), 'fail', 'E') else 'pass',
+          'pass' if same_failure(dict(expected='E', status='crash'), dict(status='crash'), 'fail', 'E') else 'fail')
+
+    # (13) Declaration order from the variant's own source.
+    sorted_events = self_test_graph()
+    sorted_events['events'] = sorted(sorted_events['events'], key=lambda e: e['id'])
+    in_order = self_case(base_text, rewrites=['reorder-members'])
+    check('declaration-ordered list alphabetized by the generator', 'order comparison',
+          judge(in_order, base, None, synthetic(sorted_events))[0], judge(in_order, base, None, synthetic())[0])
+    check('managed owner without its ordered initializer', 'declaration-order labels',
+          'fail' if label_order_problems([], base_text) else 'pass', 'pass' if not label_order_problems([right_init], base_text) else 'fail')
+
+    # (14) External uses.
+    presence, absence, marked, _ = client_use_sources(base_text)
+    lines = absence.split('\n')
+    absent_log = ''.join(f"Absent.swift:{line}:9: error: type 'Plant' has no member '{owner}'\n" for owner, line in marked)
+    check('unselected owner present', 'external uses', 'fail' if client_use_judgement('', 0, absent_log.split('\n', 1)[1], marked) else 'pass',
+          'pass' if not client_use_judgement('', 0, absent_log, marked) else 'fail')
+    check('selected owner unusable from another module', 'external uses',
+          'fail' if client_use_judgement("Uses.swift:5:9: error: cannot find 'Plant' in scope\n", 1, absent_log, marked) else 'pass',
+          'pass' if not client_use_judgement('', 0, absent_log, marked) else 'fail')
+    widened = client_use_sources(base_text.replace('owners: [.owned, .local, .mainActorHost]', 'owners: [.owned, .local, .mainActorHost, .shared]'))
+    check('uses generated from the schema, not fixed', 'external uses',
+          'fail' if {o for o, _ in widened[2]} != {o for o, _ in marked} and 'Plant.Shared.self' in widened[0] else 'pass',
+          'pass' if 'MainActorHost.self' in presence and {o for o, _ in marked} == {'Shared', 'ActorHost', 'IsolatedHost'} else 'fail')
+
+
+    # (15) Diagrams, every documented feature.
+    bare = '\n'.join(l for l in NEW_MERMAID.format('idle').split('\n') if not l.startswith('    state ')) 
+    check('Mermaid without its state declarations', 'Mermaid declarations', 'fail' if check_diagrams(graph, bare, DOT.format('idle')) else 'pass',
+          'pass' if not check_diagrams(graph, NEW_MERMAID.format('idle'), DOT.format('idle')) else 'fail')
+    restoring = self_test_graph()
+    restoring['restorable'] = ['busy']
+    restored_mermaid = NEW_MERMAID.format('idle').replace('    [*] --> p0\n', '    [*] --> p0\n    [*] --> p1 : restored\n')
+    restored_dot = DOT.format('idle').replace('    entry -> p0;\n', '    entry -> p0;\n    entry -> p1 [label="restored", style=dashed];\n')
+    check('DOT restoration edge without its dashed style', 'DOT edge style',
+          'fail' if check_diagrams(restoring, restored_mermaid, restored_dot.replace(', style=dashed', '')) else 'pass',
+          'pass' if not check_diagrams(restoring, restored_mermaid, restored_dot) else f'fail: {check_diagrams(restoring, restored_mermaid, restored_dot)[:1]}')
+    check('Mermaid label with a character Mermaid reads', 'Mermaid label', 'fail' if mermaid_label('x:y') is None else 'pass',
+          'pass' if mermaid_label('x' + chr(0x05B0)) == 'x' + chr(0x05B0) else 'fail')
+
+    # (16) Allowances explain the whole difference, and stand on the guide.
+    shared = 'Fz.Plant.Owned.go(_: Fz.Plant.Owned<Fz.Plant.Idle>, _: Swift.Int) -> Fz.Plant.Owned<Fz.Plant.Busy>'
+    lost = 'Fz.Plant.Owned.stop(_: Fz.Plant.Owned<Fz.Plant.Idle>) -> Fz.Plant.Owned<Fz.Plant.Busy>'
+    ownership = self_case(base_text, rewrites=['shared-param'])
+    check('documented respelling beside a lost member', 'whole-difference allowance',
+          judge(ownership, synthetic(fingerprint=[shared, lost]), None, synthetic(fingerprint=[shared.replace('_: Swift.Int', '_: __shared Swift.Int')]))[0],
+          judge(ownership, synthetic(fingerprint=[shared, lost]), None, synthetic(fingerprint=[shared.replace('_: Swift.Int', '_: __shared Swift.Int'), lost]))[0])
+    check('allowance whose guide sentence is gone', 'guide quotation',
+          'fail' if missing_quotations([dict(id='gone', doc='A sentence the guide never had.')], DOC.read_text()) else 'pass',
+          'pass' if not missing_quotations(LIMITS, DOC.read_text()) else f"fail: {[e['id'] for e in missing_quotations(LIMITS, DOC.read_text())]}")
+
+    # (17) Size limits: the construct, the count, the bound, and the place.
+    flow = construct_phases(3)
+    flow_line = flow.split('\n').index(next(l for l in flow.split('\n') if 'enum Flow' in l)) + 1
+    flow_column = flow.split('\n')[flow_line - 1].index('Flow') + 1
+    sized = lambda message, column=flow_column: dict(status='macro-diagnostic', errors=[('macro', message)],
+                                                    columns=[((message, 'Case.swift', flow_line), column)])
+    right = ('This schema declares 601 phases; the macro accepts at most 600, because Swift checks a switch over its Snapshot cases '
+             'only within a fixed budget and type-checks a larger expansion slowly. Split the graph into several schemas.')
+    check('size refusal for another construct', 'size limit',
+          'fail' if size_refusal_problem(sized(right.replace('601 phases', '601 input cases')), flow, 'phases', 601, 600) else 'pass',
+          'pass' if not size_refusal_problem(sized(right), flow, 'phases', 601, 600) else 'fail')
+    check('size refusal with another count', 'size limit',
+          'fail' if size_refusal_problem(sized(right.replace('601', '700')), flow, 'phases', 601, 600) else 'pass',
+          'pass' if not size_refusal_problem(sized(right), flow, 'phases', 601, 600) else 'fail')
+    check('size refusal away from the schema name', 'size limit',
+          'fail' if size_refusal_problem(sized(right, column=1), flow, 'phases', 601, 600) else 'pass',
+          'pass' if not size_refusal_problem(sized(right), flow, 'phases', 601, 600) else 'fail')
     return checks
+
 
 
 def compare_probe_types(labels, types):
@@ -5050,7 +6328,8 @@ def make_case(seed_name, names, choices, text, info, number):
                 run_mapping=info['run_mapping'], behaviour=info['behaviour'], choices=list(choices),
                 inside=info.get('inside', True), flags=info['flags'], added=info.get('added', []), verb=info.get('verb'),
                 expect=info.get('expect'), breaking=info.get('breaking'), signature=info.get('signature'),
-                graphs_only=info.get('graphs_only'))
+                graphs_only=info.get('graphs_only'), refusal=info.get('refusal'))
+
 
 
 SEED_TEXTS = {}
@@ -5090,8 +6369,9 @@ SMOKE_EVERY_SITE = {
     'own-lowercase-actor': r'^(lowercase-attribute|conditional-attribute)$',
     'own-function-attributes': r'^(function-attribute-order|module-selector)$',
     'own-metatype-failure': r'^(existential-metatype|metatype-split|composition-flatten)$',
-    'own-parallel-32': r'^integer-spelling$',
-    'own-parallel-33': r'^integer-spelling$',
+    'own-parallel-32': r'^(integer-spelling|label-backtick|numeric-valid|numeric-invalid)$',
+    'own-parallel-33': r'^(integer-spelling|label-backtick)$',
+
     'own-keyed-scoped-restoration': r'^(shadow-alias|restoration-invalid|scope-ineligible|operation-drop|cancel-unkeyed|integer-spelling)$',
     'own-report-local': r'^(reorder-members|reorder-cases|verb-edge-name|collide-case|reserved-phase|operation-drop)$',
     'own-available-schema': r'^(edge-availability|declaration-attributes)$',
@@ -5099,6 +6379,24 @@ SMOKE_EVERY_SITE = {
     'own-single-managed': r'^(owner-selection|owner-invalid)$',
     'own-managed-only': r'^(owner-selection|owner-invalid|reorder-members)$',
     'doc-Approval': r'^reserved-phase$',
+    'own-public-sendable-helper': r'^(shadow-standard|schema-access|label-backtick|closure-convention)$',
+    'own-alias-leaf': r'^(leaf-access|alias-base|schema-named-value)$',
+}
+
+
+# Rewrites that `--smoke` runs only on the seeds written for them, to keep it near its time budget; `--full` and
+# `--random` run them on every seed.
+SMOKE_SEEDS = {
+    'label-backtick': r'^own-(parallel-32|keyed-scoped-restoration|scoped-invalidation|access-pair)$',
+    'schema-named-value': r'^(own-event-isolated|own-alias-leaf|own-report-local|doc-Approval)$',
+    'schema-named-type': r'^(own-event-isolated|own-alias-leaf)$',
+    'rebind-alias': r'^(own-event-shadow|own-input-shadow|own-cross-file-input|fx-GMT-alias-router-failure)$',
+    'schema-to-file': r'^(own-alias-leaf|own-report-local|own-same-basename|doc-Approval)$',
+    'comment-decoy': r'^(own-report-local|doc-Approval)$',
+    'nfc-body': r'^(own-report-local|own-rejecting-routers)$',
+    'nfc-read': r'^(own-report-local|own-rejecting-routers)$',
+    'parameter-restriction': r'^(own-report-local|own-keyed-scoped-restoration|doc-Approval)$',
+    'duplicate-marker': r'^(own-report-local|own-keyed-scoped-restoration|doc-Approval)$',
 }
 
 
@@ -5112,6 +6410,12 @@ def smoke_cases(seeds, rewrites, per_rewrite, full=False):
     for seed_name in order:
         text = seeds[seed_name]
         for rw in rewrites:
+            if not full and rw.name in SMOKE_SEEDS and not re.search(SMOKE_SEEDS[rw.name], seed_name):
+                continue
+            # A renaming of a public seed's payload would also need the renamed declaration's access, which the
+            # distinction rewrites do not give it; the access-pair seed covers renaming under public access.
+            if rw.kind == 'dist' and seed_name in ('own-public-sendable-helper', 'own-alias-leaf'):
+                continue
             try:
                 mutations = rw.function(text, random.Random(f'{seed_name}/{rw.name}'))
             except Exception as error:  # A rewrite that cannot read a seed is a fuzzer defect worth seeing.
@@ -5183,7 +6487,7 @@ def compose(seed_name, text, names, choices):
             info_all['verb'] = info['verb']
         if info.get('expect'):
             info_all['expect'] = info['expect']
-        for key in ('breaking', 'signature', 'graphs_only'):
+        for key in ('breaking', 'signature', 'graphs_only', 'refusal'):
             if info.get(key):
                 info_all[key] = info[key]
         # The strongest role a step gives decides which limits apply: a phase payload, then a result shape.
@@ -5297,10 +6601,13 @@ def main():
         # Large schemas compile one at a time, so a compilation near the memory cap is the only one running.
         args.jobs = 1
 
-    for entry in LIMITS:
-        if entry['doc'] and ' '.join(entry['doc'].split()) not in ' '.join(DOC.read_text().split()):
-            print(f"warning: limit {entry['id']} quotes text DeclaringAGraph.md no longer contains: {entry['doc']!r}", file=sys.stderr)
+    # An allowance stands only on the sentence of the guide that documents it.
+    unquoted = missing_quotations(LIMITS, DOC.read_text())
+    for entry in unquoted:
+        print(f"error: limit {entry['id']} quotes text DeclaringAGraph.md no longer contains: {entry['doc']!r}", file=sys.stderr)
     (output / 'limits.json').write_text(json.dumps(LIMITS, indent=2, ensure_ascii=False) + '\n')
+    if unquoted and not args.self_test:
+        return 2
 
     started = time.monotonic()
     if args.self_test:
@@ -5340,10 +6647,16 @@ def main():
     # pins, exports spellings that name its types, renders both diagrams as its graph, and takes initializer labels in
     # declaration order. A seed that fails is a failure; one that does not compile blocks its cases.
     bases = {}
+    def compile_seed(name, text):
+        outcome = compile_case(toolchain, output / 'seeds' / name, text)
+        if outcome['status'] == 'ok' and toolchain.run:
+            outcome['client_use_problems'] = client_use_problems(toolchain, output / 'seeds' / name, text)
+        return outcome
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        futures = {name: pool.submit(compile_case, toolchain, output / 'seeds' / name, text) for name, text in seeds.items()}
+        futures = {name: pool.submit(compile_seed, name, text) for name, text in seeds.items()}
         for name, future in futures.items():
             bases[name] = future.result()
+
     SEED_TEXTS.update(seeds)
     results, blocked = [], {}
     for name, outcome in bases.items():
@@ -5365,7 +6678,8 @@ def main():
     def probe_for(case):
         # Spellings are probed for a renaming, and for any case whose exported spellings or declarations differ from
         # its seed's: a moved or added declaration can change what an unchanged spelling names.
-        if 'dist' in case['kinds']:
+        if 'dist' in case['kinds'] or case['flags']:
+            # The seed's spellings were probed without the case's flags.
             return True
         seed_spellings = bases[case['seed']].get('spellings')
         return lambda spellings, text: spellings != seed_spellings or declaration_signature(text) != declarations[case['seed']]
@@ -5404,8 +6718,17 @@ def main():
         variant = compile_case(toolchain, directory, case['text'], probe_for(case), case['flags'])
         control = control_outcome(case)
         verdict, expected, observed = judge(case, bases[case['seed']], control, variant, prefix_verdict(case))
+        replaced = False
+        if verdict == 'artefact' and CLIENT_MARKER in case['text'] and case['control'] is None:
+            # A rewrite that broke the seed's client code leaves the case unusable; the same schema without the
+            # client is its valid control, judged in its place.
+            stripped = dict(case, text=case['text'].split(CLIENT_MARKER, 1)[0])
+            variant = compile_case(toolchain, directory / 'without-client', stripped['text'], probe_for(stripped), case['flags'])
+            verdict, expected, observed = judge(stripped, bases[case['seed']], None, variant)
+            replaced = True
         result = dict(id=case['id'], seed=case['seed'], rewrites=case['rewrites'], kinds=case['kinds'], steps=case['steps'],
-                      verdict=verdict, expected=expected, observed=observed, seconds=variant['seconds'])
+                      verdict=verdict, expected=expected, observed=observed, seconds=variant['seconds'], replaced=replaced,
+                      status=variant['status'])
         (directory / 'result.json').write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
         if verdict in ('pass',) or verdict.startswith('limit:'):
             shutil.rmtree(directory, ignore_errors=True)
@@ -5434,18 +6757,114 @@ def main():
                    spelling_scope=toolchain.spelling_scope)
     (output / 'results.json').write_text(json.dumps(dict(summary=summary, results=[r for _, r in results]), indent=2, ensure_ascii=False) + '\n')
     (output / 'anchors.txt').write_text(''.join(f'{n}\t{kind}\t{message}\n' for (kind, message), n in ANCHORS.most_common()))
-    passed = counts.get('pass', 0) + counts.get('limit', 0) + counts.get('artefact', 0)
-    print(f"{passed}/{len(results)} fuzz cases passed ({counts.get('limit', 0)} at documented limits, "
-          f"{counts.get('artefact', 0)} fuzzer artefacts), {counts.get('fail', 0)} failed, {counts.get('policy', 0)} policy, "
+    # A fuzzer artefact is an unusable case: it is counted apart, never as a pass.
+    passed = counts.get('pass', 0) + counts.get('limit', 0)
+    replaced = sum(1 for _, r in results if r.get('replaced'))
+    print(f"{passed}/{len(results)} fuzz cases passed ({counts.get('limit', 0)} at documented limits), "
+          f"{counts.get('artefact', 0)} unusable (fuzzer artefacts; {replaced} replaced by their valid controls), "
+          f"{counts.get('fail', 0)} failed, {counts.get('policy', 0)} policy, "
           f"{len(blocked)} seeds blocked, in {summary['seconds']}s; evidence: {output}")
     return 1 if counts.get('fail') or counts.get('policy') or blocked else 0
+
+
+# --- External uses ------------------------------------------------------------------------------------------------
+# Every seed's owners are used from a module of their own, generated from what the seed's attributes declare: each
+# selected owner exists and has the conformance the guide gives it, each unselected owner does not exist, and a public
+# schema's owners are reachable with a plain import from another package.
+
+SENDABLE_OWNERS = {'Shared', 'ActorHost', 'MainActorHost'}
+
+
+def client_use_sources(text):
+    """(presence source, absence source with the line of each absent owner, whether the schema is public)."""
+    source = module_text(text)
+    guard = availability_guard(source)
+    present, absent, public, published = [], [], False, []
+    # Both lists follow the schemas' declarations in order, so two schemas of one basename keep their own paths.
+    paths = schema_path_list(source)
+    for (schema, owners), path in zip(selected_owners(source), paths if len(paths) == len(selected_owners(source)) else []):
+        exported = re.search(r'\bpublic\s+(?:\w+\s+)*enum\s+`?' + re.escape(schema) + r'\b', source) is not None
+        public = public or exported
+        # `Owned` is generic over its phase: it is named at the initial phase's payload.
+        occurrence = sum(1 for p in paths[:paths.index(path)] if p.split('.')[-1] == schema)
+        initial = re.search(r'@Initial\b[^\n]*?case\s+`?\w+`?\s*\(\s*([\w.]+)', schema_body(source, schema if not occurrence else f'{schema}#{occurrence}') or '')
+        for owner in OWNER_TYPES.values():
+            # `IsolatedHost` is generic over the actor it is confined to.
+            payload = re.sub(r'^(?:Self|' + re.escape(schema) + r')\.', '', initial.group(1)) if initial else ''
+            spelled = f'Fz.{path}.{owner}' + (f'<Fz.{path}.{payload}>' if owner == 'Owned' and initial else
+                                               '<MainActor>' if owner == 'IsolatedHost' else '')
+            if owner in owners:
+                present.append(f'fuzzNeedsType({spelled}.self)')
+                if exported:
+                    published.append(f'fuzzNeedsType({spelled}.self)')
+                if owner in SENDABLE_OWNERS:
+                    present.append(f'fuzzNeedsSendable({spelled}.self)')
+            else:
+                absent.append((owner, f'fuzzNeedsType({spelled}.self)'))
+    head = ['import Fz', 'import StateMachine', 'func fuzzNeedsSendable<T: Sendable & ~Copyable>(_: T.Type) {}',
+            'func fuzzNeedsType<T: ~Copyable>(_: T.Type) {}', '']
+    def wrap(lines):
+        body = ['    ' + line for line in lines]
+        if guard:
+            body = [f'    if #available({guard}) {{'] + ['    ' + line for line in body] + ['    }']
+        return '\n'.join(head + ['func fuzzUses() {'] + body + ['}']) + '\n'
+    presence = wrap(present)
+    absence = wrap([line for _, line in absent])
+    lines = absence.split('\n')
+    marked = [(owner, lines.index(next(l for l in lines if l.strip() == line)) + 1) for owner, line in absent]
+    return presence, absence, marked, wrap(published) if public else None
+
+
+def client_use_judgement(presence_log, presence_code, absence_log, marked, public_log=None, public_code=None):
+    """Problems of the external uses: the presence module must compile, and the absence module must fail exactly once
+    at each absent owner's line, saying the owner does not exist."""
+    problems = []
+    if presence_code != 0:
+        problems.append(f'client uses: a selected owner cannot be used from another module: {describe(dict(status="error", errors=classify(presence_log)))}')
+    if public_code not in (None, 0):
+        problems.append(f'client uses: a public schema\'s owner cannot be used from another package: {describe(dict(status="error", errors=classify(public_log)))}')
+    errors = [(int(line), message) for _, line, _, message in ERROR.findall(absence_log)]
+    for owner, line in marked:
+        here = [m for at, m in errors if at == line]
+        if not any(re.search(r"has no member '" + owner + r"'|'" + owner + r"' is not a member type", m) for m in here):
+            problems.append(f'client uses: the unselected owner {owner} exists ({here[:1] or "no error"})')
+    stray = [m for at, m in errors if at not in {line for _, line in marked}]
+    if stray:
+        problems.append(f'client uses: the absence module fails elsewhere: {stray[:1]}')
+    return problems
+
+
+def client_use_problems(toolchain, directory, text):
+    """Compiles the generated external uses of a seed's module, built in `directory`."""
+    module_directory = directory / 'module'
+    if not (module_directory / 'Fz.swiftmodule').exists():
+        return ['client uses: the schema module was not emitted']
+    presence, absence, marked, public = client_use_sources(text)
+    def typecheck(name, source, package='FuzzPackage'):
+        (directory / name).write_text(source)
+        command = toolchain.base('FzUse') + ['-I', str(module_directory), '-typecheck', str(directory / name)]
+        command[command.index('-package-name') + 1] = package
+        result = watched(command, toolchain.timeout)
+        return result.stdout, (result.returncode if result.verdict == 'ok' else result.verdict)
+    presence_log, presence_code = typecheck('Uses.swift', presence.replace('import Fz', '@testable import Fz', 1))
+    absence_log, _ = typecheck('Absent.swift', absence.replace('import Fz', '@testable import Fz', 1)) if marked else ('', 0)
+    # Only the public schemas' owners, with a plain import, from another package.
+    public_log, public_code = typecheck('PublicUses.swift', public, 'OtherPackage') if public else (None, None)
+
+    return client_use_judgement(presence_log, presence_code, absence_log, marked, public_log, public_code)
+
+
+def missing_quotations(entries, doc):
+    """The allowances whose quoted sentence the guide no longer contains."""
+    text = ' '.join(doc.split())
+    return [e for e in entries if not e.get('doc') or ' '.join(e['doc'].split()) not in text]
 
 
 def seed_problems(name, outcome):
     """Why a seed does not pass on its own, as `site: detail` problems."""
     if outcome['status'] != 'ok':
         return [f'the seed itself: {describe(outcome)}']
-    problems = list(problems_of(outcome))
+    problems = list(problems_of(outcome)) + list(outcome.get('client_use_problems', []))
     expected = EXPECTED_REPORTS.get(name)
     if expected is not None and outcome.get('report') != expected:
         problems.append(f"report: {outcome.get('report')!r}, expected {expected!r}")
@@ -5469,14 +6888,32 @@ def declaration_signature(text):
         else:
             kind, name = match.group(1), match.group(2).strip('`')
             enclosing = tuple(s for s in stack if s)
-            if kind != 'extension':
-                found.append((enclosing, kind, name))
+            if kind == 'typealias':
+                # What an unchanged spelling of the alias names depends on its right-hand side.
+                right = re.match(r'[^=\n]*=\s*([^\n;]*)', text[match.end():])
+                found.append((enclosing, kind, name, ' '.join(right.group(1).split()) if right else ''))
+            elif kind != 'extension':
+                found.append((enclosing, kind, name, ''))
             if kind != 'typealias':
                 pending = name if kind != 'extension' else f'extension {name}'
-    return sorted(found)
+    # So do the modules it imports, and the inherited and conforming types a declaration names.
+    imports = sorted(' '.join(m.split()) for m in re.findall(r'^\s*(?:@\w+\s+)*import\s+[^\n]+', text, re.M))
+    inherits = sorted(' '.join(m.split()) for m in re.findall(r'\b(?:struct|enum|class|actor|extension)\s+[\w.`]+\s*:\s*([^{\n]+)\{', text))
+    return sorted(found) + [('import', i) for i in imports] + [('inherits', i) for i in inherits]
+
 
 def safe(identifier):
     return re.sub(r'[^\w.+-]', '_', identifier)[:150]
+
+
+def failure_class(status):
+    return status if status in RESOURCE_FAILURES or status in RUN_FAILURES else 'other'
+
+
+def same_failure(result, variant, verdict, expected):
+    """Whether a reduced candidate fails as the original did."""
+    return (verdict == 'fail' and expected == result['expected']
+            and failure_class(variant.get('status')) == failure_class(result.get('status')))
 
 
 def reduce_case(toolchain, output, bases, seeds, case, result):
@@ -5496,7 +6933,10 @@ def reduce_case(toolchain, output, bases, seeds, case, result):
         control = (compile_case(toolchain, directory / 'control', candidate['control'], flags=candidate['flags'])
                    if candidate['control'] is not None else None)
         verdict, expected, observed = judge(candidate, bases[case['seed']], control, variant)
-        if verdict == 'fail':
+        # A reduction keeps a rewrite's removal only when the smaller case fails the same way: the same expectation,
+        # and for a crash, a cap, a timeout, or a failed run, the same kind of failure.
+        if same_failure(result, variant, verdict, expected):
+
             names, choices = trial, trial_choices
             case, result = candidate, dict(result, rewrites=trial, steps=candidate['steps'], expected=expected,
                                            observed=observed, reduced=True)

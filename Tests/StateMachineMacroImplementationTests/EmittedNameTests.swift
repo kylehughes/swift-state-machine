@@ -634,7 +634,7 @@ struct EmittedNameTests {
             }
             """#
         let text = try Self.expansion(multiline)
-        #expect(text.contains("/// `(Phase, Int)` as the schema resolves it"))
+        #expect(text.contains("/// `( Phase, Int )` as the schema resolves it"))
         #expect(text.contains("public typealias _StateMachineType1 = ("))
         // An authored identifier is never taken by an alias, so the alias cannot capture it.
         let named = multiline.replacingOccurrences(of: "        Int\n", with: "        _StateMachineType1\n")

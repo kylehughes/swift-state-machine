@@ -314,7 +314,7 @@ def copy_resources(command, destination):
             amended = text.replace(needle, needle + '\n        defer { RuntimeDeliveryProbe.record(preparations) }') + DELIVERY
             patches.append({'file': original.name, 'preparationRoundDefers': 1})
         elif original.name == 'RuntimeState.swift':
-            for needle in ['private var reservations: [Reservation] = []', 'private var queue: [Batch] = []', 'private var terminal: Batch?']:
+            for needle in ['private var reservations: [Reservation] = []', 'private var queue = RuntimeFIFO<Batch>()', 'private var terminal: Batch?']:
                 if text.count(needle) != 1: raise ValueError('Engine sample patch drift: ' + needle)
             amended = text + ENGINE
             patches.append({'file': original.name, 'assertedPrivateEngineFields': 3})

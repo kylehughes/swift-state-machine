@@ -373,17 +373,17 @@ struct IdentityTests {
                     "@Transition(onSuccess: Load.self)\nstatic func done(_ source: Running, _ value: Load.Output) -> Idle { fatalError() }"
             )
         }
+        let counts = [500, 1_000, 2_000, 4_000]
         var named: [Int] = []
-        for count in [500, 1_000, 2_000] {
+        for count in counts {
             let schema = try Self.parse(schema(count))
             _ = schema.typeScopes.resolve("Load.Output")
             named.append(schema.typeScopes.work.named)
         }
-        // Each use's own tokens are looked up, once; the alias's spelling adds the same few however many.
-        #expect(named[1] <= 2 * named[0] + 8 && named[2] <= 2 * named[1] + 8, "\(named)")
-        let clock = ContinuousClock()
-        let elapsed = try clock.measure { _ = try Self.parse(schema(4_000)).typeScopes.resolve("Load.Output") }
-        #expect(elapsed < .seconds(2), "\(elapsed)")
+        // Each use's own two tokens are looked up, once; the alias's spelling, the long name among it,
+        // adds the same few lookups however many uses read it.
+        let added = zip(counts, named).map { count, named in named - 2 * count }
+        #expect(Set(added).count == 1 && added[0] <= 8, "\(named)")
     }
 
     // MARK: Routed closure payloads

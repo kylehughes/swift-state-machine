@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import StateMachineUI
 import Testing
 import os
@@ -73,11 +74,10 @@ private final class Capture: Sendable {
 private func drop<Kept: Sendable>(_ kept: consuming Kept) {
     let slot = OSAllocatedUnfairLock<Kept?>(initialState: kept)
     let dropped = DispatchSemaphore(value: 0)
-    DispatchQueue.global()
-        .async {
-            slot.withLock { $0 = nil }
-            dropped.signal()
-        }
+    runOnOwnThread {
+        slot.withLock { $0 = nil }
+        dropped.signal()
+    }
     dropped.wait()
 }
 

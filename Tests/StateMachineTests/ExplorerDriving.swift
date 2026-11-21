@@ -41,6 +41,9 @@ import StateMachineUI
     private(set) var subscribeCalls = 0
     /// The snapshot of the receipt `send` or `close` returned last.
     private(set) var lastReceipt: Int?
+    /// Values the host delivered for a change the presentation admitted (`send`, `close`).
+    private(set) var admittedThroughPresentation: Set<Int> = []
+    private var admitting = false
     /// The revision of the snapshot `subscribe` delivered last, at the moment it returned.
     private(set) var revisionAtSubscribe: UInt64 = 0
     /// The armable sites of this host (`sites` family).
@@ -89,6 +92,7 @@ import StateMachineUI
             .delivered(registration: registration),
             attempt: world.registration(registration)?.attempt
         )
+        if admitting { admittedThroughPresentation.insert(shot.id) }
         world.offered(shot.id, into: registration)
         return shot
     }
@@ -100,19 +104,31 @@ import StateMachineUI
         return read
     }
     func send(_ input: Int) -> Receipt {
+        admitting = true
         advance()
+        admitting = false
         let receipt = Receipt(snapshot: value())
         lastReceipt = receipt.snapshot.id
         site?(.hostSend)
         return receipt
     }
     func commit(_ prepared: consuming Never) {}
+    private func closedSeed(_ registration: Int) -> ExplorerShot {
+        let shot = world.makeValue(
+            .delivered(registration: registration),
+            attempt: world.registration(registration)?.attempt,
+            revision: revision
+        )
+        world.offered(shot.id, into: registration)
+        return shot
+    }
     /// The owner admits a change of its own and delivers it to its subscriber.
     ///
     /// Returns the revision it delivered, or `nil` when no subscriber took it.
     @discardableResult func advance() -> UInt64? {
-        // A host delivers nothing to a registration it has finished.
+        // A host delivers nothing to a registration it has finished, and a closed one nothing at all.
         if let registration, world.registration(registration)?.finished == true { return nil }
+        if closed { return nil }
         let next = delivered()
         let delivered = next.revision
         revision = delivered
@@ -141,7 +157,8 @@ import StateMachineUI
         registration = id
         self.receive = receive
         self.onFinish = onFinish
-        let seed = delivered()
+        // A closed owner's state is final: a later registration's seed is its closed snapshot, at its revision.
+        let seed = closed ? closedSeed(id) : delivered()
         revision = seed.revision
         receive(seed)
         if closed {
@@ -188,10 +205,14 @@ import StateMachineUI
     }
     @discardableResult func close() -> Receipt {
         // Closing is a change of its own, delivered with the finish; later registrations finish at once.
+        admitting = true
         let closed = delivered()
+        admitting = false
         revision = closed.revision
-        receive?(closed)
+        // The owner is closed before any callback of its closing runs, as a real owner installs its closed state
+        // before it notifies: a registration made from inside one receives the closed snapshot and finishes.
         self.closed = true
+        receive?(closed)
         finish()
         let receipt = Receipt(snapshot: value())
         lastReceipt = receipt.snapshot.id
@@ -263,9 +284,10 @@ import StateMachineUI
     let save: (() -> (ExplorerSubscriber) -> Void)?
     let subscribeProjected: ((ExplorerSubscriber, @escaping @MainActor (ExplorerShot) -> ExplorerShot) -> Void)?
     var saveProjected: ((@escaping @MainActor (ExplorerShot) -> ExplorerShot) -> (ExplorerSubscriber) -> Void)? = nil
+    var subscribeElsewhere: ((ExplorerElsewhereSubscriber, DispatchQueue, Bool) -> Void)? = nil
     let watch: (ExplorerWorld) -> Void
     let install:
-        (_ report: @escaping @MainActor (Bool) -> Void, _ change: @escaping @MainActor () -> Void) -> [AnyObject]
+        (_ report: @escaping @MainActor (Bool) -> Void, _ change: @escaping @MainActor (Int?) -> Void) -> [AnyObject]
 
     static func make(_ kind: ExplorerPassiveKind, host: ExplorerMainHost) -> ExplorerDrivingSubject? {
         switch kind {
@@ -301,11 +323,14 @@ import StateMachineUI
                     guard let presentation = holder.weak else { return { _ in } }
                     return explorerSaveProjected(presentation, transform)
                 },
+                subscribeElsewhere: { subscriber, queue, once in
+                    holder.weak.map { explorerSubscribeElsewhere($0, subscriber, on: queue, once: once) }
+                },
                 watch: { world in holder.weak.map { explorerAssociate($0, ExplorerReleaseSentinel(world)) } },
                 install: { report, change in
                     guard let presentation = holder.weak else { return [] }
                     let reports = presentation.$isObserving.dropFirst().sink { report($0) }
-                    let changes = presentation.objectWillChange.sink { _ in change() }
+                    let changes = presentation.objectWillChange.sink { _ in change(nil) }
                     return [ExplorerKeep((reports, changes))]
                 }
             )
@@ -337,8 +362,8 @@ import StateMachineUI
                     explorerTrack({ [weak presentation = holder.weak] in presentation?.isObserving }, installed) {
                         report(!$0)
                     }
-                    explorerTrack({ [weak presentation = holder.weak] in presentation?.snapshot.id }, installed) { _ in
-                        change()
+                    explorerTrack({ [weak presentation = holder.weak] in presentation?.snapshot.id }, installed) {
+                        change($0)
                     }
                     return [installed]
                 }
@@ -357,9 +382,13 @@ import StateMachineUI
     private weak var host: ExplorerMainHost?
     private var subject: ExplorerDrivingSubject!
     private var installed: [AnyObject] = []
-    private var armed: (ExplorerHook, ExplorerEvent)?
-    private var armUsed = false
-    private var inHook = false
+    // Armed callbacks: the hook, its event, and whether a callback armed it, so it may run inside that callback's
+    // own run (`chains`: a hook inside a hook, or the same hook revisited).
+    private var armed: [(hook: ExplorerHook, event: ExplorerEvent, nested: Bool)] = []
+    private var arms = 0
+    private var armUsed: Bool { arms >= (families.contains(.chains) ? 2 : 1) }
+    private var hookDepth = 0
+    private var inHook: Bool { hookDepth > 0 }
     private var assigningAnnounced: UInt64?
     private var lastShown: (id: Int, revision: UInt64) = (0, 0)
     private var shown: Set<Int> = []
@@ -370,15 +399,24 @@ import StateMachineUI
     private var saved: ((ExplorerSubscriber) -> Void)?
     private var savedProjected: ((ExplorerSubscriber) -> Void)?
     private var turns = 0
-    private var hostOrigin: Set<UInt64> = []
     private var tokenDropped = false
+    // Revisions of the host's own deliveries (`deliver`), as opposed to seeds and a change's delivery.
+    private var hostOrigin: Set<UInt64> = []
     private var steps = 0
     private var cancelDelivers = false
     private var fired = 0
+    // The `elsewhere` family's subscribers and the queue their values and demand cross to, suspended
+    // between steps so that a step decides when it runs.
+    private var elsewhere: [ExplorerElsewhereSubscriber] = []
+    private let elsewhereQueue = DispatchQueue(label: "explorer.elsewhere")
+    private var elsewhereSuspended = false
     // Whether `resumeObserving()` is in the alphabet, which changes what a report may say (I5, I6, I37).
-    private var resumes: Bool { families.contains(.resume) || families.contains(.matrix) }
+    private var resumes: Bool { !families.isDisjoint(with: [.resume, .matrix, .chains]) }
     private var topEvent: ExplorerEvent?
     private var reportsThisStep = 0
+    private var firedAtStepStart = 0
+    // I51: the expected invalidation trace of each tracked property.
+    private let traces = ExplorerTraces()
     // `objectWillChange` (or Observation change) callbacks so far (I48).
     private var willChanges = 0
     private var changeDepth = 0
@@ -428,7 +466,8 @@ import StateMachineUI
         }
         if let shot = subject.snapshot() { lastShown = (shot.id, shot.revision) }
         shown.insert(lastShown.id)
-        installed = subject.install({ [weak self] in self?.reported($0) }, { [weak self] in self?.changed() })
+        traces.tracksSnapshot = kind == .drivingObservation
+        installed = subject.install({ [weak self] in self?.reported($0) }, { [weak self] in self?.changed($0) })
         subject.watch(world)
         let initialReports: [Bool] = subject.isObserving() == true ? [true] : []
         world.state.withLock { $0.reports = initialReports }
@@ -466,6 +505,7 @@ import StateMachineUI
 
     func enabled() -> [ExplorerEvent] {
         if families.contains(.matrix) { return matrixEnabled() }
+        if families.contains(.elsewhere) { return elsewhereEnabled() }
         var result: [ExplorerEvent] = []
         let held = subject.held()
         if families.contains(.core) {
@@ -505,7 +545,17 @@ import StateMachineUI
                 result.append(.cancelFirstSubscriber)
             }
         }
-        if families.contains(.reentrant), !armUsed, held {
+        if families.contains(.chains), !armUsed, held {
+            // Two arms, each of which may arm a hook from inside its callback, the same one included.
+            let hooks: [ExplorerHook] = [.report, .change, .onCancel]
+            var inner: [ExplorerEvent] = [.stop, .apply, .deliver(0), .then(.deliver(0), .then(.resume, .stop))]
+            if explorerHasResume { inner.append(.resume) }
+            for hook in hooks {
+                for event in [ExplorerEvent.stop, .resume, .apply] { inner.append(.arm(hook, event)) }
+            }
+            for hook in hooks { for event in inner { result.append(.arm(hook, event)) } }
+        }
+        if families.contains(.reentrant), !families.contains(.chains), !armUsed, held {
             var hooks: [ExplorerHook] = [.report, .change, .onCancel]
             var inner: [ExplorerEvent] = [.stop, .apply, .close, .dropMain, .deliver(0), .finish(0)]
             if families.contains(.combine), subject.subscribe != nil {
@@ -564,11 +614,43 @@ import StateMachineUI
         return result
     }
 
+    // The `elsewhere` family: subscribers whose demand and cancellation cross to a queue, and callbacks inside a
+    // presentation publisher's delivery decision.
+    private func elsewhereEnabled() -> [ExplorerEvent] {
+        var result: [ExplorerEvent] = []
+        let held = subject.held()
+        if held { result += [.apply, .stop, .dropMain, .dropElsewhere] }
+        if let host, host.token != nil, world.unfreed.contains(where: { !$0.hostEnded }) { result.append(.deliver(0)) }
+        if turns < 2 { result.append(.turn) }
+        if subject.subscribeElsewhere != nil {
+            if held, elsewhere.count < 2 {
+                result += [.subscribeElsewhere(once: false), .subscribeElsewhere(once: true)]
+            }
+            if !elsewhere.isEmpty { result.append(.requestElsewhere) }
+        }
+        if !armUsed, held, !elsewhere.isEmpty {
+            let inner: [ExplorerEvent] = [
+                .dropElsewhere, .requestElsewhere, .then(.dropElsewhere, .requestElsewhere),
+                .then(.dropMain, .requestElsewhere), .then(.requestElsewhere, .dropElsewhere),
+            ]
+            for event in inner { result.append(.arm(.decision, event)) }
+        }
+        return result
+    }
+
     var fingerprint: String {
-        "\(subject.held()) \(observing) \(world.unfreed.count) \(subject.isObserving() ?? false) \(armed.map { "\($0)" } ?? "-") \(armUsed) \(subscribers.map { "\($0.cancelled)\($0.finished)\($0.wantsMore)" }) \(saved != nil) \(turns) \(cancelDelivers)"
+        "\(subject.held()) \(observing) \(world.unfreed.count) \(subject.isObserving() ?? false) \(armed.map { "\($0.hook)\($0.event)" }) \(armUsed) \(subscribers.map { "\($0.cancelled)\($0.finished)\($0.wantsMore)" }) \(saved != nil) \(turns) \(cancelDelivers)"
     }
 
     func run(_ sequence: [ExplorerEvent]) async -> ExplorerOutcome {
+        guard families.contains(.elsewhere) else { return await runSteps(sequence) }
+        // H10 runs in every delivery the sequence's steps schedule.
+        return await explorerWithPresentationDeliveryPause({ [weak self] in
+            MainActor.assumeIsolated { self?.fire(.decision) }
+        }) { await runSteps(sequence) }
+    }
+
+    private func runSteps(_ sequence: [ExplorerEvent]) async -> ExplorerOutcome {
         let mode: ExplorerEvent? =
             switch sequence.first {
             case .createRefusing, .createOccupied, .createClosed: sequence.first
@@ -584,8 +666,12 @@ import StateMachineUI
             turns = event == .turn ? turns + 1 : 0
             steps += 1
             topEvent = event
-            let observingBefore = subject.held() ? subject.isObserving() : nil
+            traces.begin(
+                observing: subject.held() ? subject.isObserving() : nil,
+                shown: subject.held() ? subject.snapshot()?.id : nil
+            )
             reportsThisStep = 0
+            firedAtStepStart = fired
             switch event {
             case .createRefusing, .createOccupied, .createClosed: break
             case .turn: await hop()
@@ -604,11 +690,10 @@ import StateMachineUI
             default: performNow(event)
             }
             boundary(topLevel: true)
-            explorerCheckReportParity(
-                world,
-                before: observingBefore,
-                after: subject.held() ? subject.isObserving() : nil,
-                reports: reportsThisStep
+            traces.end(
+                observing: subject.held() ? subject.isObserving() : nil,
+                shown: subject.held() ? subject.snapshot()?.id : nil,
+                world
             )
             if !world.violations.isEmpty { break }
             if index == sequence.count - 1 {
@@ -676,11 +761,25 @@ import StateMachineUI
         case .dropMain:
             observing = false
             presentationEnds()
+            for subscriber in elsewhere { subscriber.released() }
             subject.dropMain()
         case .dropElsewhere:
             observing = false
             presentationEnds()
+            for subscriber in elsewhere { subscriber.released() }
             if !subject.dropElsewhere() { world.violate(.stuck, "release on a worker never returned") }
+        case .subscribeElsewhere(let once):
+            guard subject.alive() else { return }
+            let subscriber = ExplorerElsewhereSubscriber(index: elsewhere.count, world: world)
+            elsewhere.append(subscriber)
+            // Suspended from the first such subscriber on, until quiescence lets it run.
+            if !elsewhereSuspended {
+                elsewhereQueue.suspend()
+                elsewhereSuspended = true
+            }
+            subject.subscribeElsewhere?(subscriber, elsewhereQueue, once)
+        case .requestElsewhere:
+            drainElsewhere(keepRunning: false)
         case .savePublisher:
             saved = subject.save?()
         case .subscribe(let fromSaved, let unlimited):
@@ -722,10 +821,12 @@ import StateMachineUI
         case .cancelSubscription:
             subscribers.last(where: { !$0.cancelled && !$0.finished })?.cancel()
         case .arm(let hook, let inner):
-            armed = (hook, inner)
-            armUsed = true
+            armed.append((hook, inner, inHook))
+            if !inHook { arms += 1 }
         case .then(let first, let second):
             performNow(first)
+            // What the first event showed was shown before the second runs.
+            boundary(topLevel: false)
             performNow(second)
         default:
             break
@@ -753,9 +854,12 @@ import StateMachineUI
         do throws(SubscriptionFailure) { try subject.resume() } catch { threw = error }
         world.setContext(.spontaneous)
         let observingNow = subject.isObserving() ?? false
+        // A resumption made inside a change still being assigned registers at once and reports later: its
+        // registration is live before `isObserving` says so.
+        let registered = world.unfreed.contains { !$0.hostEnded && !endedByPresentation.contains($0.id) }
         if threw != nil {
             observing = observingBefore
-        } else if observingNow {
+        } else if observingNow || registered {
             observing = true
         } else if !before.observing {
             observing = false
@@ -799,6 +903,7 @@ import StateMachineUI
     }
 
     private func reported(_ value: Bool) {
+        traces.report(value, world, observation: kind == .drivingObservation)
         reportsThisStep += 1
         boundary(topLevel: false)
         let (previous, count) = world.state.withLock { state -> (Bool?, Int) in
@@ -813,12 +918,9 @@ import StateMachineUI
         if value, !resumes {
             world.violate(.reportsAlternate, "a driving presentation reported true after creation")
         }
-        // I37: `true` reports a live registration whose snapshot is already shown.
-        if value, resumes {
-            if world.unfreed.filter({ !$0.hostEnded }).isEmpty {
-                world.violate(.trueBeforeLive, "true reported while no registration of the presentation is live")
-            }
-        }
+        // I37: `true` reports a live registration whose seed, or a newer snapshot, is already shown, in
+        // every call, a reentrant `resumeObserving()` included.
+        if value, resumes { checkLiveAtTrue() }
         // I5. With `resumeObserving()` a new registration can be live while an earlier one's end is
         // reported, so only a registration that has ended, by the presentation or its host, counts.
         let holding =
@@ -832,7 +934,24 @@ import StateMachineUI
         }
         fire(.report)
     }
-    private func changed() {
+    // I37 at a driving `true`: the newest registration its host has not ended holds the slot, and the
+    // presentation already shows that registration's seed or a snapshot at least as new.
+    private func checkLiveAtTrue() {
+        guard let live = world.unfreed.filter({ !$0.hostEnded }).max(by: { $0.id < $1.id }) else {
+            // A `true` queued behind a callback that already ended its registration reports a past change.
+            if fired == firedAtStepStart {
+                world.violate(.trueBeforeLive, "true reported while no registration of the presentation is live")
+            }
+            return
+        }
+        guard let shown = subject.snapshot() else { return }
+        if let problem = explorerSeedVisibleProblem(registration: live.id, seed: live.firstOffer, shown: shown.revision)
+        {
+            world.violate(.trueBeforeLive, problem)
+        }
+    }
+    private func changed(_ old: Int?) {
+        if let old { traces.snapshot.invalidated(old, world) }
         willChanges += 1
         changeDepth += 1
         defer { changeDepth -= 1 }
@@ -840,20 +959,38 @@ import StateMachineUI
         fire(.change)
     }
     private func fire(_ hook: ExplorerHook) {
-        guard !inHook, let (armedHook, event) = armed, armedHook == hook else { return }
-        armed = nil
+        // A hook runs inside another's run only when that run armed it, and never more than two deep.
+        guard hookDepth < 2, let index = armed.firstIndex(where: { $0.hook == hook && (!inHook || $0.nested) }) else {
+            return
+        }
+        let event = armed.remove(at: index).event
         fired += 1
-        explorerCover(kind: kind, form: "driving", host: 0, site: hook, event: event, phase: explorerPhase(topEvent))
+        let cell = ExplorerMatrixCell.read(world, site: hook, top: topEvent, ended: endedByPresentation) { _ in
+            ("driving", 0)
+        }
+        let before = matrixState()
+        defer { explorerCover(kind: kind, cell: cell, site: hook, event: event, changed: matrixState() != before) }
+        // What the presentation shows when the callback starts was shown before the event it runs.
+        boundary(topLevel: false)
         let announcedBefore = world.state.withLock { $0.revision }
-        inHook = true
+        hookDepth += 1
         world.note("hook \(hook.rawValue) runs \(event)")
         performNow(event)
         boundary(topLevel: false)
         // The value whose publication the callback announced was made before the callback ran.
         if [.change, .value, .projection].contains(hook) { assigningAnnounced = announcedBefore }
-        inHook = false
+        hookDepth -= 1
     }
 
+    // The matrix's record of what a callback's event changed.
+    private func matrixState() -> String {
+        let held = subject.held()
+        let observing = held ? subject.isObserving() : nil
+        let world = world.state.withLock { state in
+            "\(state.registrations.values.filter { $0.phase != .freed }.map(\.id).sorted()) \(state.reports.count) \(state.presentationGone)"
+        }
+        return "\(held) \(String(describing: observing)) \(world) \(endedByPresentation.count) \(host?.closed ?? true)"
+    }
     private func makeSubscriber(unlimited: Bool) -> ExplorerSubscriber {
         let subscriber = ExplorerSubscriber(
             index: subscribers.count,
@@ -912,8 +1049,8 @@ import StateMachineUI
                     world.violate(.revisionRegressed, "r\(revision) shown after r\(lastShown.revision)")
                 }
                 let announced = assigningAnnounced.map { revision <= $0 } ?? false
-                if revision > lastShown.revision, endedAtBoundary, !announced, hostDelivered(revision, id: id) {
-                    world.violate(.shownAfterEnd, "the host's r\(revision) shown after the observation ended")
+                if revision > lastShown.revision, !announced, let ended = endedObservationValue(id, revision) {
+                    world.violate(.shownAfterEnd, "r\(revision), \(ended), shown after the observation ended")
                 }
                 // The presentation claims the end before it cancels the subscription, and a host's own
                 // cancellation tells it first, so nothing delivered inside a cancellation is shown.
@@ -949,13 +1086,34 @@ import StateMachineUI
                 state.registrations.values.filter { !$0.withheld }.max { $0.id < $1.id }?.finished ?? false
             }
     }
-    // Whether the value came from a delivery the host made on its own, not a send's receipt, which can
-    // carry the same revision.
-    private func hostDelivered(_ revision: UInt64, id: Int) -> Bool {
-        guard hostOrigin.contains(revision) else { return false }
-        return world.state.withLock { state in
-            if case .delivered = state.values[id]?.origin { true } else { false }
+    // Why a newly shown, unannounced value belongs to an observation that ended before it was shown, or
+    // `nil`. Stopping discards an observation value (a registration's seed or a delivery) whose
+    // publication was not announced: one of a registration the presentation ended by `stop`, `close` or a
+    // release is never shown afterward, and neither is a delivery the host made on its own after it
+    // finished the registration. A change admitted through the presentation (`send`, `close`) still
+    // publishes its receipt, and the host's delivery of that change carries the receipt, so neither is
+    // an observation value.
+    private func endedObservationValue(_ id: Int, _ revision: UInt64) -> String? {
+        let registration = world.state.withLock { state -> Int? in
+            if case .delivered(let registration) = state.values[id]?.origin { registration } else { nil }
         }
+        return explorerEndedObservationProblem(
+            registration: registration,
+            admittedThroughPresentation: host?.admittedThroughPresentation.contains(id) == true,
+            endedByPresentation: endedByPresentation,
+            hostDeliveryAfterFinish: endedAtBoundary && hostOrigin.contains(revision)
+        )
+    }
+
+    // Runs what the subscribers' queue holds while the main actor waits, then suspends it again, unless
+    // `keepRunning`.
+    private func drainElsewhere(keepRunning: Bool) {
+        guard elsewhereSuspended else { return }
+        elsewhereQueue.resume()
+        let done = DispatchSemaphore(value: 0)
+        elsewhereQueue.async { done.signal() }
+        if !explorerWait(done) { world.violate(.stuck, "the subscribers' queue never ran") }
+        if keepRunning { elsewhereSuspended = false } else { elsewhereQueue.suspend() }
     }
 
     private func hop() async { await Task { @MainActor in }.value }
@@ -968,7 +1126,7 @@ import StateMachineUI
     }
 
     private func quiesce() async {
-        armed = nil
+        armed = []
         world.note("quiesce")
         host?.refuseNext = false
         host?.vacate()
@@ -995,8 +1153,11 @@ import StateMachineUI
                 }
             }
         }
+        // The subscribers' queue runs freely from here on, so their values and completions arrive.
+        drainElsewhere(keepRunning: true)
         if subject.held() {
             observing = false
+            for subscriber in elsewhere { subscriber.released() }
             // With a host that delivers inside its cancellations, the release at quiescence stops first,
             // so only the drop events reach the disposal path, and a defect on that path does not end
             // every sequence at its root.
@@ -1014,6 +1175,14 @@ import StateMachineUI
             }
         }
         for subscriber in subscribers { subscriber.checkHandshake() }
+        if released, await !hop(until: { self.elsewhere.allSatisfy(\.finished) }, limit: 2000) {
+            world.violate(
+                .combineFinish,
+                "a subscriber through receive(on:) did not finish once the presentation was gone"
+            )
+        }
+        drainElsewhere(keepRunning: true)
+        elsewhere = []
         installed = []
         subscribers = []
         saved = nil

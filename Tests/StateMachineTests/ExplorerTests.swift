@@ -50,6 +50,7 @@ private func families(_ text: String?) -> ExplorerFamilies {
         case "copies": result.insert(.copies)
         case "chains": result.insert(.chains)
         case "matrix": result.insert(.matrix)
+        case "elsewhere": result.insert(.elsewhere)
         default: break
         }
     }
@@ -92,7 +93,7 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         // Driving: refused, occupied and closed creation, and `resumeObserving()` (E2).
         ([.core, .resume], 3, 6),
         ([.core, .combine, .resume], 2, 4),
-        ([.core, .reentrant, .resume], 2, 3),
+        ([.core, .reentrant, .resume], 2, 4),
         // Combine demand: zero, finite, returned from the callback, an older subscription (E9).
         ([.core, .combine, .demand], 2, 4),
         ([.core, .combine, .demand, .reentrant], 1, 3),
@@ -105,6 +106,10 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         ([.core, .reentrant, .resume, .sites], 1, 3),
         // Two armed hooks, and a hook that arms another (E15).
         ([.core, .reentrant, .chains], 1, 3),
+        // Driving: a hook inside a hook and the same hook revisited, beside `resumeObserving()`.
+        ([.core, .reentrant, .resume, .chains], 1, 4),
+        // Demand and cancellation off the main actor, and the publisher's delivery decision (E10).
+        ([.elsewhere], 3, 5),
         // The interruption matrix (`Tests/ScheduleExplorer.md`, "Interruption matrix coverage").
         ([.matrix], 2, 4),
     ]
@@ -130,11 +135,12 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
             // and 12 minutes: `EXPLORER_RUNTIME_DEPTH=6`).
             let depths = environment["EXPLORER_RUNTIME_DEPTH"].flatMap(Int.init)
             result.append(ExplorerConfiguration(kind: kind, families: [.counts], depth: depths ?? 3))
+            // A stage and up to three events after it in the exhaustive tier, two in the standard one.
             result.append(
                 ExplorerConfiguration(
                     kind: kind,
                     families: [.reconcile],
-                    depth: full ? (depths ?? tiered(5, smoke: 3)) : 3
+                    depth: full ? (depths ?? tiered(4, smoke: 2)) : 2
                 )
             )
             result.append(
@@ -153,10 +159,12 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         for (slice, smoke, deep) in slices {
             if slice.contains(.combine), !kind.isCombine { continue }
             let passiveOnly: ExplorerFamilies = [
-                .second, .async, .isolated, .callback, .lease, .workers, .followers, .clocks, .selection, .chains,
+                .second, .async, .isolated, .callback, .lease, .workers, .followers, .clocks, .selection,
             ]
             if kind.isDriving, !slice.isDisjoint(with: passiveOnly) { continue }
             if !kind.isDriving, slice.contains(.cancelDelivery) || slice.contains(.resume) { continue }
+            // Only the driving Combine class publishes through a presentation publisher the fake host drives.
+            if slice.contains(.elsewhere), kind != .drivingCombine { continue }
             if slice.contains(.combine), slice.contains(.sites), !kind.isCombine { continue }
             let depth = full ? (override ?? tiered(deep, smoke: smoke)) : smoke
             if depth == 0 { continue }
@@ -168,7 +176,9 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
     return result
 }
 
-@MainActor @Suite(.serialized, .parksCooperativeThread) struct ExplorerTests {
+// A sequence can park a cooperative-pool thread. `explore` takes turns at the process-wide exclusion of
+// such tests between sequences; the replays, which run their scripts directly, hold it throughout.
+@MainActor @Suite(.serialized) struct ExplorerTests {
     // Bounded enough for every debug run. `EXPLORER_SMOKE=0` skips it. The opt-in configurations below
     // return at once without their variable, so a plain run reports no skipped test.
     @Test(.timeLimit(.minutes(2))) func smoke() async {
@@ -213,6 +223,18 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         #expect(budget.read(registration: 1, task: 8).exceeded)
     }
 
+    // Each invariant that guards a past defect class reports a planted defect and accepts its control
+    // (`ExplorerSelfCheck.swift`).
+    @Test func selfCheck() {
+        let checks = explorerSelfChecks()
+        for check in checks where !check.trusted {
+            Issue.record(
+                "\(check.invariant.rawValue) is not trusted: \(check.defect) (planted reported \(check.planted), control accepted \(check.control))"
+            )
+        }
+        print("EXPLORER self-check: \(checks.count) planted defects, \(checks.filter(\.trusted).count) trusted")
+    }
+
     // The exhaustive tier (`EXPLORER_FULL=1`), or the standard tier (`EXPLORER_TIER=standard`).
     @Test func full() async {
         guard environment["EXPLORER_FULL"] == "1" || standardTier else { return }
@@ -230,7 +252,7 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
 
     // `EXPLORER_REPLAY_FILE=path` replays every `id|Class: script` line of that file in one process and
     // prints one result line per script; violations are expected there, so none fails the test.
-    @Test func replayFile() async throws {
+    @Test(.parksCooperativeThread) func replayFile() async throws {
         guard let path = environment["EXPLORER_REPLAY_FILE"] else { return }
         let lines = try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n")
         for line in lines where line.contains("|") {
@@ -253,7 +275,7 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         }
     }
 
-    @Test func replay() async throws {
+    @Test(.parksCooperativeThread) func replay() async throws {
         guard let text = environment["EXPLORER_REPLAY"] else { return }
         let parts = text.split(separator: ":", maxSplits: 1)
         let kind = try #require(ExplorerPassiveKind(rawValue: String(parts[0]).trimmingCharacters(in: .whitespaces)))

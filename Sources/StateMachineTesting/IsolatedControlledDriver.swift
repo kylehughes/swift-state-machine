@@ -116,6 +116,11 @@ nonisolated public final class IsolatedControlledDriver<Owner: Actor, Input, Out
     /// How many queued calls and waits matching has examined, which tests read as its work; read it on
     /// the owning actor.
     package var examinedCallEntries: Int { calls.examinedEntries }
+    /// How many queued calls and waits the driver stores, which tests read as its storage; read it on
+    /// the owning actor.
+    package var storedCallEntries: Int { calls.storedEntries }
+    /// How many waits for a started call have registered and not ended; read it on the owning actor.
+    package var waitingCount: Int { calls.waitCount }
 
     /// Returns the oldest started execution not yet returned, waiting on the owning actor until the
     /// host starts one.
@@ -304,6 +309,11 @@ nonisolated final class IsolatedCallQueue<Call> {
 
     /// How many queued calls and waits matching has examined, which tests read as its work.
     var examinedEntries: Int { unclaimed.examined + unanswered.examined }
+    /// How many queued calls and waits the queues store, ended ones included, which tests read as
+    /// their storage.
+    var storedEntries: Int { unclaimed.storedCount + unanswered.storedCount }
+    /// How many waits have registered and not ended.
+    var waitCount: Int { predicates.count }
 
     /// Records a started call and gives it to the oldest wait that accepts it, if any.
     func offer(_ call: Call) {

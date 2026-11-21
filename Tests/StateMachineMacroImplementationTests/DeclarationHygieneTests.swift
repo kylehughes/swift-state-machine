@@ -383,8 +383,8 @@ struct DeclarationHygieneTests {
                 }
             }
             """#
-        // It is kept on one line without comments, as the graph shows it.
-        #expect(try Self.parse(source).inputs.first?.payloadType == "[Key: Self.Key]")
+        // The graph shows it as written, with the comment as one space.
+        #expect(try Self.parse(source).inputs.first?.payloadType == "[Key : Self.Key]")
     }
 
     /// Generated code spells every standard-library type through `Swift`, so a schema may declare

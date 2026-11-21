@@ -13,11 +13,17 @@ import os
 /// accepts it and a wait receives the oldest unclaimed call it accepts, exactly as if every arrival
 /// were matched the moment it happened. Whichever offer or wait finds no matcher running becomes the
 /// matcher, and it stops once no arrival is left.
-nonisolated final class CallQueue<Call: Sendable>: Sendable {
+///
+/// A match records the call as the wait's answer under the lock, and the continuation only wakes the
+/// wait, which takes its answer under the lock once it resumes. The Swift runtime does not report to
+/// the thread sanitizer the ordering of a continuation resumed before its task suspends, so a call
+/// carried in that resumption would look unsynchronized with the thread that started it; the lock
+/// orders the two in a way the sanitizer observes.
+nonisolated package final class CallQueue<Call: Sendable>: Sendable {
     private struct Waiter: Sendable {
         /// The calls the wait accepts, or `nil` for a wait that accepts every call.
         let accepts: (@Sendable (Call) -> Bool)?
-        let continuation: CheckedContinuation<Call?, Never>
+        let continuation: CheckedContinuation<Void, Never>
     }
 
     /// Where one wait is between its registration and its result.
@@ -28,6 +34,8 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
         case cancelledWhileRegistering
         /// The wait is installed and unanswered.
         case waiting(Waiter)
+        /// A match gave the wait this call, which it takes once it resumes.
+        case answered(Call)
     }
 
     /// A started call or a new wait, in the order they happened.
@@ -40,8 +48,8 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
     private enum Found {
         /// The wait ended, or no call is unclaimed and it waits.
         case none
-        /// The wait accepts every call and took the oldest unclaimed one.
-        case taken(Call, CheckedContinuation<Call?, Never>)
+        /// The wait accepts every call and was answered with the oldest unclaimed one.
+        case taken(Waiter)
         /// The unclaimed calls in start order, for the wait's predicate to examine outside the lock.
         case candidates(@Sendable (Call) -> Bool, [(UInt64, Call)])
     }
@@ -70,11 +78,14 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
             return true
         }
 
-        /// Ends a wait that is still unanswered, returning its continuation.
-        mutating func answer(_ wait: UInt64) -> CheckedContinuation<Call?, Never>? {
+        /// Answers a wait that is still unanswered with `call`, returning the waiter to resume.
+        ///
+        /// The waiter is returned rather than released here, so its predicate is released outside the
+        /// lock.
+        mutating func answer(_ wait: UInt64, with call: Call) -> Waiter? {
             guard case .waiting(let waiter) = waits[wait] else { return nil }
-            waits[wait] = nil
-            return waiter.continuation
+            waits[wait] = .answered(call)
+            return waiter
         }
 
         /// Whether a wait is installed and unanswered.
@@ -85,18 +96,34 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
 
         /// The entries matching has examined.
         var examined: Int { unclaimed.examined + unanswered.examined }
+        /// The entries the queues of calls and waits store.
+        var stored: Int { unclaimed.storedCount + unanswered.storedCount }
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
+    private let beforeSuspending: (@Sendable () -> Void)?
+
+    /// Creates a queue with no started calls.
+    ///
+    /// `beforeSuspending` runs in each wait after it has arrived, and finished matching if it became
+    /// the matcher, and before it suspends, so a test of the queue can hold a wait in that interval.
+    package init(beforeSuspending: (@Sendable () -> Void)? = nil) {
+        self.beforeSuspending = beforeSuspending
+    }
 
     /// How many calls have started.
     var startedCount: Int { state.withLock { $0.started } }
 
     /// How many queued calls and waits matching has examined, which tests read as its work.
     var examinedEntries: Int { state.withLock { $0.examined } }
+    /// How many queued calls and waits the queues store, ended ones included, which tests read as
+    /// their storage.
+    var storedEntries: Int { state.withLock { $0.stored } }
+    /// How many waits have registered and not ended.
+    var waitCount: Int { state.withLock { $0.waits.count } }
 
     /// Records a started call and hands it to the oldest waiting test that accepts it, if any.
-    func offer(_ call: Call) {
+    package func offer(_ call: Call) {
         let matches = state.withLock { state -> Bool in
             state.started += 1
             state.nextCall += 1
@@ -108,14 +135,14 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
 
     /// The oldest call that `accepts` matches, or the oldest call when it is `nil`, that no test has
     /// taken, once one has started; `nil` if the waiting task is cancelled.
-    func next(where accepts: (@Sendable (Call) -> Bool)? = nil) async -> Call? {
+    package func next(where accepts: (@Sendable (Call) -> Bool)? = nil) async -> Call? {
         let id = state.withLock { state -> UInt64 in
             state.nextWait += 1
             state.waits[state.nextWait] = .registering
             return state.nextWait
         }
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Call?, Never>) in
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let matches = state.withLock { state -> Bool? in
                     guard case .registering = state.waits[id] else {
                         // Cancelled first: the wait ends without arriving.
@@ -126,24 +153,31 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
                     return state.arrive(.wait(id))
                 }
                 switch matches {
-                case nil: continuation.resume(returning: nil)
+                case nil: continuation.resume()
                 case true?: match()
                 case false?: break
                 }
+                beforeSuspending?()
             }
         } onCancel: {
-            let waiter = state.withLock { state -> CheckedContinuation<Call?, Never>? in
+            let waiter = state.withLock { state -> Waiter? in
                 switch state.waits[id] {
                 case .registering?:
                     state.waits[id] = .cancelledWhileRegistering
                     return nil
-                case .waiting?: return state.answer(id)
-                // Answered or already ended: nothing remains to remove.
-                case .cancelledWhileRegistering?, nil: return nil
+                case .waiting(let waiter)?:
+                    state.waits[id] = nil
+                    return waiter
+                // Answered or already ended: the first outcome stands.
+                case .answered?, .cancelledWhileRegistering?, nil: return nil
                 }
             }
-            waiter?.resume(returning: nil)
+            waiter?.continuation.resume()
         }
+        // A match left the wait's call in its entry; a cancellation removed the entry.
+        let outcome = state.withLock { $0.waits.removeValue(forKey: id) }
+        guard case .answered(let call)? = outcome else { return nil }
+        return call
     }
 
     /// Takes arrivals in order until none is left, then stops being the matcher.
@@ -190,14 +224,14 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
                 )
             }
             for (wait, accepts) in candidates where accepts?(call) ?? true {
-                let continuation = state.withLock { state -> CheckedContinuation<Call?, Never>? in
-                    guard let continuation = state.answer(wait) else { return nil }
+                let waiter = state.withLock { state -> Waiter? in
+                    guard let waiter = state.answer(wait, with: call) else { return nil }
                     state.calls[id] = nil
                     state.arrivals.removeFirst()
-                    return continuation
+                    return waiter
                 }
-                if let continuation {
-                    continuation.resume(returning: call)
+                if let waiter {
+                    waiter.continuation.resume()
                     return
                 }
                 ended = true
@@ -230,8 +264,7 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
                     return .none
                 }
                 state.arrivals.removeFirst()
-                let continuation = state.answer(id)!
-                return .taken(state.calls.removeValue(forKey: call)!, continuation)
+                return .taken(state.answer(id, with: state.calls.removeValue(forKey: call)!)!)
             }
             return .candidates(
                 accepts,
@@ -241,19 +274,19 @@ nonisolated final class CallQueue<Call: Sendable>: Sendable {
         let (accepts, unclaimed): (@Sendable (Call) -> Bool, [(UInt64, Call)])
         switch found {
         case .none: return
-        case .taken(let call, let continuation):
-            continuation.resume(returning: call)
+        case .taken(let waiter):
+            waiter.continuation.resume()
             return
         case .candidates(let predicate, let calls): (accepts, unclaimed) = (predicate, calls)
         }
         for (call, value) in unclaimed where accepts(value) {
-            let continuation = state.withLock { state -> CheckedContinuation<Call?, Never>? in
+            let waiter = state.withLock { state -> Waiter? in
                 state.arrivals.removeFirst()
-                guard let continuation = state.answer(id) else { return nil }
+                guard let waiter = state.answer(id, with: value) else { return nil }
                 state.calls[call] = nil
-                return continuation
+                return waiter
             }
-            continuation?.resume(returning: value)
+            waiter?.continuation.resume()
             return
         }
         state.withLock { state in
@@ -385,47 +418,51 @@ nonisolated package final class CancellationSignal: Sendable {
 }
 
 /// The result a test chooses for one driver call, which the suspended driver returns.
-nonisolated final class ResultSlot<Output: Sendable, Failure: Error>: Sendable {
+///
+/// The test stores the result under the lock and the continuation only wakes the driver, which takes
+/// the result under the lock once it resumes, so the thread sanitizer observes the hand-off also when
+/// the test chooses the result before the driver suspends, as ``CallQueue`` explains.
+nonisolated package final class ResultSlot<Output: Sendable, Failure: Error>: Sendable {
     private struct State: Sendable {
-        var continuation: CheckedContinuation<Result<Output, Failure>, Never>?
+        var continuation: CheckedContinuation<Void, Never>?
         var result: Result<Output, Failure>?
         var finished = false
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
 
+    /// Creates a slot whose result is not chosen.
+    package init() {}
+
     /// Whether the test has chosen the result.
-    var isFinished: Bool { state.withLock { $0.finished } }
+    package var isFinished: Bool { state.withLock { $0.finished } }
 
     /// Suspends the driver until the test chooses its result; cancellation does not end the wait.
-    func wait(afterInstalling started: @Sendable () -> Void) async -> Result<Output, Failure> {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Result<Output, Failure>, Never>) in
-            let ready = state.withLock { state -> Result<Output, Failure>? in
-                guard let result = state.result else {
-                    state.continuation = continuation
-                    return nil
-                }
-                return result
+    package func wait(afterInstalling started: @Sendable () -> Void) async -> Result<Output, Failure> {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let ready = state.withLock { state -> Bool in
+                guard !state.finished else { return true }
+                state.continuation = continuation
+                return false
             }
-            if let ready { continuation.resume(returning: ready) }
+            if ready { continuation.resume() }
             started()
         }
+        // The test stored the result before it woke the driver, and the driver takes it once.
+        return state.withLock { $0.result.take()! }
     }
 
     /// Chooses the result once, reporting whether this call chose it.
-    func finish(_ result: Result<Output, Failure>) -> Bool {
-        let resumed = state.withLock { state -> (Bool, CheckedContinuation<Result<Output, Failure>, Never>?) in
+    package func finish(_ result: Result<Output, Failure>) -> Bool {
+        let chosen = state.withLock { state -> (Bool, CheckedContinuation<Void, Never>?) in
             guard !state.finished else { return (false, nil) }
             state.finished = true
-            guard let continuation = state.continuation else {
-                state.result = result
-                return (true, nil)
-            }
-            state.continuation = nil
-            return (true, continuation)
+            state.result = result
+            defer { state.continuation = nil }
+            return (true, state.continuation)
         }
-        resumed.1?.resume(returning: result)
-        return resumed.0
+        chosen.1?.resume()
+        return chosen.0
     }
 }
 

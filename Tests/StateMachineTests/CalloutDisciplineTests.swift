@@ -2,6 +2,7 @@ import Combine
 import Dispatch
 import Observation
 import StateMachine
+import StateMachineTestSupport
 import StateMachineUI
 import Testing
 import os
@@ -57,11 +58,10 @@ private final class TaskSlot: Sendable {
 /// Runs `body` on another thread and returns once it has.
 private func elsewhere(_ body: @escaping @Sendable () -> Void) {
     let done = DispatchSemaphore(value: 0)
-    DispatchQueue.global()
-        .async {
-            body()
-            done.signal()
-        }
+    runOnOwnThread {
+        body()
+        done.signal()
+    }
     done.wait()
 }
 

@@ -94,7 +94,23 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
         /// The identifier of the router or edge whose authored function refused the input, as the
         /// owner reports it, or `nil` when no authored function refused it.
         public let route: String?
+        /// The typed rejection the owner's `send` threw.
+        public let reason: Owner.SendRejection
         /// The owner's snapshot when it rejected the input.
+        public let snapshot: Owner.Snapshot
+    }
+
+    /// A terminal outcome that a router or completion edge refused while `deliver` or `reconcile`
+    /// prepared it, so the owner retained it for reconciliation.
+    public struct CompletionRejection {
+        /// The call that prepared the outcome: ``Step/Kind/delivery`` or ``Step/Kind/reconciliation``.
+        public let kind: Step.Kind
+        /// The phase the owner held when it refused the outcome.
+        public let phase: String
+        /// The identifier of the router or completion edge whose authored function refused the
+        /// outcome, as the owner names it.
+        public let route: String
+        /// The owner's snapshot when it refused the outcome.
         public let snapshot: Owner.Snapshot
     }
 
@@ -115,6 +131,9 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     /// Every input that `send` or ``rejection(of:fileID:filePath:line:column:)`` made the owner reject,
     /// in order, with the route the owner says refused it.
     public private(set) var rejections: [Rejection] = []
+    /// Every terminal outcome whose router or completion edge refused it in a `deliver` or `reconcile`
+    /// call, in order, with the route the owner names; an owner that names no route records none.
+    public private(set) var completionRejections: [CompletionRejection] = []
     /// How many accepted changes the harness never observed, because `withOwner` made them before
     /// the last change of its body; their snapshots were not checked against any invariant.
     public private(set) var unobservedChanges = 0
@@ -345,7 +364,21 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     private mutating func recordRejection(_ rejection: Owner.SendRejection, from before: Owner.Snapshot) {
         let phase = Owner.phase(of: before)
         rejections.append(
-            Rejection(phase: phase, route: Owner.rejectingRoute(of: rejection, in: phase), snapshot: before)
+            Rejection(
+                phase: phase,
+                route: Owner.rejectingRoute(of: rejection, in: phase),
+                reason: rejection,
+                snapshot: before
+            )
+        )
+    }
+
+    /// Records the refusal of a completion that a call prepared from `before`, when the owner names the
+    /// route that refused it.
+    fileprivate mutating func recordRefusal(_ kind: Step.Kind, from before: Owner.Snapshot, route: String?) {
+        guard let route else { return }
+        completionRejections.append(
+            CompletionRejection(kind: kind, phase: Owner.phase(of: before), route: route, snapshot: before)
         )
     }
 
@@ -448,6 +481,7 @@ extension ManualMachineTest where Owner: DeliveringLocalStateMachine & ~Copyable
         let before = owner.snapshot()
         let result = owner.deliver(completion)
         record(.delivery, from: before, receipt: Owner.receipt(of: result))
+        recordRefusal(.delivery, from: before, route: owner.rejectingRoute(of: result, in: Owner.phase(of: before)))
         return result
     }
 
@@ -464,6 +498,11 @@ extension ManualMachineTest where Owner: DeliveringLocalStateMachine & ~Copyable
         let before = owner.snapshot()
         let result = owner.reconcile(id: id)
         record(.reconciliation, from: before, receipt: Owner.receipt(of: result))
+        recordRefusal(
+            .reconciliation,
+            from: before,
+            route: owner.rejectingRoute(of: result, in: Owner.phase(of: before))
+        )
         return result
     }
 

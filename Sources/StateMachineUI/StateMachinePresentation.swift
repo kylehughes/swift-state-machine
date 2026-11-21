@@ -45,7 +45,8 @@ import StateMachine
     // The subscribers of `presentedSnapshots`. It holds no snapshot.
     private let feed = PresentationFeed<Host.Snapshot>()
 
-    /// Observes an owner from its current snapshot; this starts no work.
+    /// Shows the owner's current snapshot and tries to reserve one subscriber slot for updates; this
+    /// starts no work.
     ///
     /// Creation never fails. If the owner refuses another registration, ``isObserving`` is
     /// `false`, ``observationFailure`` holds the reason, and the presentation shows the snapshot it read
@@ -96,11 +97,14 @@ import StateMachine
         return result
     }
 
-    /// Stops observing, closes the owner, and publishes its terminal snapshot before returning, unless
+    /// Closes the owner, stops observing, and publishes its terminal snapshot before returning, unless
     /// the call is made during a snapshot publication, which defers it as ``send(_:)`` does.
+    ///
+    /// The owner is closed before the registration ends, so a callback of that end that resumes
+    /// observing finds the owner closed, and no registration is live once this returns.
     @discardableResult public func close() -> Host.Receipt {
-        core.end()
         let receipt = host.close()
+        core.end()
         core.apply(receipt.snapshot)
         return receipt
     }
@@ -220,7 +224,8 @@ extension StateMachineObservableObject where Host.Snapshot: Sendable {
     // model is released, so its stored properties hold none of them.
     @ObservationIgnored private let core: DrivingCore<StateMachinePresentation>
 
-    /// Observes an owner from its current snapshot; this starts no work.
+    /// Shows the owner's current snapshot and tries to reserve one subscriber slot for updates; this
+    /// starts no work.
     ///
     /// Creation never fails, so the model can initialize a view's `@State`. If the owner refuses another registration, ``isObserving`` is
     /// `false`, ``observationFailure`` holds the reason, and the model exposes the snapshot it read
@@ -269,11 +274,14 @@ extension StateMachineObservableObject where Host.Snapshot: Sendable {
         return result
     }
 
-    /// Stops observing, closes the owner, and exposes its terminal snapshot before returning, unless
+    /// Closes the owner, stops observing, and exposes its terminal snapshot before returning, unless
     /// the call is made during a snapshot change, which defers it as ``send(_:)`` does.
+    ///
+    /// The owner is closed before the registration ends, so a callback of that end that resumes
+    /// observing finds the owner closed, and no registration is live once this returns.
     @discardableResult public func close() -> Host.Receipt {
-        core.end()
         let receipt = host.close()
+        core.end()
         core.apply(receipt.snapshot)
         return receipt
     }
@@ -348,7 +356,13 @@ extension StateMachinePresentation: DrivingSurface {
 /// the slot free; the shown snapshot and the owner of a released presentation are released then too.
 /// `isObserving` is `true` while a registration is live; once published `true`, it stays `true` until
 /// every cancellation the presentation started has returned, but a cancellation alone never makes it
-/// `true`.
+/// `true`. An installed registration becomes live only once no assignment is in progress, so the
+/// snapshot it delivered, or a newer one, is already shown when the presentation first reports it.
+///
+/// A snapshot that arrives while another is being assigned waits for that assignment, tagged by where
+/// it came from: a receipt of a change made through the presentation, or a delivery of the observation.
+/// Ending the registration discards a waiting delivery, whose publication was never announced, while a
+/// waiting receipt is still shown.
 @MainActor private final class DrivingCore<Surface: DrivingSurface> {
     typealias Host = Surface.Host
     typealias Snapshot = Host.Snapshot
@@ -359,6 +373,19 @@ extension StateMachinePresentation: DrivingSurface {
         case registering(Attempt)
         case installed(Attempt, MainActorSnapshotSubscription, live: Bool)
     }
+    /// A snapshot waiting for the assignment in progress, with the revision read when it arrived.
+    private struct Waiting {
+        let snapshot: Snapshot
+        let revision: UInt64
+    }
+    /// Where a snapshot to show came from.
+    enum Origin {
+        /// The receipt of a change admitted through the presentation, which it always shows.
+        case presentation
+        /// A delivery of the presentation's observation, which ending the observation discards unless
+        /// its publication has been announced.
+        case observation
+    }
 
     weak var surface: Surface?
     /// The gate of the installed registration, which a presentation's destructor closes on whatever
@@ -366,8 +393,14 @@ extension StateMachinePresentation: DrivingSurface {
     nonisolated let gate = PresentationGate()
     private(set) var host: Host?
     private(set) var snapshot: Snapshot?
-    private var deferred: Snapshot?
+    // The snapshots that arrived during an assignment and wait for it, each with its revision: the
+    // newest receipt, and a delivery newer than it, if one arrived after it.
+    private var deferredReceipt: Waiting?
+    private var deferredDelivery: Waiting?
+    // The revision of the newest snapshot admitted for showing, and of the newest whose publication
+    // has been announced.
     private var watermark: UInt64
+    private var announced: UInt64
     private var publishing = false
     private var registration = Registration.idle
     // The cancellations of registrations the presentation let go that have not returned yet.
@@ -385,6 +418,7 @@ extension StateMachinePresentation: DrivingSurface {
         self.host = host
         snapshot = initial
         watermark = initial.revision
+        announced = initial.revision
     }
 
     /// Makes the creation's registration, recording a refusal instead of throwing it.
@@ -428,6 +462,12 @@ extension StateMachinePresentation: DrivingSurface {
             gate.current = nil
             cancel(token)
         }
+        // A delivery waiting for the assignment in progress was never announced, so it is not shown; the
+        // receipt of a change made through the presentation still is.
+        if let delivery = deferredDelivery.take() {
+            watermark = max(announced, deferredReceipt?.revision ?? 0)
+            discard(delivery.snapshot)
+        }
         report()
     }
 
@@ -435,23 +475,47 @@ extension StateMachinePresentation: DrivingSurface {
     //
     // The revision is read once, before the watermark: reading it can run a snapshot's own code, which
     // can send another input and apply a newer snapshot, which the comparison then sees.
-    func apply(_ next: Snapshot) {
+    func apply(_ next: Snapshot, from origin: Origin = .presentation) {
         let revision = next.revision
+        if case .presentation = origin, publishing, deferredDelivery != nil,
+            revision > max(announced, deferredReceipt?.revision ?? 0)
+        {
+            // A receipt that a waiting delivery already covers waits too, so it is still shown if the
+            // observation ends before the assignment completes.
+            let replaced = exchange(&deferredReceipt, with: Waiting(snapshot: next, revision: revision))
+            guard revision > watermark else { return release(replaced.map { [$0.snapshot] } ?? []) }
+            watermark = revision
+            release([replaced, deferredDelivery.take()].compactMap { $0?.snapshot })
+            return
+        }
         guard revision > watermark else { return }
         watermark = revision
         guard !publishing else {
-            release(exchange(&deferred, with: next).map { [$0] } ?? [])
+            // Each arrival is newer than every snapshot waiting. A receipt replaces both; a delivery
+            // replaces only a waiting delivery, so the receipt is still shown if the observation ends.
+            let waiting = Waiting(snapshot: next, revision: revision)
+            var replaced: [Waiting?] = [exchange(&deferredDelivery, with: nil)]
+            switch origin {
+            case .presentation: replaced.append(exchange(&deferredReceipt, with: waiting))
+            case .observation: deferredDelivery = waiting
+            }
+            release(replaced.compactMap { $0?.snapshot })
             return
         }
         publishing = true
         // A replaced snapshot is released after the assignments, so a destructor that reads the
         // presentation finds the newest one in place.
         var displaced: [Snapshot] = []
-        show(next, displacing: &displaced)
+        show(next, revision: revision, displacing: &displaced)
         // An observer that applied a newer snapshot during the assignment deferred it here, so the outer
         // assignment cannot overwrite the newer value.
-        while let newer = deferred.take() { show(newer, displacing: &displaced) }
+        while let newer = deferredDelivery.take() ?? deferredReceipt.take() {
+            // A waiting delivery is newer than the waiting receipt, which it then replaces.
+            if let older = deferredReceipt.take() { displaced.append(older.snapshot) }
+            show(newer.snapshot, revision: newer.revision, displacing: &displaced)
+        }
         publishing = false
+        becomeLive()
         release(displaced)
     }
 
@@ -484,7 +548,7 @@ extension StateMachinePresentation: DrivingSurface {
             registration = .idle
             cancel(token)
             surface?.record(nil)
-            if let seed { apply(seed) }
+            if let seed { apply(seed, from: .observation) }
             return
         }
         registration = .installed(attempt, token, live: false)
@@ -494,8 +558,13 @@ extension StateMachinePresentation: DrivingSurface {
             discard(seed)
             return settle()
         }
-        if let seed { apply(seed) }
-        guard isInstalled(attempt) else { return }
+        if let seed { apply(seed, from: .observation) }
+        becomeLive()
+    }
+    // Makes the installed registration live, unless an assignment is in progress: the seed it delivered,
+    // or a newer snapshot, is then shown, and the assignment makes it live once it completes.
+    private func becomeLive() {
+        guard !publishing, case .installed(let attempt, let token, live: false) = registration else { return }
         registration = .installed(attempt, token, live: true)
         report()
     }
@@ -507,9 +576,12 @@ extension StateMachinePresentation: DrivingSurface {
         case .registering(let current) where current === attempt:
             _ = attempt.admit(next)
         case .installed(let current, _, _) where current === attempt && surface != nil:
-            apply(next)
+            apply(next, from: .observation)
         default:
-            discard(next)
+            // A delivery through a registration the presentation let go waits for the cancellations still
+            // running. Once none runs, as when a host of your own calls a callback whose cancellation
+            // has returned, nothing more can depend on it, so it is released at once.
+            if cancelling == 0 { withExtendedLifetime(next) {} } else { discard(next) }
         }
     }
     // Stages a finish while the owner is still making the registration, and ends the installed one.
@@ -556,7 +628,10 @@ extension StateMachinePresentation: DrivingSurface {
         guard cancelling == 0 else { return }
         let released = exchange(&discarded, with: [])
         guard disposing else { return withExtendedLifetime(released) {} }
-        let owned = (exchange(&snapshot, with: nil), exchange(&deferred, with: nil), exchange(&host, with: nil))
+        let owned = (
+            exchange(&snapshot, with: nil), exchange(&deferredReceipt, with: nil),
+            exchange(&deferredDelivery, with: nil), exchange(&host, with: nil)
+        )
         withExtendedLifetime((released, owned)) {}
     }
     // Reports whether a registration is live, or one that was reported live is still being cancelled,
@@ -575,7 +650,8 @@ extension StateMachinePresentation: DrivingSurface {
             surface.report(observing: observing)
         }
     }
-    private func show(_ next: Snapshot, displacing displaced: inout [Snapshot]) {
+    private func show(_ next: Snapshot, revision: UInt64, displacing displaced: inout [Snapshot]) {
+        announced = revision
         guard let surface else {
             if let replaced = exchange(&snapshot, with: next) { displaced.append(replaced) }
             return

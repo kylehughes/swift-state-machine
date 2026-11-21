@@ -1,6 +1,7 @@
 import Dispatch
 import Foundation
 import StateMachine
+import StateMachineTestSupport
 import StateMachineUI
 import os
 
@@ -189,11 +190,10 @@ nonisolated final class ExplorerHost: SharedStateMachineHost, Sendable {
         let slot = OSAllocatedUnfairLock<ExplorerShot?>(initialState: value)
         _ = consume value
         let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global()
-            .async {
-                if let shot = slot.withLock({ $0.take() }) { receive(shot) }
-                done.signal()
-            }
+        runOnOwnThread {
+            if let shot = slot.withLock({ $0.take() }) { receive(shot) }
+            done.signal()
+        }
         let ok = explorerWait(done)
         world.state.withLock { $0.workerDisplaced = nil }
         return ok
@@ -219,12 +219,11 @@ nonisolated final class ExplorerHost: SharedStateMachineHost, Sendable {
         else { return false }
         world.hostEnded(id)
         world.setParked(id, true)
-        DispatchQueue.global()
-            .async {
-                token.cancel()
-                park.returned.signal()
-                park.progressed.signal()
-            }
+        runOnOwnThread {
+            token.cancel()
+            park.returned.signal()
+            park.progressed.signal()
+        }
         guard explorerWait(park.progressed) else { return false }
         if !park.entered.withLock({ $0 }) { world.setParked(id, false) }
         return true

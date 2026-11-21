@@ -42,8 +42,49 @@ struct Generator {
     /// a generated scope that declares a type of the member's name; a module-qualified spelling is kept.
     func qualified(_ spelling: String) -> String { spelling.hasPrefix("Swift::") ? spelling : "\(name).\(spelling)" }
 
+    /// How generated code names the type whose static function it calls for an authored function: the
+    /// schema, or for a deprecated function the protocol requirement it witnesses, which draws no warning.
+    func authored(_ deprecation: Schema.Deprecation?) -> String {
+        deprecation == nil ? schemaReference : "\(schemaReference)._stateMachineDeprecated"
+    }
+
+    /// The deprecation a generated public member named for an authored function repeats, before its modifiers.
+    func deprecated(_ deprecation: Schema.Deprecation?) -> String { deprecation.map { $0.attribute + " " } ?? "" }
+
+    /// The authored functions' deprecations, each once, in declaration order, with whether a call of the
+    /// function needs `try`: whether it declares `throws` and the macro reads its failure as other than
+    /// `Never`; an edge that returns `Advance` reports its failure without throwing.
+    var deprecations: [(deprecation: Schema.Deprecation, throwing: Bool)] {
+        var seen: Set<String> = []
+        let all =
+            schema.transitions.map { ($0.deprecation, $0.failureType != nil) }
+            + schema.routes.map { ($0.deprecation, $0.failureType != nil) }
+            + [(schema.restoration?.deprecation, schema.restoration?.failureType != nil)]
+        return all.compactMap { deprecation, throwing in deprecation.map { ($0, throwing && $0.declaresThrows) } }
+            .filter { seen.insert($0.deprecation.declaration).inserted }
+    }
+
+    /// The protocol through which generated code calls each deprecated authored function, and the type whose
+    /// deprecated members witness it: a call through a requirement draws no deprecation warning, so only the
+    /// generated public members named for a function repeat its deprecation.
+    func deprecatedCalls() -> String {
+        guard !deprecations.isEmpty else { return "" }
+        return """
+            fileprivate protocol _StateMachineDeprecatedFunctions {
+                \(deprecations.map(\.deprecation.declaration).joined(separator: "\n"))
+            }
+            fileprivate enum _StateMachineDeprecatedCalls: _StateMachineDeprecatedFunctions {
+                \(deprecations.map { "@available(*, deprecated)\n\($0.deprecation.declaration) { \($0.throwing ? "try " : "")\(schemaReference).\($0.deprecation.call) }" }
+                .joined(separator: "\n"))
+            }
+            fileprivate static var _stateMachineDeprecated: any _StateMachineDeprecatedFunctions.Type {
+                _StateMachineDeprecatedCalls.self
+            }
+            """
+    }
+
     func members() throws -> [DeclSyntax] {
-        var result = [witnesses(), effects(), requests()]
+        var result = [witnesses(), effects(), requests(), deprecatedCalls()]
         if schema.generates(.owned) { result.append(owned()) }
         if schema.generatesObservingOwner {
             result.append(values())
@@ -665,7 +706,7 @@ struct Generator {
             return name
         }
         let phases = schema.phases.map {
-            "_StateMachineGraph.Phase(id: \(literal($0.caseName)), payload: \(literal($0.typeName)))"
+            "_StateMachineGraph.Phase(id: \(literal($0.caseName)), payload: \(type($0.payloadSpelling)))"
         }
         let inputs = schema.inputs.map {
             "_StateMachineGraph.Input(id: \(literal($0.caseName)), payload: \($0.payloadType.map(type) ?? "nil"))"
@@ -925,7 +966,7 @@ struct Generator {
         let argument = payloadArgument + (route.takesRequest ? ", request: request" : "")
         let result = ownedRoutedResult(route)
         let wraps = schema.needsOwnedResult(route)
-        let call = "\(schemaReference).\(route.name)(phase\(argument))"
+        let call = "\(authored(route.deprecation)).\(route.name)(phase\(argument))"
         let choice = schema.choiceType(route) ?? "Route.\(Schema.companion(route.name))"
         let selection =
             route.failureType == nil
@@ -946,7 +987,7 @@ struct Generator {
             .joined(separator: "\n")
         return """
             /// Runs the router `\(route.name)`, then advances through the edge it selects.
-            \(access)consuming func \(route.name)(\(parameter)) -> \(result) where Phase == \(phase(route.from)) {
+            \(deprecated(route.deprecation))\(access)consuming func \(route.name)(\(parameter)) -> \(result) where Phase == \(phase(route.from)) {
                 \(routedCopyCheck(route))\(selection)
                 switch selection { \(cases) }
             }
@@ -959,7 +1000,7 @@ struct Generator {
         let argument = route.payloadType == nil ? "" : ", input"
         let branchArgument = route.payloadType == nil ? "" : "input"
         let wraps = routedFailureWraps(route)
-        let call = "\(schemaReference).\(route.name)(payload\(argument))"
+        let call = "\(authored(route.deprecation)).\(route.name)(payload\(argument))"
         let choice = schema.choiceType(route) ?? "Route.\(Schema.companion(route.name))"
         let selection: String
         switch (route.failureType != nil, wraps) {
@@ -984,7 +1025,7 @@ struct Generator {
             .joined(separator: "\n")
         return """
             /// Runs the router `\(route.name)`, then prepares the edge it selects.
-            \(access)func \(route.name)(\(parameter))\(routedThrows(route)) -> Prepared where Phase == \(phase(route.from)) {
+            \(deprecated(route.deprecation))\(access)func \(route.name)(\(parameter))\(routedThrows(route)) -> Prepared where Phase == \(phase(route.from)) {
                 \(selection)
                 switch selection { \(cases) }
             }
@@ -997,6 +1038,8 @@ struct Generator {
                 let before = phase(edge.from)
                 let after = phase(edge.to)
                 let visibility = edgeAccess(edge, observed: false)
+                // A routed edge's method is the router's to call, so only an edge's own public method is deprecated.
+                let marked = visibility == "fileprivate " ? "" : deprecated(edge.deprecation)
                 // The method passes the payload on once, so it repeats the authored ownership, which a
                 // noncopyable payload needs.
                 let payload = [
@@ -1010,14 +1053,14 @@ struct Generator {
                     source: "phase",
                     payload: edge.payloadType == nil ? nil : "input"
                 )
-                let call = "\(schemaReference).\(edge.name)(\(arguments))"
+                let call = "\(authored(edge.deprecation)).\(edge.name)(\(arguments))"
                 // The edge's own effect type, so a caller switches over only what this edge can start.
                 let result = ownedResult(edge, source: "Self")
                 switch edge.shape {
                 case .advance:
                     return """
                         /// Consumes the predecessor and preserves it on authored rejection.
-                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
+                        \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             switch \(call) {
                             case .advanced(let next, let effects): return .advanced(Owned<\(after)>(next), effects: effects)
                             case .rejected(let failure, let original): return .rejected(failure, Owned<\(before)>(original))
@@ -1027,7 +1070,7 @@ struct Generator {
                 case .change where edge.failureType != nil:
                     return """
                         /// Advances through the authored edge or returns the original predecessor.
-                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
+                        \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             do {
                                 let change = try \(call)
                                 return .advanced(Owned<\(after)>(change.next), effects: change.effects)
@@ -1037,7 +1080,7 @@ struct Generator {
                 case .change:
                     return """
                         /// Advances through the authored edge, preserving effect order.
-                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
+                        \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             let change = \(call)
                             return .init(Owned<\(after)>(change.next), effects: change.effects)
                         }
@@ -1045,14 +1088,14 @@ struct Generator {
                 case .destination where edge.failureType != nil:
                     return """
                         /// Advances through the authored edge or returns the original predecessor.
-                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
+                        \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             do { return .advanced(Owned<\(after)>(try \(call)), effects: []) } catch { return .rejected(error, self) }
                         }
                         """
                 case .destination:
                     return """
                         /// Advances through the authored edge, which starts no operation.
-                        \(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
+                        \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             Owned<\(after)>(\(call))
                         }
                         """
@@ -1280,14 +1323,26 @@ struct Generator {
             documentation =
                 "/// Prepares the completion edge that delivery selects, with operation authority preserved."
         }
-        let call = "\(edge.failureType == nil ? "" : "try ")\(schemaReference).\(edge.name)(\(argument))"
+        let call = "\(edge.failureType == nil ? "" : "try ")\(authored(edge.deprecation)).\(edge.name)(\(argument))"
         let starts = edge.effectNamespace != nil
         let result = starts ? "change" : "next"
         let resultType = starts ? "StateMachine::Change<\(after), \(authoredEffect(edge))>" : after
         let throwsClause = edge.failureType.map { " throws(\($0))" } ?? ""
-        return """
+        // The public method of a deprecated edge repeats its deprecation and calls the method `prepare` calls.
+        let visibility = edgeAccess(edge, observed: true)
+        let forwarded =
+            observedName(edge) == edge.name
+            ? ""
+            : """
             \(documentation)
-            \(edgeAccess(edge, observed: true))func \(edge.name)(\(parameter))\(throwsClause) -> Prepared where Phase == \(before) {
+            \(deprecated(edge.deprecation))\(visibility)func \(edge.name)(\(parameter))\(throwsClause) -> Prepared where Phase == \(before) {
+                \(edge.failureType == nil ? "" : "try ")\(observedName(edge))(\(edge.payloadType == nil ? "" : "input"))
+            }
+
+            """
+        return forwarded + """
+            \(documentation)
+            \(forwarded.isEmpty ? visibility : "fileprivate ")func \(observedName(edge))(\(parameter))\(throwsClause) -> Prepared where Phase == \(before) {
                 let \(result): \(resultType) = \(call)
                 return _stateMachinePrepare(on: record, next: .\(edge.to)(\(starts ? "change.next" : "next")),
                     effects: \(starts ? "change.effects.map(\\.effect)" : "[]"),
@@ -1482,9 +1537,16 @@ struct Generator {
         return "\(op.request)(\(arguments.joined(separator: ", ")))"
     }
 
+    /// The `Observed` method that `prepare` calls for an edge: the edge's own, or for a deprecated edge whose own
+    /// method is public, the method that one forwards to, which is not deprecated.
+    func observedName(_ edge: Schema.Transition) -> String {
+        guard edge.deprecation != nil, edgeAccess(edge, observed: true) != "fileprivate " else { return edge.name }
+        return "_stateMachineDeprecated\(edge.declaration)"
+    }
+
     /// The dispatch of one prepared edge from `source`, mapping an authored failure into `PreparationRejection`.
     func dispatchEdge(_ edge: Schema.Transition, source: String, arguments: String) -> String {
-        let call = "\(source).\(edge.name)(\(arguments))"
+        let call = "\(source).\(observedName(edge))(\(arguments))"
         guard edge.failureType != nil else { return "return \(call)" }
         return "do { return try \(call) } catch { throw .\(rejectionCase(edge.name, from: edge.from))(error) }"
     }
@@ -1735,7 +1797,8 @@ struct Generator {
         let request = route.takesRequest ? ", request: completion.request" : ""
         // A completion router of a success without output takes no output.
         let routed = isInput || route.payloadType != nil ? payload : nil
-        let call = "\(schemaReference).\(route.name)(\(source).value\(routed.map { ", " + $0 } ?? "")\(request))"
+        let call =
+            "\(authored(route.deprecation)).\(route.name)(\(source).value\(routed.map { ", " + $0 } ?? "")\(request))"
         let rejection = rejectionCase(route.name, from: route.from)
         guard let choice = schema.choiceType(route) else {
             return "do { try \(call) } catch { throw .\(rejection)(error) }"
@@ -1792,7 +1855,7 @@ struct Generator {
             \(declaration)
             \(rejection)
             fileprivate static func _stateMachineRestored(_ saved: \(validator.archiveParameter))\(restorationThrows) -> (model: \(name), scopes: [StateMachine::RuntimeScopeID]) {
-                switch \(validator.failureType == nil ? "" : "try ")\(schemaReference).\(validator.name)(saved) { \(roots) }
+                switch \(validator.failureType == nil ? "" : "try ")\(authored(validator.deprecation)).\(validator.name)(saved) { \(roots) }
             }
             """
     }
@@ -2025,7 +2088,7 @@ struct Generator {
             /// Replaces the model with the phase `\(validator.name)` validates from saved data, in a fresh
             /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
             @discardableResult
-            \(access)\(modifier)func reset(restoring saved: \(validator.archiveParameter)\(isolated))\(asynchronous) throws(\(rejection)) -> Receipt {
+            \(deprecated(schema.restoration?.deprecation))\(access)\(modifier)func reset(restoring saved: \(validator.archiveParameter)\(isolated))\(asynchronous) throws(\(rejection)) -> Receipt {
                 \(validation)
                 let result = \(reset("restored.model", "restored.scopes", ""))\(finish)
                 switch result {
@@ -2037,7 +2100,7 @@ struct Generator {
             /// `reset(restoring:)` does, but only while the owner still holds the root `expected`
             /// observed, refusing otherwise as `reset(to:expecting:)` does.
             @discardableResult
-            \(access)\(modifier)func reset(restoring saved: \(validator.archiveParameter), expecting expected: Snapshot\(isolated))\(asynchronous) throws(\(rejection)) -> Receipt {
+            \(deprecated(schema.restoration?.deprecation))\(access)\(modifier)func reset(restoring saved: \(validator.archiveParameter), expecting expected: Snapshot\(isolated))\(asynchronous) throws(\(rejection)) -> Receipt {
                 \(validation)
                 let result = \(reset("restored.model", "restored.scopes", expectation))\(finish)
                 switch result {
@@ -2264,10 +2327,13 @@ struct Generator {
             """
     }
 
-    /// A `Local` owner's witness that names the router or edge whose authored function refused an input.
+    /// A `Local` owner's witnesses that name the router or edge whose authored function refused an input,
+    /// a delivered outcome, or a reconciled one.
     ///
     /// Each throwing function's `PreparationRejection` case, from each phase it leaves, names that phase's
     /// router or edge of the function's name, as the graph identifies it; any other rejection names none.
+    /// A delivery or reconciliation is attributed only while its outcome waits for reconciliation, from
+    /// the preparation rejection its retained record keeps.
     func rejectingRoute() -> String {
         var seen = Set<String>()
         let cases = schema.throwingFunctions
@@ -2288,11 +2354,38 @@ struct Generator {
             default: return nil
             }
             """
-        return """
+        let send = """
             /// The identifier of the router or edge, as the graph names it, whose authored function refused an
             /// input that `send` rejected from a snapshot in `phase`, or `nil` when no authored function refused it.
             \(access)static func rejectingRoute(of rejection: SendRejection, in phase: Swift::String) -> Swift::String? {
                 \(body)
+            }
+            """
+        guard hasOperations else { return send }
+        // A retained outcome's last rejection is a preparation rejection, the case `send` reports, so one
+        // switch names the function for both.
+        let retained =
+            cases.isEmpty
+            ? "nil"
+            : """
+            guard case .pending(let id, .reconciliationRequired) = result,
+                case .preparation(let preparation)? = pendingCompletions().first(where: { $0.id == id })?.lastRejection
+            else { return nil }
+            return Self.rejectingRoute(of: .preparation(preparation), in: phase)
+            """
+        return """
+            \(send)
+            /// The identifier of the router or completion edge, as the graph names it, whose authored function
+            /// refused the outcome that `deliver` left retained with `result`, preparing it from a snapshot in
+            /// `phase`, or `nil` when no authored function refused it.
+            \(access)borrowing func rejectingRoute(of result: DeliveryResult, in phase: Swift::String) -> Swift::String? {
+                \(retained)
+            }
+            /// The identifier of the router or completion edge, as the graph names it, whose authored function
+            /// refused the outcome that `reconcile(id:)` left retained with `result`, preparing it from a snapshot
+            /// in `phase`, or `nil` when no authored function refused it.
+            \(access)borrowing func rejectingRoute(of result: ReconcileResult, in phase: Swift::String) -> Swift::String? {
+                \(retained)
             }
             """
     }
@@ -2306,7 +2399,7 @@ struct Generator {
             """
 
             \(restoringDocumentation)
-            \(access)init(restoring saved: \(validator.archiveParameter), configuration: LocalConfiguration = .default)\(restorationThrows) {
+            \(deprecated(schema.restoration?.deprecation))\(access)init(restoring saved: \(validator.archiveParameter), configuration: LocalConfiguration = .default)\(restorationThrows) {
                 \(restoredRoot)
                 engine = _StateMachineEngine(restored.model, scopes: restored.scopes, limits: configuration\(batches))
             }
@@ -2764,7 +2857,7 @@ struct Generator {
             """
 
                 \(restoringDocumentation)
-                \(access)init(restoring saved: \(validator.archiveParameter), \(managedParameters(drivers: drivers, isolation: isolation, executor: !mainActor)))\(restorationThrows) {
+                \(deprecated(schema.restoration?.deprecation))\(access)init(restoring saved: \(validator.archiveParameter), \(managedParameters(drivers: drivers, isolation: isolation, executor: !mainActor)))\(restorationThrows) {
                     \(restoredRoot)
                     \(construction(model: "restored.model", scopes: "restored.scopes"))
                 }
@@ -2907,7 +3000,7 @@ struct Generator {
             """
 
                 \(restoringDocumentation)
-                \(access)init(restoring saved: \(validator.archiveParameter), \(managedParameters(drivers: "Drivers", isolation: "", owner: true)))\(restorationThrows) {
+                \(deprecated(schema.restoration?.deprecation))\(access)init(restoring saved: \(validator.archiveParameter), \(managedParameters(drivers: "Drivers", isolation: "", owner: true)))\(restorationThrows) {
                     \(restoredRoot)
                     \(construction(model: "restored.model", scopes: "restored.scopes"))
                 }
@@ -3139,7 +3232,7 @@ struct Generator {
             """
 
                 \(restoringDocumentation)
-                \(access)init(restoring saved: \(validator.archiveParameter), \(managedParameters(drivers: "Drivers", isolation: "@Sendable")))\(restorationThrows) {
+                \(deprecated(schema.restoration?.deprecation))\(access)init(restoring saved: \(validator.archiveParameter), \(managedParameters(drivers: "Drivers", isolation: "@Sendable")))\(restorationThrows) {
                     \(restoredRoot)
                     \(construction(model: "restored.model", scopes: "restored.scopes"))
                 }
@@ -3262,7 +3355,7 @@ struct Generator {
             """
 
                 /// Creates fresh authority in the phase `\(validator.name)` validates from saved data, selecting one driver closure per operation.
-                \(access)convenience init(restoring saved: \(validator.archiveParameter),
+                \(deprecated(schema.restoration?.deprecation))\(access)convenience init(restoring saved: \(validator.archiveParameter),
                     \(closures)\(handlers),
                     configuration: Configuration = .default,
                     \(completionPolicyParameter)\(executorParameter))\(restorationThrows) {

@@ -1,6 +1,7 @@
 import Dispatch
 import Foundation
 import StateMachine
+import StateMachineTestSupport
 import os
 
 // The free-standing sequence slice (E7): a `SnapshotSequence(register:)` of the fake shared host A that
@@ -161,11 +162,10 @@ import os
             sequence = nil
             iterator = nil
             let dropped = DispatchSemaphore(value: 0)
-            DispatchQueue.global()
-                .async {
-                    kept.withLock { $0 = nil }
-                    dropped.signal()
-                }
+            runOnOwnThread {
+                kept.withLock { $0 = nil }
+                dropped.signal()
+            }
             if !explorerWait(dropped) { world.violate(.stuck, "release on a worker never returned") }
         case .turn:
             await Task { @MainActor in }.value

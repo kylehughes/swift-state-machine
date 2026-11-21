@@ -62,6 +62,7 @@ enum ExplorerInvariant: String, CaseIterable, Sendable {
     case ingressDelivery = "I50"
     case propertyInvalidation = "I51"
     case distinctProjection = "I52"
+    case flushBoundary = "I53"
 }
 
 struct ExplorerViolation: Sendable, CustomStringConvertible {

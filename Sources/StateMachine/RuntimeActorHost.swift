@@ -40,8 +40,10 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
     private var engine: Engine
     private var ledger = Ledger()
     private var ready = RuntimeDeliveryReadyQueue()
-    // The capacity-conflict reports captured and not yet made.
-    private var owed = Ledger.OwedReports()
+    // The reports this owner decided and has not yet delivered, oldest first. Each is queued in the
+    // change that decides it, and one delivery at a time delivers them, so a handler that reconciles
+    // synchronously queues its attempt's report behind every report decided before it.
+    private var reports = RuntimeReportQueue<Ledger.Pending>()
     private var entries: [RuntimeConfinedExecution] = []
     private var subscribers: [Subscriber] = []
     private var pendingSubscribers: [PendingSubscriber] = []
@@ -305,7 +307,6 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
         retained: RuntimeDeliveryDecision? = nil,
         scheduledRetry: Bool = false
     ) -> Delivery {
-        reportOwed(id)
         // Only the first claim of a queued turn depends on the decision that queued it.
         var scheduledClaim = scheduledRetry
         let preparation = prepare
@@ -343,7 +344,7 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
                 }
                 self.scheduleDrain()
                 if !retrying, let pending, pending.status == .reconciliationRequired {
-                    self.reconciliationRequired(pending)
+                    self.reports.append(pending)
                 }
                 self.handleCapacityConflicts(conflicts.filter { $0.id != id })
                 self.changed()
@@ -366,7 +367,6 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
     }
     /// Settles retained delivery by an authority-only admission.
     public func discardPending(id: RuntimePendingID) -> Delivery {
-        reportOwed(id)
         retainDisplaceable()
         guard let result = ledger.discard(id, in: &engine) else {
             releaseDisplaced()
@@ -522,23 +522,31 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
     }
     private func retryCapacity() {
         handleCapacityConflicts(capacityConflicts())
+        deliverReports()
     }
-    // Reports a batch of capacity conflicts, each as captured when it was found. A handler that
-    // reconciles a later entry synchronously makes that entry's report first, so each completion's
-    // attempts are reported in order and once each.
+    // Queues a report of each capacity conflict of a batch, as captured when it was found, in the
+    // change that found them, or under the retry policy schedules each for another turn.
     private func handleCapacityConflicts(_ conflicts: [Ledger.Pending]) {
         CapacityConflictPause.reached(conflicts, \.id)
         guard case .manual = policy else {
             for pending in conflicts { _ = scheduleRetry(pending.id, after: pending.decision) }
             return
         }
-        for serial in owed.owe(conflicts) {
-            for pending in owed.take(through: serial) { reconciliationRequired(pending) }
-        }
+        for pending in conflicts { reports.append(pending) }
     }
-    // Makes the reports still owed for `id` before anything else happens to that completion.
-    private func reportOwed(_ id: RuntimePendingID) {
-        for pending in owed.take(id) { reconciliationRequired(pending) }
+    /// Delivers the queued reports from the oldest, one at a time, unless a delivery is already in
+    /// progress, and reports whether none is now.
+    ///
+    /// A call from inside a handler finds the delivery that runs it in progress, which delivers the
+    /// reports this call would have, after every report queued before them, and finishes the change.
+    @discardableResult
+    private func deliverReports() -> Bool {
+        var delivering = false
+        while let pending = reports.take(continuing: delivering) {
+            delivering = true
+            reconciliationRequired(pending)
+        }
+        return !reports.isDelivering
     }
     // Scheduling is bound to the decision that lost the conflict, so a newer attempt keeps its own.
     // An envelope that used its last turn parks, and that is when reconciliation is required.
@@ -547,8 +555,8 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
         case .scheduled: break
         case .superseded: return false
         case .exhausted:
-            reportOwed(id)
-            if let pending = ledger.pending.first(where: { $0.id == id }) { reconciliationRequired(pending) }
+            // The caller's change delivers the report.
+            if let pending = ledger.pending.first(where: { $0.id == id }) { reports.append(pending) }
             return false
         }
         guard ready.enqueue(id) else { return true }
@@ -570,7 +578,11 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
         }
         changed()
     }
+    // Finishes a change: delivers the reports it queued, then publishes it. A change made inside a
+    // handler leaves its publication to the delivery that runs the handler, so nothing a change
+    // publishes precedes a report queued before it.
     private func changed() {
+        guard deliverReports() else { return }
         publishPending()
         let prior = waiters
         waiters = []
@@ -585,7 +597,8 @@ public actor RuntimeActorHost<Model: Sendable, Descriptor: Sendable, Outcome: Se
     /// it to this publication, which stops offering the older collection and offers the newer one to
     /// every registration, so each registration receives collections in ledger order and the newest one last.
     private func publishPending() {
-        guard !publishingPending else { return }
+        // A delivery of reports in progress publishes once it ends.
+        guard !publishingPending, !reports.isDelivering else { return }
         publishingPending = true
         defer { publishingPending = false }
         var image: (generation: UInt64, pending: [Ledger.Pending])?

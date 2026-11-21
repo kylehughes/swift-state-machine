@@ -120,10 +120,21 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
     // never retains the element, so a call that only reads, from any thread, runs no client code, and
     // the end, whether a finish or a cancellation, is recorded in the same change that every reader
     // sees.
+    //
+    // An element for the waiting read is stored in the state, and the continuation only tells the read
+    // whether one was handed to it, which it then takes under the lock. The Swift runtime does not
+    // report to the thread sanitizer the ordering of a continuation resumed before its task suspends,
+    // so an element carried in that resumption would look unsynchronized with the thread that offered
+    // it; the lock orders the two in a way the sanitizer observes.
     fileprivate final class Mailbox: Sendable {
         private struct State: Sendable {
             var pending: Element?
-            var waiter: CheckedContinuation<Element?, Never>?
+            // Resumed with `true` once `handed` holds the read's element, and with `false` when the read
+            // ends without one.
+            var waiter: CheckedContinuation<Bool, Never>?
+            // The element given to the read that waited, which that read takes once it resumes. It is
+            // empty whenever a waiter is installed.
+            var handed: Element?
             var finished = false
             var cancelled = false
             var claimed = false
@@ -140,23 +151,26 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
 
         func offer(_ element: Element) {
             var handed = state.withLock {
-                state -> (waiter: CheckedContinuation<Element?, Never>?, displaced: Element?) in
+                state -> (waiter: CheckedContinuation<Bool, Never>?, displaced: Element?) in
                 guard !state.finished, !state.cancelled else { return (nil, nil) }
-                if let waiter = state.waiter.take() { return (waiter, nil) }
+                if let waiter = state.waiter.take() {
+                    state.handed = element
+                    return (waiter, nil)
+                }
                 return (nil, exchange(&state.pending, with: element))
             }
-            handed.waiter?.resume(returning: element)
+            handed.waiter?.resume(returning: true)
             handed.displaced = nil
         }
 
         // A pending final value stays readable after the mailbox has finished.
         func finish() {
-            let waiter = state.withLock { state -> CheckedContinuation<Element?, Never>? in
+            let waiter = state.withLock { state -> CheckedContinuation<Bool, Never>? in
                 guard !state.finished else { return nil }
                 state.finished = true
                 return state.waiter.take()
             }
-            waiter?.resume(returning: nil)
+            waiter?.resume(returning: false)
         }
 
         /// Whether the mailbox can still deliver, pending element or not, read without retaining an
@@ -168,12 +182,12 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         // removes its registration and only afterward discards that element, so a destructor that
         // registers again finds the slot free.
         func cancel() {
-            let waiter = state.withLock { state -> CheckedContinuation<Element?, Never>? in
+            let waiter = state.withLock { state -> CheckedContinuation<Bool, Never>? in
                 guard !state.cancelled else { return nil }
                 state.cancelled = true
                 return state.waiter.take()
             }
-            waiter?.resume(returning: nil)
+            waiter?.resume(returning: false)
         }
 
         /// Takes the element that no read can return any more, once the mailbox is cancelled.
@@ -195,25 +209,35 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         }
 
         nonisolated(nonsending) func next() async -> Element? {
-            await withTaskCancellationHandler {
+            let handed = await withTaskCancellationHandler {
                 await withCheckedContinuation { wait($0) }
             } onCancel: {
                 cancel()
             }
+            // An offer, or this read itself, stored the element before resuming the read.
+            guard handed else { return nil }
+            return state.withLock { $0.handed.take() }
         }
 
         // The cancelled flag is read in the same change that stores the waiter, so a cancellation on
-        // either side of it resumes the consumer.
-        private func wait(_ continuation: CheckedContinuation<Element?, Never>) {
-            var answer = state.withLock { state -> Element?? in
-                if state.cancelled || state.waiter != nil { return .some(nil) }
-                if let pending = state.pending.take() { return .some(pending) }
-                if state.finished { return .some(nil) }
+        // either side of it resumes the consumer. A read that finds another read waiting, or not yet
+        // done taking the element handed to it, ends at once.
+        private func wait(_ continuation: CheckedContinuation<Bool, Never>) {
+            let answer = state.withLock { state -> Bool? in
+                if state.cancelled || state.waiter != nil || state.handed != nil { return false }
+                if let pending = state.pending.take() {
+                    state.handed = pending
+                    return true
+                }
+                if state.finished { return false }
                 state.waiter = continuation
-                return .none
+                return nil
             }
-            guard let found = answer.take() else { return }
-            continuation.resume(returning: found)
+            guard let answer else {
+                SnapshotWaitPause.reached()
+                return
+            }
+            continuation.resume(returning: answer)
         }
     }
 

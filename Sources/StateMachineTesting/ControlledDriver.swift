@@ -82,6 +82,10 @@ nonisolated public final class ControlledDriver<Input: Sendable, Output: Sendabl
 
     /// How many queued calls and waits matching has examined, which tests read as its work.
     package var examinedCallEntries: Int { calls.examinedEntries }
+    /// How many queued calls and waits the driver stores, which tests read as its storage.
+    package var storedCallEntries: Int { calls.storedEntries }
+    /// How many waits for a started call have registered and not ended.
+    package var waitingCount: Int { calls.waitCount }
 
     /// Returns the oldest started execution not yet returned, waiting until the host starts one.
     ///

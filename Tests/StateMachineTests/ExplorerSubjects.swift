@@ -4,6 +4,7 @@ import Foundation
 import ObjectiveC
 import Observation
 import StateMachine
+import StateMachineTestSupport
 import StateMachineUI
 import os
 
@@ -72,11 +73,10 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
         let slot = OSAllocatedUnfairLock<Presentation?>(initialState: held)
         _ = consume held
         let dropped = DispatchSemaphore(value: 0)
-        DispatchQueue.global()
-            .async {
-                slot.withLock { $0 = nil }
-                dropped.signal()
-            }
+        runOnOwnThread {
+            slot.withLock { $0 = nil }
+            dropped.signal()
+        }
         return explorerWait(dropped)
     }
     func dropAfterJob() async {
@@ -124,8 +124,12 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
     /// Reads `presentedSnapshots(projecting:)` with `transform` now; the result attaches later.
     var saveProjected: ((@escaping @MainActor (ExplorerShot) -> ExplorerShot) -> (ExplorerSubscriber) -> Void)? = nil
     /// Installs the report and change callbacks; the result keeps them installed.
+    ///
+    /// An Observation class's
+    /// change callback carries the identity of the snapshot about to be replaced; `objectWillChange`
+    /// announces any property, so it carries `nil`.
     let install:
-        (_ report: @escaping @MainActor (Bool) -> Void, _ change: @escaping @MainActor () -> Void) -> [AnyObject]
+        (_ report: @escaping @MainActor (Bool) -> Void, _ change: @escaping @MainActor (Int?) -> Void) -> [AnyObject]
 
     static func make(
         _ kind: ExplorerPassiveKind,
@@ -198,7 +202,7 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
                 install: { report, change in
                     guard let presentation = holder.weak else { return [] }
                     let reports = presentation.$isObserving.dropFirst().sink { report($0) }
-                    let changes = presentation.objectWillChange.sink { _ in change() }
+                    let changes = presentation.objectWillChange.sink { _ in change(nil) }
                     return [ExplorerKeep((reports, changes))]
                 }
             )
@@ -252,8 +256,8 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
                     explorerTrack({ [weak presentation = holder.weak] in presentation?.isObserving }, installed) {
                         report(!$0)
                     }
-                    explorerTrack({ [weak presentation = holder.weak] in presentation?.snapshot.id }, installed) { _ in
-                        change()
+                    explorerTrack({ [weak presentation = holder.weak] in presentation?.snapshot.id }, installed) {
+                        change($0)
                     }
                     return [installed]
                 }
@@ -487,4 +491,52 @@ extension ExplorerSubscriber: @MainActor Subscriber {
         )
     }
     subscriber.received.append((value.id, value.revision))
+}
+
+/// A subscriber whose values and demand cross to a queue the harness keeps suspended between steps (E10).
+///
+/// It is attached through `receive(on:)`: its values arrive on that queue, and the unit of demand it returns
+/// from each is requested of the presentation's subscription there, off the main actor. It checks that every value it receives was covered by demand
+/// requested while the presentation could still deliver: a unit requested after the release supplies none.
+nonisolated final class ExplorerElsewhereSubscriber: Subscriber, Sendable {
+    typealias Input = UInt64
+    typealias Failure = Never
+    struct State: Sendable {
+        var received: [UInt64] = []
+        var finished = false
+        /// Units requested while the presentation was not yet released, and after.
+        var whileAlive = 0
+        var afterRelease = 0
+        var released = false
+    }
+    let index: Int
+    let world: ExplorerWorld
+    let state = OSAllocatedUnfairLock(initialState: State())
+    init(index: Int, world: ExplorerWorld) {
+        self.index = index
+        self.world = world
+    }
+    /// The harness began releasing the presentation.
+    func released() { state.withLock { $0.released = true } }
+    var finished: Bool { state.withLock { $0.finished } }
+
+    func receive(subscription: any Subscription) {
+        state.withLock { state in
+            if state.released { state.afterRelease += 1 } else { state.whileAlive += 1 }
+        }
+        subscription.request(.max(1))
+    }
+    func receive(_ input: UInt64) -> Subscribers.Demand {
+        let problem = state.withLock { state -> String? in
+            state.received.append(input)
+            let covered = state.received.count <= state.whileAlive
+            if state.released { state.afterRelease += 1 } else { state.whileAlive += 1 }
+            return covered
+                ? nil
+                : "subscriber \(index) received r\(input), which only demand requested after the release covered"
+        }
+        if let problem { world.violate(.publishedAfterRelease, problem) }
+        return .max(1)
+    }
+    func receive(completion: Subscribers.Completion<Never>) { state.withLock { $0.finished = true } }
 }

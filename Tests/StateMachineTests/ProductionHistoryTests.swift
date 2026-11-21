@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 import StateMachine
 import StateMachineExamples
+import StateMachineTestSupport
 import Testing
 import os
 
@@ -445,52 +446,51 @@ extension ProductionHistoryTests {
         let calls = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
         let first = (schedule >> (wave * 2)) & 1
         for client in [first, 1 - first] {
-            DispatchQueue.global()
-                .async {
-                    var proposal: Flow.Prepared?
-                    if client == 0 {
-                        proposal =
-                            wave == 0 ? initial.presentationChanged("1") : initial.authenticationChanged()
-                        recorder.prepared(slot: wave)
-                    }
-                    ready.signal()
-                    guard permits[client].wait(timeout: .now() + 10) == .success else {
-                        Issue.record("Schedule permit timed out")
-                        finished.signal()
-                        return
-                    }
-                    // Recorded before the rendezvous, so each call's interval contains the other's
-                    // invocation.
-                    let invocation = recorder.event()
-                    invoked.signal()
-                    guard calls[client].wait(timeout: .now() + 10) == .success else {
-                        Issue.record("Rendezvous timed out")
-                        finished.signal()
-                        return
-                    }
-                    if let prepared = proposal.take() {
-                        let actual = flow.commit(prepared)
-                        let response = recorder.event()
-                        recorder.response(
-                            client: client,
-                            invocation: invocation,
-                            response: response,
-                            command: .commit(wave),
-                            result: .admission(Self.admission(actual, like: template))
-                        )
-                    } else {
-                        let actual = flow.snapshot()
-                        let response = recorder.event()
-                        recorder.response(
-                            client: client,
-                            invocation: invocation,
-                            response: response,
-                            command: .snapshot(wave),
-                            result: .snapshot(Self.snapshot(actual, like: template))
-                        )
-                    }
-                    finished.signal()
+            runOnOwnThread {
+                var proposal: Flow.Prepared?
+                if client == 0 {
+                    proposal =
+                        wave == 0 ? initial.presentationChanged("1") : initial.authenticationChanged()
+                    recorder.prepared(slot: wave)
                 }
+                ready.signal()
+                guard permits[client].wait(timeout: .now() + 10) == .success else {
+                    Issue.record("Schedule permit timed out")
+                    finished.signal()
+                    return
+                }
+                // Recorded before the rendezvous, so each call's interval contains the other's
+                // invocation.
+                let invocation = recorder.event()
+                invoked.signal()
+                guard calls[client].wait(timeout: .now() + 10) == .success else {
+                    Issue.record("Rendezvous timed out")
+                    finished.signal()
+                    return
+                }
+                if let prepared = proposal.take() {
+                    let actual = flow.commit(prepared)
+                    let response = recorder.event()
+                    recorder.response(
+                        client: client,
+                        invocation: invocation,
+                        response: response,
+                        command: .commit(wave),
+                        result: .admission(Self.admission(actual, like: template))
+                    )
+                } else {
+                    let actual = flow.snapshot()
+                    let response = recorder.event()
+                    recorder.response(
+                        client: client,
+                        invocation: invocation,
+                        response: response,
+                        command: .snapshot(wave),
+                        result: .snapshot(Self.snapshot(actual, like: template))
+                    )
+                }
+                finished.signal()
+            }
         }
         #expect(ready.wait(timeout: .now() + 10) == .success)
         #expect(ready.wait(timeout: .now() + 10) == .success)

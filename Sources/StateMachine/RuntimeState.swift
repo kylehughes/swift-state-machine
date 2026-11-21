@@ -486,9 +486,15 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     private var keys: [KeyEntry] = []
     private var active: [RuntimeTicket] = []
     private var reservations: [Reservation] = []
-    private var queue: [Batch] = []
+    private var queue = RuntimeFIFO<Batch>()
     private var terminal: Batch?
     private var closeSnapshot: Snapshot?
+    /// How many scopes, operations, reservations, and keys admission has examined, which tests read as
+    /// its work.
+    package private(set) var admissionWork = 0
+    /// How many queued batches draining has moved within the queue's storage, which tests read as its
+    /// work.
+    package var queueMoves: Int { queue.moved }
     private let recording: BatchRecording
 
     /// Creates independent raw ownership with fresh initial scope activations.
@@ -525,6 +531,41 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         }
         return distinct
     }
+    /// The elements of `elements`, each with a scope key, after `edits`, or `nil` when an edit names a
+    /// key that another edit of the same plan names.
+    ///
+    /// Each edit removes the element of its key, and an activation then adds a fresh one, so the result
+    /// keeps the unedited elements in order, followed by the activated ones in the order of their
+    /// edits. It takes one pass over the edits and one over the elements, through a set of primitive
+    /// key identities, so a transition into a phase with many scopes costs work linear in their number;
+    /// `examined` counts the elements and edits examined, which tests read as that work.
+    package static func applying<Element>(
+        _ edits: [ScopeEdit],
+        to elements: [Element],
+        key: (Element) -> RuntimeScopeID,
+        activating activate: (RuntimeScopeID) -> Element,
+        examined: inout Int
+    ) -> [Element]? {
+        var edited = Set<SeenScope>()
+        var activated: [Element] = []
+        for edit in edits {
+            examined += 1
+            switch edit {
+            case .activate(let value):
+                guard edited.insert(SeenScope(value)).inserted else { return nil }
+                activated.append(activate(value))
+            case .remove(let value):
+                guard edited.insert(SeenScope(value)).inserted else { return nil }
+            }
+        }
+        guard !edited.isEmpty else { return elements }
+        var result: [Element] = []
+        for element in elements {
+            examined += 1
+            if !edited.contains(SeenScope(key(element))) { result.append(element) }
+        }
+        return result + activated
+    }
     /// A scope key's primitive identity: its kind and the identity of its instance marker, which the
     /// key retains while it is compared.
     private struct SeenScope: Hashable {
@@ -533,6 +574,19 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         init(_ key: RuntimeScopeID) {
             kind = key.kind
             instance = key.instance.map(ObjectIdentifier.init)
+        }
+    }
+    /// A scope activation's primitive identity: its key's, and the identity of the activation.
+    private struct SeenActivation: Hashable {
+        let scope: SeenScope
+        let activation: ObjectIdentifier
+        init(_ scope: Scope) {
+            self.scope = SeenScope(scope.key)
+            activation = ObjectIdentifier(scope.activation)
+        }
+        init(_ binding: RuntimeTicket.Binding) {
+            scope = SeenScope(binding.scope)
+            activation = ObjectIdentifier(binding.activation)
         }
     }
 
@@ -597,17 +651,17 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         let incarnation = plan.reset ? RuntimeIdentity() : expected.incarnation
         var scopes = expected.scopes
         if plan.reset { scopes = scopes.map { Scope(key: $0.key, activation: RuntimeIdentity()) } }
-        var edited: [RuntimeScopeID] = []
-        for edit in plan.scopes {
-            let key: RuntimeScopeID
-            switch edit {
-            case .activate(let value), .remove(let value): key = value
-            }
-            guard !edited.contains(key) else { throw .invalidPlan }
-            edited.append(key)
-            scopes.removeAll { $0.key == key }
-            if case .activate = edit { scopes.append(Scope(key: key, activation: RuntimeIdentity())) }
-        }
+        var examined = 0
+        guard
+            let edited = Self.applying(
+                plan.scopes,
+                to: scopes,
+                key: \.key,
+                activating: { Scope(key: $0, activation: RuntimeIdentity()) },
+                examined: &examined
+            )
+        else { throw .invalidPlan }
+        scopes = edited
         // Keys are hashed and compared here, outside every lock, against the observed key table.
         // Cancellations resolve first, so a key cancelled and started in one plan gets a fresh identity.
         var keys = plan.reset ? [] : expected.keys
@@ -706,8 +760,13 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         }
         if candidate.expected.revisionIdentity !== revisionIdentity { return reject(.conflict) }
         let plan = candidate.plan
+        // Identity sets of the candidate's scope activations, and below of the surviving operations and
+        // keys, keep an edit that leaves many operations active linear in their number; the arrays keep
+        // their order, which commands follow.
+        let activations = Set(candidate.scopes.map(SeenActivation.init))
+        admissionWork += candidate.scopes.count + active.count
         var remaining = active.filter { ticket in
-            !plan.reset && Self.bindingsValid(ticket, scopes: candidate.scopes)
+            !plan.reset && ticket.bindings.allSatisfy { activations.contains(SeenActivation($0)) }
                 && !plan.retire.contains { $0.operation === ticket.operation }
                 && !candidate.cancellations.contains { $0.revokes(ticket) }
         }
@@ -743,19 +802,26 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             works.append(RuntimeWork(descriptor: start.descriptor, ticket: ticket))
         }
         if revision == UInt64.max - 1 { return reject(.revisionExhausted) }
-        let revoked = active.filter { ticket in !remaining.contains { $0.operation === ticket.operation } }
+        let survivors = Set(remaining.map { ObjectIdentifier($0.operation) })
+        let revoked = active.filter { !survivors.contains(ObjectIdentifier($0.operation)) }
+        let revokedOperations = Set(revoked.map { ObjectIdentifier($0.operation) })
+        admissionWork += remaining.count + active.count + reservations.count
         // Retiring work whose outcome is retained settles what that work already returned, so it gets no
         // cancellation; it keeps its execution reservation until its termination is acknowledged.
+        let retained =
+            plan.retire.isEmpty
+            ? []
+            : Set(reservations.filter { $0.delivery == .pending }.map { ObjectIdentifier($0.ticket.operation) })
         let cancelled = revoked.filter { ticket in
             !plan.retire.contains { $0.operation === ticket.operation }
-                || !reservations.contains { $0.ticket.operation === ticket.operation && $0.delivery == .pending }
+                || !retained.contains(ObjectIdentifier(ticket.operation))
         }
         // A commandless acceptance under `.commands` recording queues nothing, so it needs no slot.
         let queues = recording == .everyAcceptance || !cancelled.isEmpty || !works.isEmpty || !plan.emissions.isEmpty
         if queues, queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
         var prospective = reservations
         for index in prospective.indices
-        where revoked.contains(where: { $0.operation === prospective[index].ticket.operation }) {
+        where revokedOperations.contains(ObjectIdentifier(prospective[index].ticket.operation)) {
             prospective[index].delivery = .settled
         }
         for claim in plan.finishingClaims {
@@ -773,7 +839,9 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         incarnation = candidate.incarnation
         active = remaining
         // A key that no remaining work holds leaves the table; inserting it again mints a fresh identity.
-        keys = candidate.keys.filter { entry in remaining.contains { $0.key === entry.identity } }
+        let held = Set(remaining.compactMap { $0.key.map(ObjectIdentifier.init) })
+        admissionWork += candidate.keys.count
+        keys = candidate.keys.filter { held.contains(ObjectIdentifier($0.identity)) }
         reservations = prospective
         revision += 1
         revisionIdentity = RuntimeIdentity()
@@ -866,8 +934,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         var result: [Batch] = []
         while result.count < limit {
             let batch: Batch
-            if !queue.isEmpty {
-                batch = queue.removeFirst()
+            if let next = queue.popFirst() {
+                batch = next
             } else if let final = terminal {
                 batch = final
                 terminal = nil

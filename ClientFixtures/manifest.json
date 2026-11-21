@@ -1249,5 +1249,40 @@
     "id": "GMT-uncomposed-body",
     "pattern": "The name .* is not in Unicode Normalization Form C; spell it",
     "scope": "the Normalization Form C rule covers the names the macro interprets, so a function body, an accessor, and a closure may call a declaration whose name is not composed, while a signature that names it is refused"
+  },
+  {
+    "id": "GMT-deprecated-functions",
+    "pattern": "'start' is deprecated: renamed to 'begin'",
+    "scope": "a deprecated edge, router, completion edge, or restoration function deprecates only the generated public members named for it, with the authored message or rename; generated code calls the functions through a witnessed requirement, so the schema compiles with warnings as errors, and a caller that is not deprecated gets Swift's deprecation"
+  },
+  {
+    "id": "GMT-deprecated-platform",
+    "pattern": "Remove '@available' and give the schema this availability instead",
+    "scope": "a deprecation on every platform is accepted on an authored function, and a deprecation from a platform version, which is availability the macro cannot compare with the deployment target, is refused"
+  },
+  {
+    "id": "GMT-deprecated-restoration-rename",
+    "pattern": "Remove 'renamed:': the restoring initializers and resets this deprecation marks keep their names",
+    "scope": "a deprecated restoration function deprecates the restoring initializers and resets with its message, and its deprecation cannot rename them"
+  },
+  {
+    "id": "GMT-schema-named-value",
+    "pattern": "The schema name is reserved or shadowed by a direct member; choose a distinct domain name",
+    "scope": "a value or method named like the schema hides nothing generated code looks up as a type, and a type of that name directly inside the schema is refused"
+  },
+  {
+    "id": "GMT-alias-member-access",
+    "pattern": "Declare 'Hidden' public: the public schema 'Flow' generates public members that name it",
+    "scope": "a member named through a namespace alias needs the public schema's access, as it does through the type's own name"
+  },
+  {
+    "id": "GMT-sendable-helper",
+    "pattern": "Declare 'Sendable' public: the public schema 'Flow' generates public members that name it",
+    "scope": "a built-in attribute's name names no declaration, so a helper named Sendable needs no access, while a type reference to it does"
+  },
+  {
+    "id": "GMT-escaped-attributes",
+    "pattern": "Take this payload without '@autoclosure'",
+    "scope": "a built-in attribute's name and a member read in an attribute's arguments mean the same with redundant backticks, so an escaped attribute is accepted or refused as its bare spelling is"
   }
 ]

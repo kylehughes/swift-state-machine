@@ -719,8 +719,9 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     // not returned. One that a newer observation supersedes there still holds its slot until that call
     // returns its registration.
     private var registering = RegisteringAttempts<Snapshot>()
-    /// How many attempts and serial positions the presentation has examined to decide whether a
-    /// registration waits and to add and remove attempts, which tests read as that work.
+    /// How many attempts and serial positions the presentation has examined, and serials it has moved,
+    /// to decide whether a registration waits and to add and remove attempts, which tests read as that
+    /// work.
     var examinedAttempts: Int { registering.examined }
     // The serial of the next attempt or release record, which orders them against the waits.
     private var nextSerial: UInt64 = 0
@@ -2237,7 +2238,7 @@ private typealias PresentationRegister<Snapshot> =
     private var all = SerialOrder()
     private var throughClosures = SerialOrder()
     private var byOwner: [ObjectIdentifier: SerialOrder] = [:]
-    /// The attempts and serial positions examined so far.
+    /// The attempts and serial positions examined, and the serials moved, so far.
     private(set) var examined = 0
 
     var isEmpty: Bool { members.isEmpty }
@@ -2277,28 +2278,69 @@ private typealias PresentationRegister<Snapshot> =
     }
 }
 
-/// Distinct serials in ascending order, which binary search inserts and removes.
+/// Distinct serials in ascending order.
+///
+/// Serials are made in ascending order, so an insertion normally appends. Removing the first serial
+/// advances a head past it and past every later serial already removed; removing any other serial
+/// records it, to be skipped when the head reaches it. The slots before the head are reclaimed once they
+/// make up half of the storage, so returning attempts oldest first, newest first, or in any order costs
+/// amortized constant work each, besides a binary search. Each operation reports the positions it
+/// examined and the elements it moved.
 private struct SerialOrder {
     private var serials: [UInt64] = []
+    private var head = 0
+    // Serials at or after the head that were removed and are still stored.
+    private var removed: Set<UInt64> = []
 
-    var first: UInt64? { serials.first }
-    var isEmpty: Bool { serials.isEmpty }
+    var first: UInt64? { head < serials.count ? serials[head] : nil }
+    var isEmpty: Bool { head == serials.count }
 
-    /// Inserts `serial` in order and returns how many positions the search examined.
+    /// Inserts `serial` in order and returns how many positions it examined and elements it moved.
     mutating func insert(_ serial: UInt64) -> Int {
+        if removed.remove(serial) != nil { return 1 }
+        guard let last = serials.last, head < serials.count, serial <= last else {
+            serials.append(serial)
+            return 1
+        }
         let (index, examined) = position(of: serial)
-        if index == serials.count || serials[index] != serial { serials.insert(serial, at: index) }
-        return examined
+        if serials[index] == serial { return examined }
+        serials.insert(serial, at: index)
+        return examined + serials.count - index - 1
     }
-    /// Removes `serial` if present and returns how many positions the search examined.
+    /// Removes `serial` if present and returns how many positions it examined and elements it moved.
     mutating func remove(_ serial: UInt64) -> Int {
-        let (index, examined) = position(of: serial)
-        if index < serials.count, serials[index] == serial { serials.remove(at: index) }
-        return examined
+        guard head < serials.count else { return 1 }
+        guard serials[head] == serial else {
+            let (index, examined) = position(of: serial)
+            if index < serials.count, serials[index] == serial { removed.insert(serial) }
+            return examined
+        }
+        head += 1
+        var examined = 1
+        while head < serials.count, removed.remove(serials[head]) != nil {
+            head += 1
+            examined += 1
+        }
+        return examined + reclaim()
     }
-    // The first index whose serial is not below `serial`, and the number of positions examined.
+    // Reclaims the slots before the head once they make up half of the storage, and returns how many
+    // elements that moved.
+    private mutating func reclaim() -> Int {
+        if head == serials.count {
+            serials.removeAll(keepingCapacity: true)
+            head = 0
+            return 0
+        }
+        guard head >= 16, head * 2 >= serials.count else { return 0 }
+        let moved = serials.count - head
+        serials.removeFirst(head)
+        head = 0
+        return moved
+    }
+    // The first index at or after the head whose serial is not below `serial`, and the number of
+    // positions examined.
     private func position(of serial: UInt64) -> (Int, Int) {
-        var low = 0
+        var low = head
         var high = serials.count
         var examined = 0
         while low < high {

@@ -684,6 +684,18 @@ extension Schema {
             if restoration != nil { names.insert("_stateMachineRestored") }
             if resetRejects { names.insert("ResetRejection") }
         }
+        // Deprecated functions are called through a protocol and type of the expansion's, and a deprecated
+        // input edge's `Observed` method through one that is not deprecated.
+        if transitions.contains(where: { $0.deprecation != nil }) || routes.contains(where: { $0.deprecation != nil })
+            || restoration?.deprecation != nil
+        {
+            names.formUnion([
+                "_StateMachineDeprecatedFunctions", "_StateMachineDeprecatedCalls", "_stateMachineDeprecated",
+            ])
+            for edge in transitions where edge.deprecation != nil && edge.trigger.kind == .input {
+                names.insert("_stateMachineDeprecated\(edge.declaration)")
+            }
+        }
         if generatesObservingOwner && !operations.isEmpty {
             names.formUnion([
                 "Completion", "PendingStatus", "PendingCompletionID", "PendingCompletion", "ReconcileResult",
