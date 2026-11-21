@@ -15,20 +15,23 @@ nonisolated private enum OwnedValueContract: Sendable {
     }
     @Initial case ready(Ready)
     case finished(Finished)
-    enum Scope { case effects }
+    enum Scope {
+        @Active(in: [Finished.self])
+        case effects
+    }
     enum Input: Sendable {
         case finish(String)
         case checked(String)
         case silent
     }
     enum Rejection: Error { case emptyLabel }
-    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
+    @Operation(scope: Scope.effects, admission: .latest)
     enum Audit {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(scope: Scope.effects, activeIn: [Finished.self], admission: .latest)
+    @Operation(scope: Scope.effects, admission: .latest)
     enum Publish {
         typealias Input = String
         typealias Output = String

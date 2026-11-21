@@ -18,6 +18,12 @@ INPUTS = ROOT / "ClientFixtures/MacroStress/graphs.json"
 TIMEOUT_SECONDS = 600
 
 
+def phase_case(phase, edges):
+    """Declare a phase case, marking the initial phase and each phase that no edge leaves as terminal."""
+    markers = ("@Initial " if phase == 0 else "") + ("@Terminal " if phase >= edges else "")
+    return f"    {markers}case phase{phase}(Phase{phase})"
+
+
 def generate_source(phases, edges, name):
     """Create unique (source, trigger) pairs, reusing one input per phase-sized group."""
     lines = [
@@ -29,7 +35,7 @@ def generate_source(phases, edges, name):
     for phase in range(phases):
         lines.append(f"    struct Phase{phase}: Sendable {{ let value: Int }}")
     for phase in range(phases):
-        lines.append(f"    {'@Initial ' if phase == 0 else ''}case phase{phase}(Phase{phase})")
+        lines.append(phase_case(phase, edges))
     lines.append("    enum Input: Sendable {")
     for group in range((edges + phases - 1) // phases):
         lines.append(f"        case event{group}")
@@ -59,7 +65,7 @@ def generate_sparse_source(phases, edges, name):
     for phase in range(phases):
         lines.append(f"    struct Phase{phase}: Sendable {{ let value: Int }}")
     for phase in range(phases):
-        lines.append(f"    {'@Initial ' if phase == 0 else ''}case phase{phase}(Phase{phase})")
+        lines.append(phase_case(phase, edges))
     lines.append("    enum Input: Sendable {")
     for edge in range(edges):
         lines.append(f"        case event{edge}")
@@ -78,7 +84,7 @@ def generate_sparse_source(phases, edges, name):
 
 
 def generate_operation_source(phases, operations, span, name):
-    """Create a ring on one input plus operations, each active in `span` consecutive phases."""
+    """Create a ring on one input plus operations, each holding a scope active in `span` consecutive phases."""
     stride = max(1, phases // operations)
     lines = [
         "import StateMachine",
@@ -86,8 +92,12 @@ def generate_operation_source(phases, operations, span, name):
         "@StateMachine(mode: .shared)",
         f"nonisolated enum {name}: Sendable {{",
         "    enum Problem: Error, Sendable { case failed }",
-        f"    enum Scope {{ case {', '.join(f'work{op}' for op in range(operations))} }}",
+        "    enum Scope {",
     ]
+    for op in range(operations):
+        active = [(op * stride + offset) % phases for offset in range(span)]
+        lines.append(f"        @Active(in: [{', '.join(f'Phase{p}.self' for p in active)}]) case work{op}")
+    lines.append("    }")
     for phase in range(phases):
         lines.append(f"    struct Phase{phase}: Sendable {{ let value: Int }}")
     for phase in range(phases):
@@ -96,9 +106,8 @@ def generate_operation_source(phases, operations, span, name):
     lines.append("        case next, start")
     lines.append("    }")
     for op in range(operations):
-        active = [(op * stride + offset) % phases for offset in range(span)]
         lines.extend([
-            f"    @Operation(scope: Scope.work{op}, activeIn: [{', '.join(f'Phase{p}.self' for p in active)}], admission: .latest)",
+            f"    @Operation(scope: Scope.work{op}, admission: .latest)",
             f"    enum Op{op} {{",
             "        typealias Input = Int",
             "        typealias Output = Int",
@@ -162,6 +171,8 @@ def main():
         args.edges = shape.get("edges", 512)
     if args.phases < 1 or args.edges < 0:
         parser.error("--phases must be positive and --edges must be nonnegative")
+    if args.variant != "operation-heavy" and args.edges < args.phases - 1:
+        parser.error("--edges must be at least --phases - 1, so that the edge chain reaches every phase")
     output = args.output.resolve() if args.output else Path(tempfile.mkdtemp(prefix="atomic-macro-stress-"))
     if output.is_relative_to(ROOT):
         parser.error("--output must be outside the package to keep candidate evidence separate")

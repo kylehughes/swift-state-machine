@@ -21,9 +21,9 @@ nonisolated enum Archived: Sendable {
         Change(Publishing(text: source.text), effects: [.publish(source.text)])
     }
     @Transition(onSuccess: Autosave.self)
-    fileprivate static func autosaved(_ source: Editing, _ output: Autosave.Output) -> Editing { source }
+    fileprivate static func autosaved(_ source: Editing) -> Editing { source }
     @Transition(onSuccess: Publish.self)
-    fileprivate static func published(_ source: Publishing, _ output: Publish.Output) -> Editing {
+    fileprivate static func published(_ source: Publishing) -> Editing {
         Editing(text: source.text)
     }
 }

@@ -1,2 +1,2 @@
 import StateMachineExamples
-nonisolated func accepted(_ loading: ReferenceProfile.Observed<ReferenceProfile.Loading>, _ work: ReferenceProfile.FetchWork, _ value: Profile) throws { if case .success(let completion) = work.succeeded(value) { _ = loading.received(completion) } }
+nonisolated func accepted(_ local: inout ReferenceProfile.Local, _ work: ReferenceProfile.FetchWork, _ value: Profile) { _ = local.deliver(.fetch(work.succeeded(value))) }

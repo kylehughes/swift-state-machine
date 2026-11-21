@@ -209,8 +209,8 @@ struct SequentialReferenceTests {
         _ = model.reconcile(ticket.operation)
         #expect(model.root == .init(.loaded(12), presentation: 10))
     }
-    @Test func retryPureYieldsAfterFourPreparations() throws {
-        var (model, ticket) = try loadedMachine(configuration: .init(delivery: .retryPure))
+    @Test func retryYieldsAfterFourPreparations() throws {
+        var (model, ticket) = try loadedMachine(configuration: .init(delivery: .retry))
         _ = model.retain(ticket, outcome: .success(12))
         let result = model.deliveryTurn(
             ticket.operation,
@@ -222,6 +222,37 @@ struct SequentialReferenceTests {
         #expect(model.root.presentation == 4)
         _ = model.scheduledRound()
         #expect(model.root == .init(.loaded(12), presentation: 4))
+    }
+    @Test func retryParksAfterSixteenConflictingTurns() throws {
+        var (model, ticket) = try loadedMachine(configuration: .init(delivery: .retry))
+        _ = model.retain(ticket, outcome: .success(12))
+        var presentation = 0
+        func conflicts() -> [SequentialReference.Input] {
+            var edits: [SequentialReference.Input] = []
+            for _ in 0 ..< 4 {
+                presentation += 1
+                edits.append(.presentation(presentation))
+            }
+            return edits
+        }
+        for turn in 1 ... 15 {
+            #expect(model.ready.isEmpty || model.ready == [ticket.operation])
+            let result = model.deliveryTurn(ticket.operation, interference: conflicts())
+            #expect(result == .pending(ticket.operation, .retryScheduled), "turn \(turn)")
+            #expect(model.ready == [ticket.operation], "turn \(turn)")
+        }
+        let last = model.deliveryTurn(ticket.operation, interference: conflicts())
+        #expect(last == .pending(ticket.operation, .reconciliationRequired))
+        #expect(model.pending.first?.status == .reconciliationRequired)
+        #expect(model.pending.first?.attempts == 64)
+        #expect(model.pending.first?.lastRejection == .conflict)
+        #expect(model.ready.isEmpty)
+        #expect(model.scheduledRound().isEmpty)
+        guard case .committed = model.reconcile(ticket.operation) else {
+            Issue.record("explicit reconciliation did not commit the parked outcome")
+            return
+        }
+        #expect(model.root.phase == .loaded(12))
     }
     @Test func capacityRetryReusesCandidateWithoutPreparingAgain() throws {
         var (model, ticket) = try loadedMachine(configuration: .init(queue: 1))

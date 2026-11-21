@@ -95,7 +95,7 @@ func uncontended(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProb
         // Fence the inert FIFO batch outside all synchronous phase samples. No observer/effect is registered.
         let flushed = await owner.flush(through: receipt)
         let t4 = timing ? now() : 0
-        try require(flushed, "Uncontended FIFO fence failed")
+        try require(flushed == .processed, "Uncontended FIFO fence failed")
         if timing {
             participant.snapshotNanoseconds.append(t1 - t0)
             participant.preparationNanoseconds.append(t2 - t1)
@@ -263,7 +263,7 @@ func pressure(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?)
         PerformanceFlow.Ready(bytes: Array(repeating: 0, count: bytes)),
         drivers: PerformanceFlow.Drivers(work: { await gate.run($0) }),
         configuration: try .init(commits: 8, descriptors: 1, executions: 16, subscribers: 2),
-        completionPolicy: .retryPure
+        completionPolicy: .retry
     )
     let entered = Event()
     let releaseSlow = DispatchSemaphore(value: 0)
@@ -386,7 +386,7 @@ func pressure(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?)
     RuntimeDeliveryProbe.reset()
     #endif
     row.notes = [
-        "One blocked initial callback spans the fixed producer attempt burst; a fast subscriber proves completion delivery. Distinct accepted effect IDs are compared exactly with physical driver starts/returns. Mailbox pending capacity one is a source contract; measured coalescing is initial plus final callback. The shipping facade does not expose private queue/task/reservation high-water counts; the separate resource-copy profile supplies checkpoint samples. Completion retryPure internal retry counts are unavailable through the facade."
+        "One blocked initial callback spans the fixed producer attempt burst; a fast subscriber proves completion delivery. Distinct accepted effect IDs are compared exactly with physical driver starts/returns. Mailbox pending capacity one is a source contract; measured coalescing is initial plus final callback. The shipping facade does not expose private queue/task/reservation high-water counts; the separate resource-copy profile supplies checkpoint samples. Completion retry-policy internal retry counts are unavailable through the facade."
     ]
     return row
 }
@@ -400,6 +400,8 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
     var maxima: [String: Int] = [:]
     var resourcesSampled = 0
     var weakMarkerChecks = 0
+    var deferredActorReleases = 0
+    var maxDeferredActorReleaseNanoseconds: UInt64 = 0
     var completionPreparations = 0
     #endif
     var cancelled = 0
@@ -497,9 +499,17 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
         try require(marker == nil, "Generated Shared owner retained after shutdown/drop")
         #if PERFORMANCE_RESOURCE_INSTRUMENTED
         try require(
-            privateMarkers.allSatisfy { !$0.isAlive },
-            "Joined host/mailbox storage, coordinator or progress survived owner drop"
+            privateMarkers.allSatisfy { $0.isActor || !$0.isAlive },
+            "Joined host or mailbox storage survived owner drop"
         )
+        try require(
+            RuntimeCoordinatorTaskProbe.trackedCount == 0,
+            "Dropping the owner started a library task"
+        )
+        if let wait = try await actorReleaseWait(privateMarkers) {
+            deferredActorReleases += 1
+            maxDeferredActorReleaseNanoseconds = max(maxDeferredActorReleaseNanoseconds, wait)
+        }
         weakMarkerChecks += privateMarkers.count
         #endif
         releasedOwners += 1
@@ -536,10 +546,12 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
     row.counts["extraCompletionPreparations"] = completionPreparations - completed
     row.counts["privateResourceSamples"] = resourcesSampled
     row.counts["weakMarkerReleaseChecks"] = weakMarkerChecks
+    row.counts["actorReleasesAfterOwnerDrop"] = deferredActorReleases
+    row.counts["maxActorReleaseNanosecondsAfterOwnerDrop"] = Int(maxDeferredActorReleaseNanoseconds)
     row.counts["trackedTaskHandlesAfterCohortJoin"] = RuntimeCoordinatorTaskProbe.trackedCount
     row.counts["privateResourcesAfterJoinedShutdown"] = 0
     row.notes.append(
-        "Separate nonshipping resource-copy mode samples actual engine/coordinator/subscriber/queue/claim counts. maxSampled values are checkpoint maxima, not continuously observed peaks. Tracked Task<Void> handles include completed tasks until a per-cycle join; they are not asserted to equal simultaneously live tasks. Watchers join their exact Outcome workers. Weak markers cover host storage/progress/coordinator and registered mailbox/storage, and never retain them."
+        "Separate nonshipping resource-copy mode samples actual engine/coordinator/subscriber/queue/claim counts. maxSampled values are checkpoint maxima, not continuously observed peaks. Tracked Task<Void> handles include completed tasks until a per-cycle join; they are not asserted to equal simultaneously live tasks. Watchers join their exact Outcome workers. Weak markers cover host storage/progress/coordinator and registered mailbox/storage, and never retain them. Storage and mailbox markers must be released when the owner is dropped. The progress and coordinator markers are actors: the concurrency runtime can still hold an actor for a moment after its last job, once every library task is joined and no program reference remains, so the copy waits a bounded second for their release and counts each cycle that needed the wait."
     )
     #endif
     row.notes += [
@@ -547,3 +559,20 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
     ]
     return row
 }
+
+#if PERFORMANCE_RESOURCE_INSTRUMENTED
+/// Waits for the actor markers to be released, and returns how long that took, or `nil` when none was alive.
+///
+/// The concurrency runtime can hold an actor for a moment after the last job that ran on it has returned,
+/// on a thread of its own, after every task that referenced the actor has been joined. A marker still
+/// alive after a second is held by something else, and fails the workload.
+func actorReleaseWait(_ markers: [RuntimeHostWeakProbe]) async throws -> UInt64? {
+    guard markers.contains(where: \.isAlive) else { return nil }
+    let start = now()
+    while markers.contains(where: \.isAlive) {
+        try require(now() - start < 1_000_000_000, "Joined coordinator or progress actor survived owner drop")
+        try await Task.sleep(for: .microseconds(50))
+    }
+    return now() - start
+}
+#endif

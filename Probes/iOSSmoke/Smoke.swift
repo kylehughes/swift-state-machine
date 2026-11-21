@@ -1,8 +1,10 @@
 import StateMachine
 import StateMachineExamples
+import StateMachineTesting
 import StateMachineUI
 import Combine
 import Foundation
+import Observation
 import UIKit
 
 nonisolated private struct SmokeFailure: Error { let message: String }
@@ -39,6 +41,43 @@ nonisolated private struct ResultFile: Encodable {
     }
 }
 
+/// Appends a value to shared storage from any isolation.
+nonisolated private func append<Value: Sendable>(_ value: Value, to storage: AtomicRecordStorage<[Value]>) {
+    while true {
+        let before = storage.load()
+        if storage.install(AtomicRecordStorage<[Value]>.Version(before.value + [value]), replacing: before) { return }
+    }
+}
+
+/// An actor that owns a confined profile host and runs one load on it.
+private actor SmokeDesk {
+    private var host: GeneratedProfile.IsolatedHost<SmokeDesk>?
+
+    func load(_ request: ProfileRequest) async throws -> (revision: UInt64, name: String, joined: Bool) {
+        let host = GeneratedProfile.IsolatedHost(
+            GeneratedProfile.Idle(userID: request.userID),
+            isolation: self,
+            fetchDriver: { _, input in .success(Profile(userID: input.userID, name: "Isolated value")) },
+            auditDriver: { _, _ in .failure(.unavailable) }
+        )
+        self.host = host
+        let snapshots = try host.snapshots()
+        try host.send(.load(request))
+        var loaded: (revision: UInt64, name: String)?
+        for await snapshot in snapshots {
+            guard case .loaded(let value) = snapshot else { continue }
+            loaded = (snapshot.revision, value.value.profile.name)
+            break
+        }
+        let result = await host.shutdown()
+        self.host = nil
+        guard let loaded else { throw SmokeFailure(message: "The isolated host's sequence ended before the load") }
+        // The count is read here, on the owning actor, rather than inside the `&&` autoclosure.
+        let running = host.runningCount()
+        return (loaded.revision, loaded.name, result == .quiescent && running == 0)
+    }
+}
+
 @MainActor private final class SmokeSuite {
     private let label: UILabel
     private var checks: [Check] = []
@@ -59,6 +98,14 @@ nonisolated private struct ResultFile: Encodable {
             try await terminalSubscription()
             try await snapshotSequence()
             try ownedResource()
+            try await keyedTransfers()
+            try await resetHost()
+            try graphExport()
+            try await isolatedHost()
+            try await snapshotPublisher()
+            try await distinctSnapshots()
+            try testingProduct()
+            try await mainActorObservation()
         } catch { failure = String(describing: error) }
         let result = ResultFile(
             status: failure == nil ? "pass" : "fail",
@@ -89,7 +136,7 @@ nonisolated private struct ResultFile: Encodable {
             drivers: GeneratedProfile.MainActorDrivers(fetch: drivers.fetch, audit: drivers.audit)
         )
         let trace = Trace<GeneratedProfile.Snapshot>()
-        let observation = editor.presentation.$snapshot.sink { [label] snapshot in
+        let observation = editor.presentation.presentedSnapshots.sink { [label] snapshot in
             trace.record(snapshot)
             switch snapshot {
             case .idle: label.text = "Idle"
@@ -374,7 +421,8 @@ nonisolated private struct ResultFile: Encodable {
         )
         let label = UILabel()
         var revisions: [UInt64] = []
-        for await snapshot in try owner.snapshots() {
+        var snapshots = try owner.snapshots()
+        while let snapshot = await snapshots.next() {
             revisions.append(snapshot.revision)
             switch snapshot {
             case .draft(let draft):
@@ -407,6 +455,192 @@ nonisolated private struct ResultFile: Encodable {
         passed(
             "OWNED-RESOURCE",
             ["identifier": String(identifier), "releases": String(describing: releases.load().value)]
+        )
+    }
+    /// Runs keyed downloads of two files through a controlled driver, cancels one key, and reads the log.
+    private func keyedTransfers() async throws {
+        let download = KeyedControlledDriver<Int, String, String, GeneratedTransfers.TransferFailure>()
+        let lines = AtomicRecordStorage<[String]>([])
+        let owner = GeneratedTransfers.Shared(downloadDriver: download.run, onLogged: { append($0, to: lines) })
+        let snapshots = try owner.snapshots()
+        try owner.send(.download(1))
+        try owner.send(.download(2))
+        // Each execution runs in its own task, so each key's call is taken by its key.
+        let second = try await download.nextStarted(for: 2)
+        let first = try await download.nextStarted(for: 1)
+        try require([first.key, second.key] == [1, 2], "Keyed work did not reach the driver under its own key")
+        try owner.send(.cancel(1))
+        try await first.waitForCancellation()
+        try require(!second.isCancelled, "Cancelling one key cancelled another key's work")
+        second.succeed("two")
+        first.succeed("late")
+        var files: [Int: String] = [:]
+        for await snapshot in snapshots {
+            guard case .browsing(let browsing) = snapshot, !browsing.value.files.isEmpty else { continue }
+            files = browsing.value.files
+            break
+        }
+        try require(files == [2: "two"], "A keyed completion was not filed under its own key")
+        let result = await owner.shutdown()
+        try require(result == .quiescent, "Keyed workers were not joined")
+        passed(
+            "KEYED-OPERATION",
+            ["keys": "[1, 2]", "cancelledKey": String(first.key), "files": String(describing: files)]
+        )
+        let logged = lines.load().value
+        try require(logged == ["download 1", "download 2", "downloaded 2"], "Event handler order changed: \(logged)")
+        passed("EVENT-HANDLER", ["lines": String(describing: logged)])
+    }
+    /// Resets a MainActor owner while its driver runs, and delivers the driver's late result.
+    private func resetHost() async throws {
+        let download = KeyedControlledDriver<Int, String, String, GeneratedTransfers.TransferFailure>()
+        var logged: [String] = []
+        let owner = GeneratedTransfers.MainActorHost(downloadDriver: download.run, onLogged: { logged.append($0) })
+        try owner.send(.download(7))
+        let call = try await download.nextStarted()
+        let before = owner.snapshot().revision
+        let receipt = try owner.reset()
+        try await call.waitForCancellation()
+        call.succeed("late")
+        await owner.shutdown()
+        guard case .browsing(let browsing) = owner.snapshot(), browsing.value.files.isEmpty else {
+            throw SmokeFailure(message: "A result of work from before the reset changed the model")
+        }
+        try require(receipt.revision == before + 1 && logged == ["download 7"], "Reset did not advance the revision")
+        passed(
+            "RESET",
+            [
+                "resetRevision": String(receipt.revision), "driverCancelled": String(call.isCancelled),
+                "files": String(describing: browsing.value.files),
+            ]
+        )
+    }
+    /// Renders a graph's Mermaid and Graphviz text and round-trips its description through JSON.
+    private func graphExport() throws {
+        let graph = GeneratedTransfers.graph
+        let mermaid = graph.mermaid()
+        let expected =
+            [
+                "stateDiagram-v2", "    state \"browsing\" as p0", "    state \"offline\" as p1", "    [*] --> p0",
+                "    p0 --> p0 : download", "    p0 --> p0 : cancel", "    p0 --> p1 : goOffline",
+                "    p1 --> p0 : goOnline", "    p0 --> p0 : downloaded", "    p0 --> p0 : failed",
+            ]
+            .joined(separator: "\n") + "\n"
+        try require(mermaid == expected, "The Mermaid rendering changed: \(mermaid)")
+        let decoded = try JSONDecoder().decode(StateMachineGraph.self, from: JSONEncoder().encode(graph))
+        try require(decoded == graph, "The graph description did not survive encoding")
+        try require(graph.dot().hasPrefix("digraph \"GeneratedTransfers\" {"), "The Graphviz rendering changed")
+        passed(
+            "GRAPH-MERMAID",
+            ["lines": String(mermaid.split(separator: "\n").count), "edges": String(graph.edges.count)]
+        )
+    }
+    /// Loads a profile on a host confined to an actor the app chose.
+    private func isolatedHost() async throws {
+        let request = try ProfileRequest(userID: UserID("isolated-user"))
+        let loaded = try await SmokeDesk().load(request)
+        try require(loaded.name == "Isolated value" && loaded.joined, "The isolated host did not load and join")
+        passed("ISOLATED-HOST", ["revision": String(loaded.revision), "name": loaded.name])
+    }
+    /// Tracks a MainActor host's snapshot and subscriber count separately with Observation.
+    private func mainActorObservation() async throws {
+        guard #available(iOS 17.0, *) else {
+            passed("OBSERVATION-MAINACTOR-HOST", ["observable": "false", "reason": "Observation requires iOS 17"])
+            return
+        }
+        let owner = GeneratedTransfers.MainActorHost(downloadDriver: { _, _ in .failure(.unavailable) }, onLogged: { _ in })
+        let snapshotReads = AtomicRecordStorage<[Bool]>([])
+        let countReads = AtomicRecordStorage<[Bool]>([])
+        withObservationTracking { _ = owner.currentSnapshot } onChange: { append(true, to: snapshotReads) }
+        withObservationTracking { _ = owner.subscriberCount } onChange: { append(true, to: countReads) }
+        let receipt = try owner.send(.goOffline)
+        _ = await owner.flush(through: receipt)
+        let snapshotChanges = snapshotReads.load().value.count
+        let countChanges = countReads.load().value.count
+        try require(
+            snapshotChanges == 1 && countChanges == 0,
+            "Observation did not report only the snapshot: \(snapshotChanges), \(countChanges)"
+        )
+        await owner.shutdown()
+        passed(
+            "OBSERVATION-MAINACTOR-HOST",
+            ["observable": "true", "snapshotChanges": String(snapshotChanges), "countChanges": String(countChanges)]
+        )
+    }
+    /// Receives a shared owner's snapshots through Combine until the publisher finishes.
+    private func snapshotPublisher() async throws {
+        let owner = GeneratedTransfers.Shared(downloadDriver: { _, _ in .failure(.unavailable) }, onLogged: { _ in })
+        let publisher = try owner.snapshotPublisher()
+        try require(owner.subscriberCount == 1, "The publisher did not take its slot at creation")
+        let revisions = Trace<UInt64>()
+        let finished = Trace<Bool>()
+        let cancellable = publisher.sink(
+            receiveCompletion: { _ in finished.record(true) },
+            receiveValue: { revisions.record($0.revision) }
+        )
+        _ = await revisions.wait { _ in true }
+        let edited = try owner.send(.goOffline)
+        _ = await revisions.wait { $0 >= edited.revision }
+        let closed = owner.close()
+        _ = await finished.wait { $0 }
+        cancellable.cancel()
+        let values = revisions.values
+        try require(
+            values == values.sorted() && values.last == closed.revision && owner.subscriberCount == 0,
+            "The publisher did not follow the owner to its closed snapshot: \(values)"
+        )
+        await owner.shutdown()
+        passed("SNAPSHOT-PUBLISHER", ["revisions": String(describing: values), "finished": "true"])
+    }
+    /// Observes a projection that omits values equal to the one before it.
+    private func distinctSnapshots() async throws {
+        let download = KeyedControlledDriver<Int, String, String, GeneratedTransfers.TransferFailure>()
+        let owner = GeneratedTransfers.Shared(downloadDriver: download.run, onLogged: { _ in })
+        let counts = try owner.distinctSnapshots { snapshot -> Int in
+            if case .browsing(let browsing) = snapshot { browsing.value.files.count } else { -1 }
+        }
+        var iterator = counts.makeAsyncIterator()
+        var observed: [Int] = []
+        if let first = await iterator.next() { observed.append(first) }
+        try owner.send(.download(1))
+        try await download.nextStarted().succeed("one")
+        if let next = await iterator.next() { observed.append(next) }
+        // Neither the next change nor the closed snapshot changes the count, so both are omitted.
+        let unchanged = try owner.send(.cancel(9))
+        _ = await owner.flush(through: unchanged)
+        owner.close()
+        while let more = await iterator.next() { observed.append(more) }
+        try require(observed == [0, 1], "Equal projections were not omitted: \(observed)")
+        await owner.shutdown()
+        passed("DISTINCT-SNAPSHOTS", ["counts": String(describing: observed)])
+    }
+    /// Drives a Local through the testing product's harness and requires full graph coverage.
+    private func testingProduct() throws {
+        var test = ManualMachineTest(GeneratedTransfers.Local())
+        try test.send(.download(1))
+        try test.send(.download(2))
+        let works = test.drainFlattenedCommands().compactMap { command -> GeneratedTransfers.DownloadWork? in
+            if case .download(let work) = command { work } else { nil }
+        }
+        guard works.count == 2, case .committed = test.deliver(.download(works[0].succeeded("one"))),
+            case .committed = test.deliver(.download(works[1].failed(.unavailable)))
+        else { throw SmokeFailure(message: "The harness did not deliver issued work") }
+        for work in works {
+            try require(test.acknowledgeExecution(work.execution) == .recorded, "An execution was not acknowledged")
+        }
+        try test.send(.cancel(3))
+        try test.send(.goOffline)
+        try test.send(.goOnline)
+        test.close()
+        _ = test.drainFlattenedCommands()
+        let quiescent = test.isQuiescent
+        try require(quiescent, "The harness's owner did not settle")
+        var coverage = GraphCoverage(for: GeneratedTransfers.Local.self)
+        coverage.record(test)
+        try coverage.requireCoverage()
+        passed(
+            "TESTING-MANUAL-COVERAGE",
+            ["steps": String(test.history.count), "edges": String(coverage.exercisedEdgeIDs.count)]
         )
     }
     private func finishResource(_ releases: AtomicRecordStorage<[Int]>) throws -> Int {

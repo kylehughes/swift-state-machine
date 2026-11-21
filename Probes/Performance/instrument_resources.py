@@ -26,7 +26,13 @@ public enum RuntimeCoordinatorTaskProbe {
 }
 public final class RuntimeHostWeakProbe {
     private weak var value: AnyObject?
-    public init(_ value: AnyObject) { self.value = value }
+    /// Whether the object is an actor, which the concurrency runtime can still hold for a moment after
+    /// the last job that ran on it has returned and every task that referenced it has been joined.
+    public let isActor: Bool
+    public init(_ value: AnyObject) {
+        self.value = value
+        isActor = value is any Actor
+    }
     public var isAlive: Bool { value != nil }
 }
 '''
@@ -164,11 +170,22 @@ def track(text, expected):
 
 
 CONFINED_EXCLUSIONS = {
-    'RuntimeActorHost.swift': {'Task': 1, 'Task.detached': 7},
-    'RuntimeMainActorHost.swift': {'Task': 7},
+    'RuntimeActorHost.swift': {'Task': 2, 'Task.detached': 8},
+    'RuntimeMainActorHost.swift': {'Task': 8},
     'RuntimeConfinedSupport.swift': {'Task': 1},
+    'RuntimeIsolatedHost.swift': {'Task': 6},
 }
-CONFINED_TYPES = {'RuntimeActorHost', 'RuntimeMainActorHost', 'MainActorSnapshotSubscription', 'RuntimeConfinedExecution'}
+CONFINED_TYPES = {'RuntimeActorHost', 'RuntimeMainActorHost', 'RuntimeIsolatedHost', 'MainActorSnapshotSubscription',
+                  'RuntimeConfinedExecution'}
+# Main-actor teardown and wakeup tasks of snapshot sequences and Combine publishers. The benchmark registers
+# callback subscriptions only, so it never creates one of these tasks.
+SEQUENCE_EXCLUSIONS = {
+    'RuntimeSnapshots.swift': {'Task': 5},
+    'SnapshotPublisher.swift': {'Task': 6},
+}
+SEQUENCE_MEMBERS = {'snapshots', 'distinctSnapshots', 'snapshotPublisher', 'pendingCompletionUpdates'}
+# Protocol declarations whose requirements name a confined host's types without constructing a task or a host.
+DECLARATION_REFERENCES = {'StateMachineHosting.swift'}
 
 
 def assert_shared_fixture_scope():
@@ -180,6 +197,8 @@ def assert_shared_fixture_scope():
         tokens = [token for token, _, _ in swift_tokens((fixture / name).read_text())]
         if CONFINED_TYPES.intersection(tokens):
             raise ValueError('Benchmark now references an excluded confined host: ' + name)
+        if SEQUENCE_MEMBERS.intersection(tokens):
+            raise ValueError('Benchmark now registers an excluded snapshot sequence or publisher: ' + name)
         for index in range(len(tokens) - 2):
             if tokens[index:index + 2] == ['PerformanceFlow', '.'] and tokens[index + 2] in {'Actor', 'MainActor'}:
                 raise ValueError('Benchmark now references a confined facade: ' + name)
@@ -222,11 +241,10 @@ extension RuntimeState {
 MAILBOX = '''
 extension LatestMailbox {
     var performanceResourceCounts: [Int] {
-        let state = storage.load().value
-        return [state.pending == nil ? 0 : 1, state.scheduled ? 1 : 0]
+        storage.withLock { [$0.pending == nil ? 0 : 1, $0.scheduled ? 1 : 0] }
     }
     func performanceWeakMarkers() -> [RuntimeHostWeakProbe] {
-        [RuntimeHostWeakProbe(self), RuntimeHostWeakProbe(storage)]
+        [RuntimeHostWeakProbe(self)]
     }
 }
 '''
@@ -281,15 +299,15 @@ def copy_resources(command, destination):
                             'registry': 'Retain task handles in an atomically replaced registry; drain and await each cohort until empty.'})
         elif original.name == 'RuntimeSharedHost.swift':
             disposition = 'all Void constructions registered and joined'
-            amended = track(text, 9)
+            amended = track(text, 10)
             needle = '        var waiters: [(RuntimeIdentity, CheckedContinuation<Void, Never>)] = []'
             if amended.count(needle) != 1: raise ValueError('Progress waiter patch drift')
             amended = amended.replace(needle, needle + '\n        var performanceWaiterCount: Int { waiters.count }') + HOST
-            patches.append({'file': original.name, 'trackedVoidTaskSites': 9, 'progressWaiterGetter': 1})
+            patches.append({'file': original.name, 'trackedVoidTaskSites': 10, 'progressWaiterGetter': 1})
         elif original.name == 'LatestMailbox.swift':
             disposition = 'all Void constructions registered and joined'
-            amended = track(text, 3) + MAILBOX
-            patches.append({'file': original.name, 'trackedVoidTaskSites': 3})
+            amended = track(text, 4) + MAILBOX
+            patches.append({'file': original.name, 'trackedVoidTaskSites': 4})
         elif original.name == 'RuntimeDeliveryLedger.swift':
             needle = '        var preparations = 0'
             if text.count(needle) != 1: raise ValueError('Ledger preparation-round patch drift')
@@ -300,6 +318,16 @@ def copy_resources(command, destination):
                 if text.count(needle) != 1: raise ValueError('Engine sample patch drift: ' + needle)
             amended = text + ENGINE
             patches.append({'file': original.name, 'assertedPrivateEngineFields': 3})
+        elif original.name in SEQUENCE_EXCLUSIONS:
+            actual = {}
+            for site in sites:
+                if site['generic']: raise ValueError('Sequence generic Task spelling changed; review exclusion')
+                actual[site['kind']] = actual.get(site['kind'], 0) + 1
+            if actual != SEQUENCE_EXCLUSIONS[original.name]:
+                raise ValueError('Excluded sequence Task inventory drift: ' + original.name + ' ' + str(actual))
+            disposition = 'explicitly excluded: sequence and publisher tasks; the benchmark registers callbacks only'
+            patches.append({'file': original.name, 'excludedTaskSites': len(sites), 'constructorKinds': actual,
+                            'reason': disposition})
         elif original.name in CONFINED_EXCLUSIONS:
             actual = {}
             for site in sites:
@@ -312,7 +340,7 @@ def copy_resources(command, destination):
                             'reason': disposition})
         elif sites:
             raise ValueError('Uncovered library task construction in ' + original.name)
-        if original.name not in CONFINED_EXCLUSIONS and CONFINED_TYPES.intersection(token for token, _, _ in swift_tokens(text)):
+        if original.name not in set(CONFINED_EXCLUSIONS) | set(SEQUENCE_EXCLUSIONS) | DECLARATION_REFERENCES and CONFINED_TYPES.intersection(token for token, _, _ in swift_tokens(text)):
             raise ValueError('Exercised source now references an excluded confined host: ' + original.name)
         inventory.append({'file': original.name, 'source_sha256': original_hash, 'sites': sites, 'disposition': disposition})
         output = directory / original.name
@@ -321,7 +349,7 @@ def copy_resources(command, destination):
                              'copy_sha256': digest(output), 'instrumented': text != amended})
         if digest(original) != original_hash: raise ValueError('Source changed during resource copy: ' + str(original))
         outputs.append(output)
-    required = {'RuntimeCoordinator.swift', 'RuntimeSharedHost.swift', 'LatestMailbox.swift', 'RuntimeDeliveryLedger.swift', 'RuntimeState.swift'} | set(CONFINED_EXCLUSIONS)
+    required = {'RuntimeCoordinator.swift', 'RuntimeSharedHost.swift', 'LatestMailbox.swift', 'RuntimeDeliveryLedger.swift', 'RuntimeState.swift'} | set(CONFINED_EXCLUSIONS) | set(SEQUENCE_EXCLUSIONS)
     if {p['file'] for p in patches} != required:
         raise ValueError('Missing required task patch scope')
     (destination / 'task-inventory.json').write_text(json.dumps(inventory, indent=2) + '\n')

@@ -9,11 +9,15 @@ nonisolated public enum Flow: Sendable {
     @Initial case idle(Idle = makeIdle())
     case loading(Loading)
     case loaded(Loaded)
-    case failed(Failed)
+    @Terminal case failed(Failed)
     public enum Problem: Error, Sendable { case negative, offline }
-    enum Scope { case load, session }
+    enum Scope {
+        @Active(in: [Loading.self])
+        case load
+        case session
+    }
     public enum Input: Sendable { case load(Int), cancel, sessionChanged, note(String), tick(Bool) }
-    @Operation(scope: Scope.load, requires: [Scope.session], activeIn: [Loading.self])
+    @Operation(scope: Scope.load, requires: [Scope.session])
     public enum Fetch {
         public typealias Input = Int
         public typealias Output = String

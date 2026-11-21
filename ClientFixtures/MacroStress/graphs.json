@@ -5,6 +5,7 @@
     "edgeSource": "edgeIndex % phases",
     "edgeDestination": "(edgeSource + 1) % phases",
     "inputGroup": "edgeIndex // phases",
+    "terminalPhases": "phaseIndex >= edges, the phases that no edge leaves",
     "graphs": [
         {
             "phases": 2,

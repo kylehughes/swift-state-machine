@@ -3,4 +3,4 @@ import StateMachineExamples
 import Foundation
 typealias Flow = ReferenceProfile
 func request() -> ProfileRequest { try! ProfileRequest(userID: UserID("kyle")) }
-func legal(_ observed: Flow.Observed<Flow.Loading>, work: Flow.FetchWork, profile: Profile) throws { if case .success(let completion) = work.succeeded(profile) { _ = observed.received(completion) } }
+func legal(_ local: inout Flow.Local, work: Flow.FetchWork, profile: Profile) { _ = local.deliver(.fetch(work.succeeded(profile))) }

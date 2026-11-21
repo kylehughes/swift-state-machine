@@ -180,14 +180,15 @@ import Testing
             Issue.record("Missing issued work")
             return
         }
-        let candidate = loading.received(completion)
+        let candidate = Flow.Snapshot.loading(loading).presentationChanged("old")
         let archive = try Flow.Archive(model: .idle(.init(userID: id)))
         guard case .committed(let receipt) = local.reset(archive, expected: local.snapshot()) else {
             Issue.record("Reset rejected")
             return
         }
         #expect(receipt.revision == 2)
-        guard case .rejected(.obsoleteIncarnation, _) = local.commit(candidate),
+        guard case .stale = local.deliver(.fetch(.success(completion))),
+            case .rejected(.obsoleteIncarnation, _) = local.commit(candidate),
             case .committed(let next) = local.commit(local.snapshot().presentationChanged("fresh"))
         else {
             Issue.record("Reset retained old authority or rejected its new owner proof")

@@ -357,4 +357,67 @@ import Testing
         state.finishDeliveryClaim(claim)
         #expect(state.isQuiescent)
     }
+    private func keyed(_ key: String, policy: RuntimeOperationPolicy = .latest) -> Core.Start {
+        .init(.init(kind: 7, scope: a, policy: policy), descriptor: key, key: RuntimeKey(key))
+    }
+
+    @Test func aKeyLeavesTheTableWithItsLastWorkAndReturnsWithAFreshIdentity() throws {
+        var state = try engine()
+        try accept(&state, model: 1, plan: .init(starts: [keyed("a")]))
+        let first = try #require(state.keyIdentity(kind: 7, key: RuntimeKey("a")))
+        // Replacing the key's work under `.latest` keeps the key's identity.
+        try accept(&state, model: 2, plan: .init(starts: [keyed("a")]))
+        #expect(state.keyIdentity(kind: 7, key: RuntimeKey("a")) === first)
+        // Cancelling the key's work retires the key, and an absent key cancels nothing.
+        try accept(
+            &state,
+            model: 3,
+            plan: .init(cancellations: [.init(kind: 7, key: RuntimeKey("a")), .init(kind: 7, key: RuntimeKey("z"))])
+        )
+        #expect(state.keyIdentity(kind: 7, key: RuntimeKey("a")) == nil)
+        let batches = state.drain(limit: 8)
+        #expect(batches.last?.commands.filter { if case .cancel = $0 { true } else { false } }.count == 1)
+        try accept(&state, model: 4, plan: .init(starts: [keyed("a")]))
+        let second = try #require(state.keyIdentity(kind: 7, key: RuntimeKey("a")))
+        #expect(second !== first)
+    }
+
+    @Test func aRejectedKeyedPlanLeavesTheKeyTableUnchanged() throws {
+        var state = try engine()
+        try accept(&state, model: 1, plan: .init(starts: [keyed("a", policy: .rejectWhenActive)]))
+        let held = try #require(state.keyIdentity(kind: 7, key: RuntimeKey("a")))
+        let candidate = try Core.prepare(
+            on: state.snapshot,
+            next: 2,
+            plan: .init(starts: [keyed("b", policy: .rejectWhenActive), keyed("a", policy: .rejectWhenActive)])
+        )
+        reject(state.commit(candidate), as: .operationPolicy(.alreadyActive), model: 1, revision: 1)
+        #expect(state.keyIdentity(kind: 7, key: RuntimeKey("a")) === held)
+        #expect(state.keyIdentity(kind: 7, key: RuntimeKey("b")) == nil)
+    }
+
+    @Test func aResetRevokesEveryKeyAndQueuesItsCancellations() throws {
+        var state = try engine()
+        try accept(&state, model: 1, plan: .init(starts: [keyed("a"), keyed("b")]))
+        let issued = works(state.drain(limit: 8))
+        let stale = state.snapshot
+        guard case .committed(let reset) = state.reset(9, scopes: [a]) else {
+            Issue.record("Reset was rejected")
+            return
+        }
+        #expect(reset.revision == 2)
+        #expect(reset.model == 9)
+        #expect(state.keyIdentity(kind: 7, key: RuntimeKey("a")) == nil)
+        #expect(issued.allSatisfy { !state.isActive($0.ticket) })
+        let batch = try #require(state.drain(limit: 8).first)
+        #expect(batch.commands.count == 2)
+        // A candidate prepared before the reset belongs to the earlier incarnation.
+        let candidate = try Core.prepare(on: stale, next: 3)
+        reject(state.commit(candidate), as: .obsoleteIncarnation, model: 9, revision: 2)
+        _ = state.close()
+        guard case .rejected(.closed, _) = state.reset(0, scopes: []) else {
+            Issue.record("A closed engine was reset")
+            return
+        }
+    }
 }

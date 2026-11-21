@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-MODULES = ['StateMachine', 'StateMachineUI']
+MODULES = ['StateMachine', 'StateMachineUI', 'StateMachineTesting']
 BASE_PATH = 'swift-state-machine'
 HIDDEN_KINDS = {"swift.extension"}
 

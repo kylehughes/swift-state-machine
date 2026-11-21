@@ -128,19 +128,14 @@ import os
             Issue.record("Edit rejected")
             return
         }
-        guard case .loading(let loading) = local.snapshot(),
-            case .success(let completion) = work.succeeded(Profile(userID: id, name: "Kyle"))
-        else { return }
-        let candidate = loading.received(completion)
-        let duplicate = loading.received(completion)
-        let result = local.commit(candidate)
+        let completion = work.succeeded(Profile(userID: id, name: "Kyle"))
+        let result = local.deliver(.fetch(completion))
         guard case .committed(let receipt) = result else {
             Issue.record("Completion rejected")
             return
         }
         #expect(receipt.snapshot.presentation == "new")
-        let rejected = local.commit(duplicate)
-        guard case .rejected(.inactiveAuthority, _) = rejected else {
+        guard case .stale = local.deliver(.fetch(completion)) else {
             Issue.record("Duplicate admitted")
             return
         }
@@ -151,6 +146,61 @@ import os
         #expect(!beforeAcknowledgment)
         #expect(local.acknowledgeExecution(work.execution, disposition: .terminated) == .recorded)
         #expect(local.acknowledgeExecution(work.execution, disposition: .terminated) == .duplicate)
+        let quiescent = local.isQuiescent
+        #expect(quiescent)
+    }
+
+    /// One queue slot holds an audit start while the fetch delivers its result.
+    ///
+    /// A second result for the same fetch cannot replace the retained one, and no public method
+    /// prepares a fetch result from an observation. Admission-only retry applies the first result.
+    @Test func aSecondResultForTheSameWorkCannotReplaceTheRetainedOneOnAOneSlotOwner() throws {
+        let (id, request) = try inputs()
+        var local = Flow.Local(.init(userID: id), configuration: try .init(commitCapacity: 1))
+        guard case .idle(let idle) = local.snapshot(), case .committed = local.commit(try idle.load(request)),
+            case .start(let fetch) = local.drainCommands(limit: 1).first?.commands.first,
+            case .loading(let loading) = local.snapshot(), case .committed = local.commit(loading.audit("audit"))
+        else {
+            Issue.record("Could not start the fetch and fill the slot with an audit start")
+            return
+        }
+        guard
+            case .pending(let pending, .waitingForCapacity) = local.deliver(
+                .fetch(fetch.succeeded(Profile(userID: id, name: "A")))
+            )
+        else {
+            Issue.record("The first result did not wait for capacity")
+            return
+        }
+        guard
+            case .pending(pending, .waitingForCapacity) = local.deliver(
+                .fetch(fetch.succeeded(Profile(userID: id, name: "B")))
+            )
+        else {
+            Issue.record("The second result was not folded into the retained one")
+            return
+        }
+        guard case .audit(let audit) = local.drainCommands(limit: 1).first?.commands.first else {
+            Issue.record("The audit start was not transferred")
+            return
+        }
+        #expect(local.pendingCompletions().map(\.attemptCount) == [1])
+        guard case .committed(let receipt) = local.retryAdmission(id: pending),
+            case .loaded(let loaded) = receipt.snapshot
+        else {
+            Issue.record("Admission-only retry did not apply the retained result")
+            return
+        }
+        #expect(loaded.value.profile.name == "A")
+        #expect(local.pendingCompletions().isEmpty)
+        guard case .notPending = local.retryAdmission(id: pending) else {
+            Issue.record("A settled result was admitted twice")
+            return
+        }
+        #expect(local.acknowledgeExecution(fetch.execution, disposition: .terminated) == .recorded)
+        #expect(local.acknowledgeExecution(audit.execution, disposition: .terminated) == .recorded)
+        _ = local.close()
+        _ = local.drainCommands(limit: 10)
         let quiescent = local.isQuiescent
         #expect(quiescent)
     }

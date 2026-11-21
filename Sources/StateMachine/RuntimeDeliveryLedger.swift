@@ -19,12 +19,15 @@ nonisolated package struct RuntimeDeliveryDecision: Sendable {
     func matches(_ other: Self) -> Bool { identity === other.identity }
 }
 
-/// Explicit opt-in to reevaluating pure completion preparation after root conflicts.
+/// Whether a managed host prepares a retained completion again after its preparation loses a root conflict.
 ///
 /// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
 nonisolated public enum RuntimeCompletionPolicy: Sendable {
-    case manualOnConflict
-    case retryPure
+    /// A lost conflict requires reconciliation; nothing is prepared again automatically.
+    case manual
+    /// A lost conflict is prepared again against the newer root, within a bounded budget, which
+    /// assumes that completion preparation is deterministic and free of side effects.
+    case retry
 }
 
 /// What a retained completion is waiting for, independently of physical execution termination.
@@ -116,10 +119,21 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
         var candidate: Engine.Candidate?
         var claim: RuntimeDeliveryClaim?
         var decision = RuntimeDeliveryDecision()
+        /// Automatic turns that ended in a conflict and queued another.
+        var conflictTurns = 0
     }
-    private var entries: [Entry] = []
+    private var entries: [Entry] = [] { didSet { generation &+= 1 } }
+    /// Counts changes to the retained envelopes, so an observer of `pending` can order its images.
+    ///
+    /// Every change to an envelope's presence, status, rejection, or attempt count advances it; reading
+    /// does not. It wraps at its limit rather than stopping, because a stopped count could no longer
+    /// mark a later image newer: an observer tells two generations apart by inequality, or orders them
+    /// as serial numbers, as a pending-completion mailbox does.
+    package private(set) var generation: UInt64 = 0
     /// Creates an empty ledger for one associated runtime.
     public init() {}
+    /// Creates an empty ledger whose change count starts at `generation`, so a test can cross its wrap.
+    package init(generation: UInt64) { self.generation = generation }
     /// The number of retained envelopes, including any claimed by preparation.
     package var pendingCount: Int { entries.count }
     /// Historical typed projections; projecting does not claim preparation.
@@ -149,7 +163,13 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
     }
     /// Removes invalidated envelopes while engine claims continue retaining reservations.
     public mutating func prune(in engine: Engine) {
+        guard entries.contains(where: { !engine.isActive($0.ticket) }) else { return }
         entries.removeAll { !engine.isActive($0.ticket) }
+    }
+    /// Disposes every envelope at closure and records the change even when none was retained, so the
+    /// closed owner's final, empty image follows every earlier one.
+    package mutating func close() {
+        entries = []
     }
     /// Claims one pending envelope and captures a fresh root before domain evaluation.
     ///
@@ -246,16 +266,36 @@ nonisolated public struct RuntimeDeliveryLedger<Model, Descriptor, Outcome, Doma
             return .pending(entries[index].id, entries[index].status)
         }
     }
+    /// The number of automatic scheduling turns a pure conflict retry may use, including the
+    /// delivery's own turn, before its envelope parks for explicit reconciliation.
+    package static var conflictRetryTurns: Int { 16 }
+    /// Whether a pure-conflict result was queued for another scheduler turn.
+    package enum RetryScheduling: Equatable, Sendable {
+        /// The envelope waits for the next turn.
+        case scheduled
+        /// Another attempt claimed the envelope or made a newer decision, which stands.
+        case superseded
+        /// The envelope used its last turn and stays `reconciliationRequired`.
+        case exhausted
+    }
     /// Marks one pure-conflict result eligible for a later bounded scheduler round.
     ///
-    /// Only the decision that lost the conflict can schedule its retry. Returns `false`, and leaves
-    /// the envelope unchanged, once another attempt has claimed it or made a newer decision.
-    package mutating func scheduleRetry(_ id: RuntimePendingID, after decision: RuntimeDeliveryDecision) -> Bool {
+    /// Only the decision that lost the conflict can schedule its retry. Each envelope gets at most
+    /// `turns` automatic turns that end in a conflict, the first being the one that delivered it;
+    /// after the last, the envelope stays `reconciliationRequired` and the result is `exhausted`.
+    /// Anything other than `scheduled` leaves the envelope unchanged.
+    package mutating func scheduleRetry(
+        _ id: RuntimePendingID,
+        after decision: RuntimeDeliveryDecision,
+        turns: Int = conflictRetryTurns
+    ) -> RetryScheduling {
         guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].claim == nil,
             entries[index].decision.matches(decision), entries[index].status == .reconciliationRequired
-        else { return false }
+        else { return .superseded }
+        guard entries[index].conflictTurns + 1 < turns else { return .exhausted }
+        entries[index].conflictTurns += 1
         entries[index].status = .retryScheduled
-        return true
+        return .scheduled
     }
     /// Admission-only retry; no router or reducer is evaluated here.
     public mutating func retryCapacity(in engine: inout Engine) -> [Finish] {
@@ -316,21 +356,24 @@ extension RuntimeDeliveryLedger {
     /// Each hook returns before the next is entered. Preparation therefore needs no
     /// shared lock, and actor-confined hosts can use the same algorithm without Sendable payloads.
     ///
-    /// `claim` receives the decision an automatic retry continues from, or `nil` for the first
-    /// claim. `finish` returns the retained record it left, if any. Every retry, immediate or
+    /// `claim` receives the decision an automatic retry continues from, or `nil` for an explicit
+    /// claim. A delivery passes `retained`, the decision its envelope was installed with, so its
+    /// first claim is granted only while no other attempt has finished since retention.
+    /// `finish` returns the retained record it left, if any. Every retry, immediate or
     /// scheduled, is bound to the decision of the attempt that lost the conflict, so an attempt
     /// that finishes in between keeps its own decision.
     package static func reconcile(
         _ id: RuntimePendingID,
         policy: RuntimeCompletionPolicy,
         automatic: Bool,
+        retained: RuntimeDeliveryDecision? = nil,
         claim: (RuntimeDeliveryDecision?) -> ClaimResult,
         prepare: (Attempt) -> Preparation,
         finish: (Attempt, Preparation) -> (Finish, Pending?),
         scheduleRetry: (RuntimePendingID, RuntimeDeliveryDecision) -> Bool
     ) -> Reconciliation {
         var preparations = 0
-        var continuing: RuntimeDeliveryDecision?
+        var continuing = retained
         while true {
             switch claim(continuing) {
             case .inProgress: return .inProgress
@@ -339,7 +382,7 @@ extension RuntimeDeliveryLedger {
                 let candidate = prepare(attempt)
                 preparations += 1
                 let (result, pending) = finish(attempt, candidate)
-                if case .pending = result, automatic, case .retryPure = policy, let pending,
+                if case .pending = result, automatic, case .retry = policy, let pending,
                     case .admission(.conflict) = pending.lastRejection
                 {
                     if preparations < 4 {
@@ -353,6 +396,55 @@ extension RuntimeDeliveryLedger {
         }
     }
 }
+
+extension RuntimeDeliveryLedger {
+    /// The reconciliation reports of capacity conflicts that a host has captured and not yet made,
+    /// oldest first.
+    ///
+    /// A host owes a batch of conflicts, each captured with the decision that produced it, before any
+    /// callout, and makes each report through ``take(through:)``. Before it begins any other attempt
+    /// of a completion, or discards it, or reports it, the host makes the reports still owed for it
+    /// through ``take(_:)``. A handler of an earlier entry that reconciles a later entry synchronously
+    /// therefore sees that entry's captured attempt before the attempt it starts, and each attempt is
+    /// reported once.
+    package struct OwedReports {
+        private var owed: [(serial: UInt64, pending: Pending)] = []
+        private var nextSerial: UInt64 = 0
+
+        /// Creates an empty record.
+        package init() {}
+
+        /// Owes a report for each entry of `batch`, and returns their serials, in order.
+        package mutating func owe(_ batch: [Pending]) -> [UInt64] {
+            batch.map { pending in
+                defer { nextSerial &+= 1 }
+                owed.append((nextSerial, pending))
+                return nextSerial
+            }
+        }
+        /// Takes the reports still owed for the completion of the entry `serial`, through that entry,
+        /// oldest first, or none once that entry's report was made.
+        package mutating func take(through serial: UInt64) -> [Pending] {
+            guard let entry = owed.first(where: { $0.serial == serial }) else { return [] }
+            return take { $0.pending.id == entry.pending.id && $0.serial <= serial }
+        }
+        /// Takes every report still owed for `id`, oldest first.
+        package mutating func take(_ id: RuntimePendingID) -> [Pending] { take { $0.pending.id == id } }
+
+        private mutating func take(where selected: ((serial: UInt64, pending: Pending)) -> Bool) -> [Pending] {
+            guard owed.contains(where: selected) else { return [] }
+            var taken: [Pending] = []
+            owed.removeAll { entry in
+                guard selected(entry) else { return false }
+                taken.append(entry.pending)
+                return true
+            }
+            return taken
+        }
+    }
+}
+
+extension RuntimeDeliveryLedger.OwedReports: Sendable where Outcome: Sendable {}
 
 /// Bounded by retained pending IDs, with one responsible scheduler per ready cohort.
 nonisolated package struct RuntimeDeliveryReadyQueue: Sendable {

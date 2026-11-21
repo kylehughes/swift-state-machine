@@ -9,13 +9,16 @@ nonisolated enum PerformanceFlow: Sendable {
         var completions: UInt64 = 0
     }
     @Initial case ready(Ready)
-    enum Scope { case work }
+    enum Scope {
+        @Active(in: [Ready.self])
+        case work
+    }
     enum Input: Sendable {
         case bump(UInt64)
         case start(Int)
         case cancel
     }
-    @Operation(scope: Scope.work, activeIn: [Ready.self], admission: .parallel(limit: 16))
+    @Operation(scope: Scope.work, admission: .parallel(limit: 16))
     enum Work {
         typealias Input = Int
         typealias Output = Int

@@ -1,5 +1,8 @@
 import StateMachine
 import Testing
+import os
+
+@testable import StateMachineReferenceModel
 
 @Suite struct RuntimeDeliveryLedgerTests {
     private typealias Core = RuntimeState<Int, Int>
@@ -127,7 +130,7 @@ import Testing
         _ = ledger.finish(stale, preparation: .success(candidate), in: &core)
         let decision = try #require(ledger.pending.first?.decision)
         let scheduled = ledger.scheduleRetry(id, after: decision)
-        #expect(scheduled)
+        #expect(scheduled == .scheduled)
         #expect(ledger.pending.first?.status == .retryScheduled)
         return (id, work.ticket)
     }
@@ -193,6 +196,177 @@ import Testing
         }
     }
 
+    /// Drives production and the independent reference through the same conflicting turns.
+    @Test func pureConflictTurnsParkAtTheSameBoundAsTheReference() throws {
+        var core = try engine(commits: 256)
+        var ledger = Ledger()
+        let work = try #require(start(&core).first)
+        #expect(core.acknowledge(work.ticket) == .recorded)
+        let id = try retain(42, ticket: work.ticket, ledger: &ledger, core: &core)
+        var reference = SequentialReference(owner: 1, configuration: .init(delivery: .retry))
+        _ = reference.commit(try reference.prepare(.load(7)))
+        let referenceTicket = try #require(reference.active.first)
+        _ = reference.retain(referenceTicket, outcome: .success(12))
+        var unrelated = 1
+        var preparations = 0
+        var statuses: [(production: ReferencePendingStatus, reference: ReferencePendingStatus)] = []
+        for turn in 1 ... 16 {
+            let first = turn == 1
+            var scheduledClaim = !first
+            let retained = first ? ledger.pending.first?.decision : nil
+            let interference = (0 ..< 4).map { index in SequentialReference.Input.presentation(turn * 4 + index) }
+            let result = Ledger.reconcile(
+                id,
+                policy: .retry,
+                automatic: true,
+                retained: retained,
+                claim: { decision in
+                    defer { scheduledClaim = false }
+                    return ledger.claim(id, in: &core, continuing: decision, scheduledRetry: scheduledClaim)
+                },
+                prepare: { attempt in
+                    preparations += 1
+                    let candidate = preparation(attempt, ticket: work.ticket)
+                    // An unrelated commit wins the race against every preparation.
+                    unrelated += 1
+                    commitUnrelated(&core, model: 1_000 + unrelated)
+                    return candidate
+                },
+                finish: { attempt, preparation in
+                    let finished = ledger.finish(attempt, preparation: preparation, in: &core)
+                    return (finished, ledger.pending.first)
+                },
+                scheduleRetry: { ledger.scheduleRetry($0, after: $1) == .scheduled }
+            )
+            guard case .finished(.pending(_, let status)) = result,
+                case .pending(_, let expected) = reference.deliveryTurn(
+                    referenceTicket.operation,
+                    interference: interference
+                )
+            else {
+                Issue.record("Turn \(turn) did not end pending")
+                return
+            }
+            statuses.append((ReferencePendingStatus(status), expected))
+        }
+        #expect(statuses.map(\.production) == statuses.map(\.reference))
+        #expect(statuses.dropLast().allSatisfy { $0.production == .retryScheduled })
+        #expect(statuses.last?.production == .reconciliationRequired)
+        #expect(preparations == 64)
+        #expect(ledger.pending.first?.attempts == 64)
+        #expect(reference.pending.first?.attempts == 64)
+        #expect(ledger.pending.first?.status == .reconciliationRequired)
+        // Neither side keeps the parked outcome on a scheduler queue.
+        #expect(reference.ready.isEmpty)
+        guard case .notPending = ledger.claim(id, in: &core, scheduledRetry: true) else {
+            Issue.record("A parked outcome still claimed a scheduled turn")
+            return
+        }
+        guard case .claimed(let attempt) = ledger.claim(id, in: &core),
+            case .committed = ledger.finish(
+                attempt,
+                preparation: preparation(attempt, ticket: work.ticket),
+                in: &core
+            ),
+            case .committed = reference.reconcile(referenceTicket.operation)
+        else {
+            Issue.record("Explicit reconciliation did not commit the parked outcome")
+            return
+        }
+    }
+
+    /// The host a hook reaches after the host that calls it has been created.
+    private struct TicketedOutcome: Sendable {
+        let ticket: RuntimeTicket
+        let value: Int
+    }
+    private final class HostBox: Sendable {
+        typealias Host = RuntimeSharedHost<Int, Int, TicketedOutcome, DomainFailure>
+        private let storage = OSAllocatedUnfairLock<Host?>(initialState: nil)
+        var host: Host? {
+            get { storage.withLock { $0 } }
+            set { storage.withLock { $0 = newValue } }
+        }
+    }
+
+    /// An explicit reconciliation is one explicit decision: under the retry policy too, an attempt that
+    /// loses a conflict leaves its outcome for another explicit decision instead of scheduling a retry.
+    @Test func anExplicitReconciliationThatLosesAConflictRequiresReconciliationLikeTheReference() async throws {
+        let box = HostBox()
+        let preparations = OSAllocatedUnfairLock(initialState: 0)
+        let (parked, park) = AsyncStream<RuntimePendingID>.makeStream()
+        let scope = scope
+        let host = HostBox.Host(
+            0,
+            scopes: [scope],
+            limits: try .init(commits: 8, executions: 8),
+            policy: .retry,
+            driver: { TicketedOutcome(ticket: $0.ticket, value: $0.descriptor) },
+            ticket: { $0.ticket },
+            prepare: { attempt in
+                let count = preparations.withLock {
+                    $0 += 1
+                    return $0
+                }
+                // The first preparation refuses the outcome, which parks it for reconciliation.
+                guard count > 1 else { return .failure(.preparation(.denied)) }
+                // An unrelated commit wins the race against the explicit attempt's preparation.
+                let current = box.host!.snapshot()
+                if case .candidate(let edit) = HostBox.Host.Engine.propose(on: current, next: current.model + 1) {
+                    _ = box.host!.commit(edit)
+                }
+                do throws(PlanRejection) {
+                    return .success(
+                        try HostBox.Host.Engine.prepare(
+                            on: attempt.snapshot,
+                            next: attempt.outcome.value,
+                            requiring: [attempt.outcome.ticket],
+                            plan: .init(retire: [attempt.outcome.ticket], finishingClaims: [attempt.claim])
+                        )
+                    )
+                } catch { return .failure(.admission(.plan(error))) }
+            },
+            reconciliationRequired: { park.yield($0.id) }
+        )
+        box.host = host
+        let start = try HostBox.Host.Engine.prepare(
+            on: host.snapshot(),
+            next: 1,
+            plan: .init(starts: [.init(.init(kind: 1, scope: scope), descriptor: 42)])
+        )
+        guard case .committed = host.commit(start) else { throw TestFailure.admission }
+        var reports = parked.makeAsyncIterator()
+        let id = try #require(await reports.next())
+        #expect(host.pendingCompletions().first?.status == .reconciliationRequired)
+        guard case .pending(let reconciled, let status) = host.reconcile(id: id) else { throw TestFailure.claim }
+        #expect(reconciled == id)
+        #expect(host.pendingCompletions().first?.lastRejection == .admission(.conflict))
+
+        // The independent reference takes the same two attempts: a refusal, then an explicit attempt
+        // that an unrelated commit beats.
+        var reference = SequentialReference(owner: 1, configuration: .init(delivery: .retry))
+        _ = reference.commit(try reference.prepare(.load(7)))
+        let ticket = try #require(reference.active.first)
+        _ = reference.retain(ticket, outcome: .success(12))
+        guard case .claimed(let refused) = reference.beginAttempt(ticket.operation) else { throw TestFailure.claim }
+        _ = reference.finishAttempt(refused, preparation: .failure(.domain), automatic: true)
+        guard case .claimed(let explicit) = reference.beginAttempt(ticket.operation) else { throw TestFailure.claim }
+        let candidate = try reference.prepareCompletion(
+            explicit.ticket,
+            outcome: explicit.outcome,
+            on: explicit.snapshot
+        )
+        _ = reference.commit(try reference.prepare(.presentation(1)))
+        guard case .pending(_, let expected) = reference.finishAttempt(explicit, preparation: .success(candidate))
+        else { throw TestFailure.claim }
+        #expect(ReferencePendingStatus(status) == expected)
+        #expect(expected == .reconciliationRequired)
+        #expect(reference.ready.isEmpty)
+        #expect(preparations.withLock { $0 } == 2)
+        park.finish()
+        await host.shutdown()
+    }
+
     /// Prepares the terminal candidate for an attempt, or the plan defect that prevents one.
     private func preparation(_ attempt: Ledger.Attempt, ticket: RuntimeTicket) -> Ledger.Preparation {
         do throws(PlanRejection) {
@@ -235,7 +409,7 @@ import Testing
         var explicit: Ledger.Finish?
         let result = Ledger.reconcile(
             id,
-            policy: .retryPure,
+            policy: .retry,
             automatic: true,
             claim: { decision in
                 claims += 1
@@ -257,7 +431,7 @@ import Testing
                 let finished = ledger.finish(attempt, preparation: preparation, in: &core)
                 return (finished, ledger.pending.first)
             },
-            scheduleRetry: { ledger.scheduleRetry($0, after: $1) }
+            scheduleRetry: { ledger.scheduleRetry($0, after: $1) == .scheduled }
         )
         guard case .pending(_, .waitingForCapacity)? = explicit else {
             Issue.record("The explicit attempt did not wait for capacity")
@@ -278,6 +452,67 @@ import Testing
         #expect(snapshot.model == 42)
     }
 
+    /// An explicit reconciliation can finish between a delivery's retention and its first claim.
+    ///
+    /// A `Shared` delivery installs its envelope and claims its first attempt in a second
+    /// transaction, so an explicit attempt can run to completion between the two.
+    @Test(arguments: [false, true])
+    func theFirstAutomaticClaimYieldsToAnExplicitAttemptAfterRetention(capacity: Bool) throws {
+        // With one queue slot, the explicit attempt's candidate waits for capacity.
+        var core = try engine(commits: capacity ? 1 : 8)
+        var ledger = Ledger()
+        let work = try #require(start(&core).first)
+        #expect(core.acknowledge(work.ticket) == .recorded)
+        let id = try retain(42, ticket: work.ticket, ledger: &ledger, core: &core)
+        let retained = try #require(ledger.pending.first?.decision)
+        if capacity { commitUnrelated(&core, model: 2) }
+        let explicit = try claim(id, ledger: &ledger, core: &core)
+        let refused: Ledger.Preparation = .failure(.preparation(.denied))
+        let explicitResult = ledger.finish(
+            explicit,
+            preparation: capacity ? preparation(explicit, ticket: work.ticket) : refused,
+            in: &core
+        )
+        let expected: PendingStatus = capacity ? .waitingForCapacity : .reconciliationRequired
+        guard case .pending(_, expected) = explicitResult else {
+            Issue.record("The explicit attempt did not leave its own decision")
+            return
+        }
+        var preparations = 0
+        let result = Ledger.reconcile(
+            id,
+            policy: .manual,
+            automatic: true,
+            retained: retained,
+            claim: { ledger.claim(id, in: &core, continuing: $0) },
+            prepare: { attempt in
+                preparations += 1
+                return preparation(attempt, ticket: work.ticket)
+            },
+            finish: { attempt, preparation in
+                (ledger.finish(attempt, preparation: preparation, in: &core), ledger.pending.first)
+            },
+            scheduleRetry: { _, _ in false }
+        )
+        guard case .notPending = result else {
+            Issue.record("The first automatic claim overrode the explicit attempt's decision")
+            return
+        }
+        #expect(preparations == 0)
+        #expect(ledger.pending.first?.attempts == 1)
+        #expect(ledger.pending.first?.status == expected)
+        if capacity {
+            _ = core.drain(limit: 1)
+            guard case .committed(let snapshot) = ledger.retryAdmission(id, in: &core) else {
+                Issue.record("The explicit attempt's candidate was lost")
+                return
+            }
+            #expect(snapshot.model == 42)
+        } else {
+            #expect(ledger.pending.first?.lastRejection == .preparation(.denied))
+        }
+    }
+
     @Test func aRetryIsNotScheduledAfterAnExplicitAttemptFinishedFirst() throws {
         // Four conflicting commits fill the queue, so the explicit attempt waits for capacity.
         var core = try engine(commits: 4)
@@ -289,7 +524,7 @@ import Testing
         var explicit: Ledger.Finish?
         let result = Ledger.reconcile(
             id,
-            policy: .retryPure,
+            policy: .retry,
             automatic: true,
             claim: { ledger.claim(id, in: &core, continuing: $0) },
             prepare: { attempt in
@@ -305,7 +540,7 @@ import Testing
             scheduleRetry: { id, decision in
                 // The explicit attempt lands after the fourth conflict and before scheduling.
                 explicit = explicitAttempt(id, ticket: work.ticket, ledger: &ledger, core: &core)
-                return ledger.scheduleRetry(id, after: decision)
+                return ledger.scheduleRetry(id, after: decision) == .scheduled
             }
         )
         guard case .pending(_, .waitingForCapacity)? = explicit else {
@@ -579,7 +814,7 @@ import Testing
         var scheduled: [RuntimePendingID] = []
         let result = Ledger.reconcile(
             id,
-            policy: .retryPure,
+            policy: .retry,
             automatic: true,
             claim: { ledger.claim(id, in: &core, continuing: $0) },
             prepare: { attempt in

@@ -9,8 +9,8 @@ nonisolated private enum SharedFailureFlow: Sendable {
     struct Left: Sendable { let value: Int }
     struct Right: Sendable { let value: Int }
     @Initial case start(Start = Start())
-    case left(Left)
-    case right(Right)
+    @Terminal case left(Left)
+    @Terminal case right(Right)
     enum Input: Sendable { case pick(Int) }
     enum Problem: Error, Equatable, Sendable { case negative, tooLarge, odd }
     @Transition(on: Input.pick)
@@ -36,7 +36,7 @@ nonisolated private enum MixedFailureFlow {
     struct Start {}
     struct Done {}
     @Initial case start(Start = Start())
-    case done(Done)
+    @Terminal case done(Done)
     enum Input { case go(Int) }
     enum Refusal: Error { case negative }
     enum Problem: Error { case odd }

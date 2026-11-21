@@ -6,7 +6,7 @@
 /// send across isolation boundaries.
 nonisolated public struct ShutdownDiagnostics: Equatable, Sendable {
     /// Execution lifetime, independently of retained result delivery.
-    public enum ExecutionDisposition: Equatable, Sendable {
+    public enum ExecutionState: Equatable, Sendable {
         /// Accepted but not transferred for physical execution.
         case queued
         /// Transferred for physical execution, with termination still owed.
@@ -45,8 +45,8 @@ nonisolated public struct ShutdownDiagnostics: Equatable, Sendable {
     public struct OutstandingExecution: Equatable, Sendable {
         /// The opaque identity of the operation whose physical termination is still tracked.
         public let execution: ExecutionHandle
-        /// The execution disposition at the diagnostic observation.
-        public let disposition: ExecutionDisposition
+        /// The execution state at the diagnostic observation.
+        public let disposition: ExecutionState
         /// The separate delivery disposition at the diagnostic observation.
         public let delivery: DeliveryDisposition
         /// The preparation still executing for this operation, when present.

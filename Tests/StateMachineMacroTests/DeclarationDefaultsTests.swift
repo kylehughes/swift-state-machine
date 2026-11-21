@@ -237,7 +237,7 @@ nonisolated private enum ScreenedFlow: Sendable {
 
     private func expectDeclined(_ pending: ScreenedFlow.PendingCompletion) {
         #expect(pending.status == .reconciliationRequired)
-        guard case .check(-1) = pending.outcome, case .preparation(.screen(.negative)) = pending.lastRejection
+        guard case .check(-1, _) = pending.outcome, case .preparation(.screen(.negative)) = pending.lastRejection
         else {
             Issue.record("The handler received a different completion")
             return

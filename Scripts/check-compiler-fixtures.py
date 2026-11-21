@@ -86,7 +86,7 @@ for mode in ['debug', 'release']:
     build = flags + (['-O'] if mode == 'release' else ['-Onone']) + ['-load-plugin-executable', str(bin_path / 'StateMachineMacros-tool') + '#StateMachineMacros']
     modules_ready = True
     # The examples are not a product; fixtures import them as the package's own clients do.
-    for module in ['StateMachine', 'StateMachineUI', 'StateMachineExamples']:
+    for module in ['StateMachine', 'StateMachineUI', 'StateMachineTesting', 'StateMachineExamples']:
         sources = sorted((ROOT / 'Sources' / module).glob('*.swift'))
         command = build + ['-package-name', 'StateMachine', '-enable-library-evolution', '-emit-library', '-emit-module', '-module-name', module, '-I', directory, '-L', directory, '-o', directory / f'lib{module}.dylib', '-emit-module-path', directory / f'{module}.swiftmodule', '-emit-module-interface-path', directory / f'{module}.swiftinterface']
         if module != 'StateMachine':

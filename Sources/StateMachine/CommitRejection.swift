@@ -1,9 +1,9 @@
-/// Why an owner refused to install a prepared candidate.
+/// Why an owner refused to install a prepared candidate, or to reset.
 ///
 /// Admission installs nothing when it reports one of these. When several apply, it reports the
 /// first in declaration order, so a candidate from another owner or for a closed owner reports
 /// that provenance before any defect in its effect plan.
-nonisolated public enum CommitRejection: Equatable, Sendable {
+nonisolated public enum CommitRejection: Error, Equatable, Sendable {
     /// The candidate was prepared from another owner's snapshot.
     case foreignOwner
     /// Admission has ended.

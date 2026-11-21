@@ -36,7 +36,7 @@ nonisolated enum Note {
         Draft(box: box)
     }
     @Transition(onSuccess: Autosave.self)
-    fileprivate static func autosaved(_ source: Draft, _ output: Autosave.Output) -> Draft {
+    fileprivate static func autosaved(_ source: Draft) -> Draft {
         source
     }
 }

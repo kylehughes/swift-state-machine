@@ -41,7 +41,13 @@ nonisolated public enum GeneratedProfile: Sendable {
     case loaded(Loaded)
     case failed(Failed)
     /// Authority that edges invalidate and operations hold.
-    enum Scope { case load, authentication }
+    enum Scope {
+        /// The load in progress, which both of its operations hold.
+        @Active(in: [Loading.self])
+        case load
+        /// The signed-in session, active in every phase.
+        case authentication
+    }
     /// Closed dynamic inputs.
     public enum Input: Sendable {
         case load(ProfileRequest)
@@ -80,7 +86,7 @@ nonisolated public enum GeneratedProfile: Sendable {
         }
     }
     /// The profile fetch operation.
-    @Operation(scope: Scope.load, requires: [Scope.authentication], activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.load, requires: [Scope.authentication], admission: .latest)
     public enum Fetch {
         /// The immutable fetch input.
         public typealias Input = ProfileRequest
@@ -90,12 +96,7 @@ nonisolated public enum GeneratedProfile: Sendable {
         public typealias Failure = ProfileFailure
     }
     /// An independent operation with different work and completion types.
-    @Operation(
-        scope: Scope.load,
-        requires: [Scope.authentication],
-        activeIn: [Loading.self],
-        admission: .parallel(limit: 2)
-    )
+    @Operation(scope: Scope.load, requires: [Scope.authentication], admission: .parallel(limit: 2))
     public enum Audit {
         /// The immutable audit input.
         public typealias Input = String

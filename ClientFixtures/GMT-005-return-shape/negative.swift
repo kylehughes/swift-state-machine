@@ -6,11 +6,14 @@ nonisolated enum Guarded: Sendable {
     struct Loading: Sendable {}
     @Initial case idle(Idle)
     case loading(Loading)
-    enum Scope { case work }
+    enum Scope {
+        @Active(in: [Loading.self])
+        case work
+    }
     enum Input: Sendable { case begin(Int), note(Int), pick(Bool) }
-    @Operation(scope: Scope.work, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.work, admission: .latest)
     enum Fetch { typealias Input = Int; typealias Output = Int; typealias Failure = Never }
-    @Operation(scope: Scope.work, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.work, admission: .latest)
     enum Audit { typealias Input = Int; typealias Output = Int; typealias Failure = Never }
     @Transition(on: Input.begin, starts: [Fetch.self])
     fileprivate static func begin(_ source: Idle, _ request: Int) -> Loading {

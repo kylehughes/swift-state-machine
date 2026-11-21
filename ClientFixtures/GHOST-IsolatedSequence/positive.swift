@@ -3,5 +3,6 @@ import StateMachineExamples
 import StateMachineUI
 
 @MainActor func legal(_ owner: GeneratedNote.MainActorHost) async throws {
-    for await snapshot in try owner.snapshots() { print(snapshot.revision) }
+    var snapshots = try owner.snapshots()
+    while let snapshot = await snapshots.next() { print(snapshot.revision) }
 }

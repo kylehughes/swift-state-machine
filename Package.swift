@@ -31,6 +31,7 @@ let package = Package(
     products: [
         .library(name: "StateMachine", targets: ["StateMachine"]),
         .library(name: "StateMachineUI", targets: ["StateMachineUI"]),
+        .library(name: "StateMachineTesting", targets: ["StateMachineTesting"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-syntax.git", exact: "604.0.0")
@@ -61,6 +62,17 @@ let package = Package(
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
         .target(name: "StateMachineUI", dependencies: ["StateMachine"], swiftSettings: [.treatAllWarnings(as: .error)]),
+        // Test helpers that drive real owners; they link no test framework, so an app can import them too.
+        .target(
+            name: "StateMachineTesting",
+            dependencies: ["StateMachine"],
+            swiftSettings: [.treatAllWarnings(as: .error)]
+        ),
+        .testTarget(
+            name: "StateMachineTestingTests",
+            dependencies: ["StateMachine", "StateMachineExamples", "StateMachineTesting"],
+            swiftSettings: [.treatAllWarnings(as: .error)]
+        ),
         // Example graphs for the tests and probes; no product publishes them.
         .target(
             name: "StateMachineExamples",

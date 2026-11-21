@@ -6,9 +6,12 @@ nonisolated enum OperationWitness: Sendable {
     @Initial case idle(Idle)
     case loading(Loading)
     enum RequestFailure: Error { case rejected }
-    enum Scope { case work }
+    enum Scope {
+        @Active(in: [Loading.self])
+        case work
+    }
     enum Input: Sendable { case begin }
-    @Operation(scope: Scope.work, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.work, admission: .latest)
     enum Fetch { typealias Input = any Error; typealias Output = Int; typealias Failure = Never }
     @Transition(on: Input.begin, starts: [Fetch.self])
     fileprivate static func begin(_ source: Idle) -> Change<Loading, Effect.Begin> {

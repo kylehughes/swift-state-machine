@@ -205,8 +205,12 @@ nonisolated public enum ReferenceProfile {
             self.audit = audit
         }
     }
-    /// The opaque owner-bound identity of a retained completion.
-    public typealias PendingCompletionID = RuntimePendingID
+    /// The opaque owner-bound identity of a retained completion of this graph.
+    ///
+    /// Another graph's pending identity has a different type, so it cannot reach this owner.
+    public struct PendingCompletionID: Hashable, Sendable {
+        fileprivate let raw: RuntimePendingID
+    }
     /// Whether completion preparation requires explicit reconciliation after conflict.
     public typealias CompletionConflictPolicy = RuntimeCompletionPolicy
     /// The historical delivery status of a retained completion.
@@ -222,6 +226,20 @@ nonisolated public enum ReferenceProfile {
     public enum OperationKind: Equatable, Sendable { case fetch, audit }
     /// A typed historical pending record, independent of physical worker lifetime.
     public struct PendingCompletion: Sendable {
+        /// The retained terminal value of one operation, without the authority that sealed it.
+        public enum Outcome: Sendable {
+            case fetch(Result<Fetch.Output, Fetch.Failure>)
+            case audit(Result<Audit.Output, Audit.Failure>)
+
+            fileprivate init(_ completion: Completion) {
+                switch completion {
+                case .fetch(.success(let sealed)): self = .fetch(.success(sealed.value))
+                case .fetch(.failure(let sealed)): self = .fetch(.failure(sealed.value))
+                case .audit(.success(let sealed)): self = .audit(.success(sealed.value))
+                case .audit(.failure(let sealed)): self = .audit(.failure(sealed.value))
+                }
+            }
+        }
         /// The declared operation that produced this outcome.
         public var operation: OperationKind {
             switch outcome {
@@ -231,8 +249,8 @@ nonisolated public enum ReferenceProfile {
         }
         /// The opaque identity accepted by reconciliation and discard.
         public let id: PendingCompletionID
-        /// The first immutable terminal outcome retained for the operation.
-        public let outcome: Completion
+        /// The first immutable terminal outcome retained for the operation, as an inert value.
+        public let outcome: Outcome
         /// The delivery state when this record was captured.
         public let status: PendingStatus
         /// The last typed preparation or admission failure, when present.
@@ -263,8 +281,8 @@ nonisolated public enum ReferenceProfile {
     public struct OutstandingExecution: Equatable, Sendable {
         /// The exact sealed operation whose physical termination is still tracked.
         public let execution: ExecutionHandle
-        /// The execution disposition at the diagnostic observation.
-        public let disposition: StateMachine.ShutdownDiagnostics.ExecutionDisposition
+        /// The execution state at the diagnostic observation.
+        public let disposition: StateMachine.ShutdownDiagnostics.ExecutionState
         /// The separate delivery disposition at the diagnostic observation.
         public let delivery: StateMachine.ShutdownDiagnostics.DeliveryDisposition
         /// The exclusive preparation still executing, when present.
@@ -438,7 +456,7 @@ nonisolated public enum ReferenceProfile {
             _ initial: Idle,
             drivers: Drivers,
             configuration: Configuration = .default,
-            completionPolicy: CompletionConflictPolicy = .manualOnConflict,
+            completionPolicy: CompletionConflictPolicy = .manual,
             onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in }
         ) {
             self.init(
@@ -498,7 +516,7 @@ nonisolated public enum ReferenceProfile {
         package init(_ initial: Idle, configuration: Configuration = .default) {
             self.configuration = configuration
             drivers = nil
-            completionPolicy = .manualOnConflict
+            completionPolicy = .manual
             onReconciliationRequired = { _ in }
             host = Host(
                 manual: Record(model: .idle(initial)),
@@ -531,7 +549,7 @@ nonisolated public enum ReferenceProfile {
         ) {
             self.configuration = configuration
             drivers = nil
-            completionPolicy = .manualOnConflict
+            completionPolicy = .manual
             onReconciliationRequired = { _ in }
             host = Host(
                 manual: Record(model: .idle(initial)),
@@ -548,7 +566,7 @@ nonisolated public enum ReferenceProfile {
         private init(archive: Archive, configuration: Configuration) {
             self.configuration = configuration
             drivers = nil
-            completionPolicy = .manualOnConflict
+            completionPolicy = .manual
             onReconciliationRequired = { _ in }
             host = Host(
                 manual: Record(model: archive.model, presentation: archive.presentation),
@@ -564,7 +582,7 @@ nonisolated public enum ReferenceProfile {
             _ archive: Archive,
             drivers: Drivers,
             configuration: Configuration = .default,
-            completionPolicy: CompletionConflictPolicy = .manualOnConflict,
+            completionPolicy: CompletionConflictPolicy = .manual,
             onReconciliationRequired: @escaping @Sendable (PendingCompletion) -> Void = { _ in }
         ) -> Shared {
             Shared(
@@ -660,6 +678,8 @@ nonisolated public enum ReferenceProfile {
                     switch command {
                     case .cancel(let ticket): return .cancel(ExecutionHandle(authority: ticket))
                     case .start(let work): return Self.start(work)
+                    // The profile's plans carry starts only.
+                    case .emit: preconditionFailure("The profile emits nothing.")
                     }
                 },
                 terminal: raw.terminal
@@ -698,7 +718,7 @@ nonisolated public enum ReferenceProfile {
             switch result {
             case .committed(let stamp):
                 return .committed(Receipt(snapshot: State.project(stamp, configuration: configuration)))
-            case .pending(let id, let status): return .pending(id, status)
+            case .pending(let id, let status): return .pending(PendingCompletionID(raw: id), status)
             case .inProgress: return .inProgress
             case .notPending: return .notPending
             case .stale: return .stale
@@ -718,20 +738,23 @@ nonisolated public enum ReferenceProfile {
             case nil: reason = nil
             }
             return PendingCompletion(
-                id: pending.id,
-                outcome: pending.outcome,
+                id: PendingCompletionID(raw: pending.id),
+                outcome: PendingCompletion.Outcome(pending.outcome),
                 status: pending.status,
                 lastRejection: reason,
                 attemptCount: pending.attempts,
                 attemptsSaturated: pending.attemptsSaturated
             )
         }
-        /// Retains and attempts delivery using the common managed first-envelope algorithm.
-        public func deliver(_ completion: Completion) -> DeliveryResult { project(host.deliver(completion)) }
+        // A managed owner delivers its drivers' outcomes itself. Only a driverless owner, which
+        // the package's tests drive by hand, accepts an outcome from outside.
+        package func deliver(_ completion: Completion) -> DeliveryResult { project(host.deliver(completion)) }
         /// Claims exactly one fresh preparation for a retained terminal outcome.
-        public func reconcile(id: PendingCompletionID) -> DeliveryResult { project(host.reconcile(id: id)) }
+        public func reconcile(id: PendingCompletionID) -> DeliveryResult { project(host.reconcile(id: id.raw)) }
         /// Revokes retained authority through an ordinary atomic commit.
-        public func discardPending(id: PendingCompletionID) -> DeliveryResult { project(host.discardPending(id: id)) }
+        public func discardPending(id: PendingCompletionID) -> DeliveryResult {
+            project(host.discardPending(id: id.raw))
+        }
         /// Waits for FIFO snapshot offers and launch decisions through this owner's receipt.
         public func flush(through receipt: Receipt) async -> FlushResult {
             await host.flush(through: receipt.snapshot.stamp) ? .processed : .foreignOwner
@@ -749,7 +772,7 @@ nonisolated public enum ReferenceProfile {
                     hasQueuedBatches: diagnostics.hasQueuedBatches,
                     isDraining: diagnostics.isDraining,
                     isRetrying: diagnostics.isRetrying,
-                    pending: diagnostics.pending,
+                    pending: diagnostics.pending.map(PendingCompletionID.init(raw:)),
                     outstanding: diagnostics.outstanding.map { reservation in
                         .init(
                             execution: .init(authority: reservation.ticket),
@@ -889,26 +912,6 @@ extension ReferenceProfile.Observed where Phase == ReferenceProfile.Idle {
     }
 }
 extension ReferenceProfile.Observed where Phase == ReferenceProfile.Loading {
-    /// Prepares the success edge using a sealed fetch completion.
-    public func received(
-        _ completion: ReferenceProfile.FetchSuccessCompletion
-    ) -> ReferenceProfile.Prepared {
-        var next = record
-        next.model = .loaded(ReferenceProfile.Loaded(profile: completion.value))
-        return ReferenceProfile.Prepared(
-            ReferenceProfile.Payload(stamp: stamp, record: next, action: .terminal(completion.authority))
-        )
-    }
-    /// Prepares the failure edge using a sealed fetch completion.
-    public func failed(
-        _ completion: ReferenceProfile.FetchFailureCompletion
-    ) -> ReferenceProfile.Prepared {
-        var next = record
-        next.model = .failed(ReferenceProfile.Failed(request: payload.request, failure: completion.value))
-        return ReferenceProfile.Prepared(
-            ReferenceProfile.Payload(stamp: stamp, record: next, action: .terminal(completion.authority))
-        )
-    }
     /// Prepares the declared cancellation edge.
     public func cancel() -> ReferenceProfile.Prepared {
         var next = record
@@ -965,7 +968,6 @@ extension ReferenceProfile {
         }
         deinit { storage.load().value?() }
     }
-    fileprivate typealias Identity = RuntimeIdentity
     fileprivate enum Descriptor: Sendable {
         case fetch(ProfileRequest)
         case audit(String)
@@ -1044,14 +1046,7 @@ extension ReferenceProfile {
             candidate = try! Engine.prepare(on: stamp, next: record, requiring: required, plan: plan)
         }
     }
-    fileprivate struct Subscriber: Sendable {
-        let identity: Identity
-        let mailbox: LatestMailbox<Snapshot>
-    }
     fileprivate struct State: Sendable {
-        var subscribers: [Subscriber] = []
-        var drainerScheduled = false
-        var ready = RuntimeDeliveryReadyQueue()
         let configuration: Configuration
         fileprivate var engine: Engine
         fileprivate var ledger = Ledger()
@@ -1072,7 +1067,6 @@ extension ReferenceProfile {
         }
         mutating func retryCapacity() -> [RuntimePendingID] {
             let results = ledger.retryCapacity(in: &engine)
-            ready.prune(keeping: ledger.pending.map(\.id))
             return results.compactMap { result in
                 guard case .pending(let id, _) = result,
                     ledger.pending.first(where: { $0.id == id })?.lastRejection == .admission(.conflict)
@@ -1081,7 +1075,7 @@ extension ReferenceProfile {
             }
         }
         var record: Record { engine.snapshot.model }
-        var isQuiescent: Bool { engine.isQuiescent && !drainerScheduled && ready.isIdle }
+        var isQuiescent: Bool { engine.isQuiescent }
         var hasQueuedBatches: Bool { engine.hasQueuedBatches }
         var hasTerminal: Bool { engine.snapshot.isClosed && engine.hasQueuedBatches }
         func snapshot() -> Snapshot { Self.project(engine.snapshot, configuration: configuration) }
@@ -1104,7 +1098,6 @@ extension ReferenceProfile {
             let admission = engine.commit(payload.candidate)
             if case .committed = admission {
                 ledger.prune(in: engine)
-                ready.prune(keeping: ledger.pending.map(\.id))
             }
             return project(admission)
         }
@@ -1133,7 +1126,6 @@ extension ReferenceProfile {
         mutating func close() -> Receipt {
             let receipt = Receipt(snapshot: Self.project(engine.close(), configuration: configuration))
             ledger.prune(in: engine)
-            ready.prune(keeping: [])
             return receipt
         }
         mutating func drain(limit: Int) -> [CommandBatch] {
@@ -1149,6 +1141,8 @@ extension ReferenceProfile {
                                 case .fetch(let input): .start(FetchWork(input: input, authority: work.ticket))
                                 case .audit(let input): .audit(AuditWork(input: input, authority: work.ticket))
                                 }
+                            // The profile's plans carry starts only.
+                            case .emit: preconditionFailure("The profile emits nothing.")
                             }
                         },
                         terminal: batch.terminal
@@ -1216,13 +1210,21 @@ extension ReferenceProfile.State {
             case nil: reason = nil
             }
             return ReferenceProfile.PendingCompletion(
-                id: pending.id,
-                outcome: pending.outcome,
+                id: ReferenceProfile.PendingCompletionID(raw: pending.id),
+                outcome: ReferenceProfile.PendingCompletion.Outcome(pending.outcome),
                 status: pending.status,
                 lastRejection: reason,
                 attemptCount: pending.attempts,
                 attemptsSaturated: pending.attemptsSaturated
             )
+        }
+    }
+    fileprivate func project(_ finish: ReferenceProfile.Ledger.Finish) -> ReferenceProfile.DeliveryResult {
+        switch finish {
+        case .notPending: return .notPending
+        case .pending(let id, let status): return .pending(ReferenceProfile.PendingCompletionID(raw: id), status)
+        case .committed(let stamp):
+            return .committed(.init(snapshot: Self.project(stamp, configuration: configuration)))
         }
     }
 }
@@ -1231,6 +1233,9 @@ extension ReferenceProfile.Local {
     /// Returns typed historical pending outcomes without automatic execution.
     public borrowing func pendingCompletions() -> [ReferenceProfile.PendingCompletion] { state.pendingCompletions() }
     /// Retains the first outcome and prepares it synchronously under caller ownership.
+    ///
+    /// This is the only way an operation's outcome changes the model. A later outcome for the
+    /// same work keeps the first one, which is the outcome every attempt prepares.
     public mutating func deliver(_ completion: ReferenceProfile.Completion) -> ReferenceProfile.DeliveryResult {
         let existing = state.ledger.pending.map(\.id)
         switch state.ledger.retain(completion, for: ReferenceProfile.authority(of: completion), in: &state.engine) {
@@ -1238,31 +1243,34 @@ extension ReferenceProfile.Local {
         case .foreignOwner: return .foreignOwner
         case .pending(let id):
             if existing.contains(id), let pending = state.ledger.pending.first(where: { $0.id == id }) {
-                return .pending(id, pending.status)
+                return .pending(ReferenceProfile.PendingCompletionID(raw: id), pending.status)
             }
-            return reconcile(id: id)
+            return reconcile(raw: id)
         }
     }
     /// Authorizes one fresh preparation of a retained outcome.
     public mutating func reconcile(id: ReferenceProfile.PendingCompletionID) -> ReferenceProfile.DeliveryResult {
+        reconcile(raw: id.raw)
+    }
+    private mutating func reconcile(raw id: RuntimePendingID) -> ReferenceProfile.DeliveryResult {
         switch state.ledger.claim(id, in: &state.engine) {
         case .notPending: return .notPending
         case .inProgress: return .inProgress
         case .claimed(let attempt):
             let preparation = ReferenceProfile.prepareDelivery(attempt)
-            switch state.ledger.finish(attempt, preparation: preparation, in: &state.engine) {
-            case .notPending: return .notPending
-            case .pending(let id, let status): return .pending(id, status)
-            case .committed(let stamp):
-                return .committed(
-                    .init(snapshot: ReferenceProfile.State.project(stamp, configuration: state.configuration))
-                )
-            }
+            return state.project(state.ledger.finish(attempt, preparation: preparation, in: &state.engine))
         }
+    }
+    /// Admits the candidate a retained outcome prepared while it waited for capacity.
+    ///
+    /// Nothing is prepared again, so the outcome is applied as it was first prepared. An outcome
+    /// with no saved candidate reports its current status.
+    public mutating func retryAdmission(id: ReferenceProfile.PendingCompletionID) -> ReferenceProfile.DeliveryResult {
+        state.project(state.ledger.retryAdmission(id.raw, in: &state.engine))
     }
     /// Revokes pending authority through an ordinary commit; rejection preserves the envelope.
     public mutating func discardPending(id: ReferenceProfile.PendingCompletionID) -> ReferenceProfile.DeliveryResult {
-        guard let result = state.ledger.discard(id, in: &state.engine) else { return .notPending }
+        guard let result = state.ledger.discard(id.raw, in: &state.engine) else { return .notPending }
         switch state.project(result) {
         case .committed(let receipt): return .discarded(receipt)
         case .rejected(let rejection, _): return .rejected(rejection)
@@ -1274,17 +1282,5 @@ extension ReferenceProfile.Observed where Phase == ReferenceProfile.Loading {
     /// Prepares an independent audit without replacing the active fetch epoch.
     public func audit(_ input: ReferenceProfile.Audit.Input) -> ReferenceProfile.Prepared {
         ReferenceProfile.Prepared(starting: .audit(input), stamp: stamp, record: record)
-    }
-    /// Retires only the accepted audit operation using its sealed successful outcome.
-    public func audited(_ completion: ReferenceProfile.AuditSuccessCompletion) -> ReferenceProfile.Prepared {
-        ReferenceProfile.Prepared(
-            ReferenceProfile.Payload(stamp: stamp, record: record, action: .auditTerminal(completion.authority))
-        )
-    }
-    /// Retires only the accepted audit operation using its sealed failed outcome.
-    public func auditFailed(_ completion: ReferenceProfile.AuditFailureCompletion) -> ReferenceProfile.Prepared {
-        ReferenceProfile.Prepared(
-            ReferenceProfile.Payload(stamp: stamp, record: record, action: .auditTerminal(completion.authority))
-        )
     }
 }

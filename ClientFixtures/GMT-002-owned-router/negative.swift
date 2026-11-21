@@ -5,7 +5,7 @@ nonisolated enum UniqueCounter: ~Copyable {
     struct Idle: ~Copyable { let value: Int }
     struct Done: ~Copyable { let value: Int }
     @Initial case idle(Idle)
-    case done(Done)
+    @Terminal case done(Done)
     enum Input { case finish(Bool) }
     enum Rejection: Error { case declined }
     @Transition(on: Input.finish)

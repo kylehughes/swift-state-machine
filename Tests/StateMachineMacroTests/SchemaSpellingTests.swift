@@ -6,7 +6,7 @@ nonisolated private enum QualifiedMarkers: Sendable {
     struct Idle: Sendable {}
     struct Done: Sendable {}
     @StateMachine.Initial case idle(Idle)
-    case done(Done)
+    @Terminal case done(Done)
     enum Input: Sendable { case finish }
     @StateMachine.Transition(on: Input.finish)
     fileprivate static func finish(_ source: Idle) -> Done { Done() }
@@ -41,9 +41,12 @@ nonisolated private enum QualifiedNever: Sendable {
     struct Busy: Sendable {}
     @Initial case idle(Idle)
     case busy(Busy)
-    enum Scope { case work }
+    enum Scope {
+        @Active(in: [Busy.self])
+        case work
+    }
     enum Input: Sendable { case go }
-    @Operation(scope: Scope.work, activeIn: [Busy.self], admission: .latest)
+    @Operation(scope: Scope.work, admission: .latest)
     enum Work {
         typealias Input = Int
         typealias Output = Int
@@ -63,7 +66,7 @@ nonisolated private enum FullyQualified: Sendable {
     struct Done: Sendable { let value: Int }
     @StateMachine.Initial case idle(Idle = Idle())
     case busy(Busy)
-    case done(Done)
+    @Terminal case done(Done)
     enum Input: Sendable { case go(Int) }
     enum Refusal: Error, Sendable { case negative }
     @StateMachine.Operation(activeIn: [Busy.self])

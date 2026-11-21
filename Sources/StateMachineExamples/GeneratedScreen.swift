@@ -4,10 +4,13 @@ import StateMachine
 ///
 /// Delivering a reading and calling `screen` on an owned `Ready` both run the router `screen`, so
 /// neither can record a negative reading through `accept`.
+///
+/// The schema lists `Equatable`, so its effects compare in another module: an owned `take()` returns
+/// effects equal to `[.measure]`.
 @StateMachine(mode: .shared)
-nonisolated public enum GeneratedScreen: Sendable {
+nonisolated public enum GeneratedScreen: Sendable, Equatable {
     /// The readings accepted so far.
-    public struct Ready: Sendable {
+    public struct Ready: Sendable, Equatable {
         /// Accepted readings in arrival order.
         public let readings: [Int]
         /// Creates ordinary reading data.
@@ -18,18 +21,16 @@ nonisolated public enum GeneratedScreen: Sendable {
     public enum Input: Sendable { case measure }
     /// Why the router declined a reading.
     public enum Refusal: Error, Sendable { case negative }
-    /// Takes one reading; it cannot fail.
+    /// Takes one reading; it takes no input and cannot fail.
     @Operation(activeIn: [Ready.self])
     public enum Measure {
-        /// The operation takes no input.
-        public typealias Input = Void
         /// The reading.
         public typealias Output = Int
     }
     /// Starts a reading.
     @Transition(on: Input.measure, starts: [Measure.self])
     fileprivate static func take(_ source: Ready) -> Change<Ready, Effect.Take> {
-        Change(source, effects: [.measure(())])
+        Change(source, effects: [.measure])
     }
     /// Records an accepted reading.
     @Transition(onSuccess: Measure.self)

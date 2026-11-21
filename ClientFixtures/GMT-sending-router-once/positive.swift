@@ -1,0 +1,23 @@
+// The router takes the request as sending and no edge it selects takes it, so the request is transferred once.
+import StateMachine
+
+nonisolated public final class Item { public var value = 0; public init() {} }
+
+@StateMachine(mode: .isolated, owners: [.owned])
+nonisolated enum Tray {
+    struct Idle {}
+    struct Running {}
+    @Initial case idle(Idle)
+    case running(Running)
+    enum Input { case go(Item) }
+    @Operation(activeIn: [Running.self])
+    enum Load { typealias Input = Item }
+    @Transition(on: Input.go, starts: [Load.self])
+    fileprivate static func go(_ source: Idle, _ input: Item) -> Change<Running, Effect.Go> { Change(Running(), effects: [.load(input)]) }
+    @Route(onSuccess: Load.self)
+    fileprivate static func pick(_ source: Running, request: sending LoadRequest) -> Route.Pick { .left }
+    @Transition(onSuccess: Load.self)
+    fileprivate static func left(_ source: Running) -> Idle { Idle() }
+    @Transition(onSuccess: Load.self)
+    fileprivate static func right(_ source: Running) -> Running { Running() }
+}

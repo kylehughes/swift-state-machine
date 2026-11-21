@@ -4,7 +4,8 @@ The default runtime is iOS 17.5. Pass --runtime and a compatible --device-type t
 another installed runtime; the app must report the selected runtime's version.
 
 The app writes Documents/result.json with a status, systemVersion, and named
-checks. Every expected check must pass. The helper always deletes its own device.
+checks. Every expected check must pass; EXPECTED_CHECKS lists those of the default
+app source. The helper always deletes its own device.
 """
 import argparse
 import hashlib
@@ -16,6 +17,14 @@ import subprocess
 import time
 
 from platform_build import macro_plugins, platform_arguments, runtime_targets, target_modules, validate_outputs
+
+# Every check that Probes/iOSSmoke/Smoke.swift reports, in the order it runs them.
+EXPECTED_CHECKS = [
+    "UI-SAME-TURN", "NETWORK-FAILURE-RETRY", "NETWORK-SUCCESS", "NETWORK-CANCEL-LATE", "ACCOUNT-INVALIDATION",
+    "TEARDOWN", "ISOLATED-EDITOR", "ACTOR-LOCAL", "PERSISTENCE", "SUBSCRIPTION-TERMINAL", "SNAPSHOT-SEQUENCE",
+    "OWNED-RESOURCE", "KEYED-OPERATION", "EVENT-HANDLER", "RESET", "GRAPH-MERMAID", "ISOLATED-HOST",
+    "SNAPSHOT-PUBLISHER", "DISTINCT-SNAPSHOTS", "TESTING-MANUAL-COVERAGE", "OBSERVATION-MAINACTOR-HOST",
+]
 
 
 def digest(path):
@@ -71,7 +80,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="Absent directory for the complete evidence")
     parser.add_argument("--source", type=Path, default=Path("Probes/iOSSmoke/Smoke.swift"))
-    parser.add_argument("--expect", nargs="+", required=True, help="Exact individual check identifiers")
+    parser.add_argument("--expect", nargs="+", default=EXPECTED_CHECKS,
+                        help="Exact individual check identifiers; defaults to every check of the default app")
     parser.add_argument("--configuration", choices=["debug", "release"], default="release")
     parser.add_argument("--scratch-path", type=Path, help="SwiftPM build directory; the package is built before using its outputs")
     parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.iOS-17-5")

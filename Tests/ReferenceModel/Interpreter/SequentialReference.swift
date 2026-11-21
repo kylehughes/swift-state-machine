@@ -96,7 +96,7 @@ enum ReferenceOutcome: Equatable, Sendable {
     case success(Int)
     case failure(Int)
 }
-enum ReferenceDeliveryPolicy: Sendable { case manualOnConflict, retryPure }
+enum ReferenceDeliveryPolicy: Sendable { case manual, retry }
 enum ReferencePendingStatus: Equatable, Sendable {
     case awaitingAdmission, preparing, waitingForCapacity, retryScheduled, reconciliationRequired
 }
@@ -111,7 +111,7 @@ struct ReferenceConfiguration: Sendable {
         descriptors: Int = 64,
         reservations: Int = 256,
         subscribers: Int = 128,
-        delivery: ReferenceDeliveryPolicy = .manualOnConflict
+        delivery: ReferenceDeliveryPolicy = .manual
     ) {
         precondition(queue > 0 && descriptors > 0 && reservations > 0 && subscribers > 0)
         self.queue = queue
@@ -123,7 +123,8 @@ struct ReferenceConfiguration: Sendable {
 }
 struct ReferenceBatch: Equatable, Sendable {
     let snapshot: ReferenceSnapshot
-    let revoked: [UInt64]
+    /// The revoked operations the batch cancels: all but retired work whose outcome was retained.
+    let cancelled: [UInt64]
     let starts: [ReferenceTicket]
     let terminal: Bool
 }
@@ -144,6 +145,8 @@ struct ReferencePending: Equatable, Sendable {
     var attemptsSaturated = false
     var claim: UInt64?
     var candidate: ReferenceCandidate?
+    /// Delivery turns that spent their whole preparation budget on conflicts.
+    var conflictTurns = 0
 }
 struct ReferenceAttempt: Equatable, Sendable {
     let operation: UInt64
@@ -377,13 +380,18 @@ struct SequentialReference: Sendable {
             remaining.append(ticket)
             nextReservations.append(.init(ticket: ticket))
         }
+        // Retiring work whose outcome is retained settles what it already returned, so the batch
+        // cancels only the rest of the revoked work.
+        let cancelled = revoked.filter { operation in
+            !plan.retires.contains(operation) || !pending.contains { $0.ticket.operation == operation }
+        }
         active = remaining
         reservations = nextReservations
         pending.removeAll { revoked.contains($0.ticket.operation) }
         ready.removeAll { revoked.contains($0) }
         root = candidate.next
         revision += 1
-        batches.append(.init(snapshot: snapshot, revoked: revoked, starts: starts, terminal: false))
+        batches.append(.init(snapshot: snapshot, cancelled: cancelled, starts: starts, terminal: false))
         drainerScheduled = true
         return .committed(snapshot)
     }
@@ -402,7 +410,7 @@ struct SequentialReference: Sendable {
         ready.removeAll()
         for index in reservations.indices { reservations[index].deliverySettled = true }
         reap()
-        terminal = .init(snapshot: snapshot, revoked: revoked, starts: [], terminal: true)
+        terminal = .init(snapshot: snapshot, cancelled: revoked, starts: [], terminal: true)
         drainerScheduled = true
         return snapshot
     }
@@ -442,7 +450,7 @@ struct SequentialReference: Sendable {
     }
     mutating func process(_ batch: ReferenceBatch) {
         guard inFlight == batch else { return }
-        for operation in batch.revoked {
+        for operation in batch.cancelled {
             if let index = reservations.firstIndex(where: { $0.ticket.operation == operation }),
                 reservations[index].execution == .running
             {
@@ -552,9 +560,15 @@ struct SequentialReference: Sendable {
         }
         reap()
     }
+    /// Finishes one claimed preparation.
+    ///
+    /// Only an `automatic` attempt, which a delivery or a scheduled turn makes, schedules another
+    /// after losing a conflict under the retry policy. An explicit reconciliation that loses one
+    /// leaves the outcome for another explicit decision.
     mutating func finishAttempt(
         _ attempt: ReferenceAttempt,
-        preparation: Result<ReferenceCandidate, ReferenceRejection>
+        preparation: Result<ReferenceCandidate, ReferenceRejection>,
+        automatic: Bool = false
     ) -> ReferenceDelivery {
         guard
             let index = pending.firstIndex(where: {
@@ -573,13 +587,14 @@ struct SequentialReference: Sendable {
         case .success(let candidate):
             let result = commit(candidate, acknowledging: attempt.identity)
             exitClaim(attempt)
-            return record(result, operation: attempt.operation, candidate: candidate)
+            return record(result, operation: attempt.operation, candidate: candidate, automatic: automatic)
         }
     }
     private mutating func record(
         _ result: ReferenceAdmission,
         operation: UInt64,
-        candidate: ReferenceCandidate
+        candidate: ReferenceCandidate,
+        automatic: Bool
     ) -> ReferenceDelivery {
         switch result {
         case .committed(let receipt): return .committed(receipt)
@@ -601,8 +616,9 @@ struct SequentialReference: Sendable {
                 pending[index].status = .waitingForCapacity
             case .conflict:
                 pending[index].candidate = nil
-                pending[index].status = configuration.delivery == .retryPure ? .retryScheduled : .reconciliationRequired
-                if configuration.delivery == .retryPure && !ready.contains(operation) { ready.append(operation) }
+                let retries = automatic && configuration.delivery == .retry
+                pending[index].status = retries ? .retryScheduled : .reconciliationRequired
+                if retries && !ready.contains(operation) { ready.append(operation) }
             default:
                 pending[index].candidate = nil
                 pending[index].status = .reconciliationRequired
@@ -626,13 +642,19 @@ struct SequentialReference: Sendable {
             let candidate = current.candidate
         else { return .notPending }
         guard current.claim == nil else { return .inProgress }
-        return record(commit(candidate), operation: operation, candidate: candidate)
+        // A managed host retries capacity on its own, so a conflict it finds follows the automatic policy.
+        return record(commit(candidate), operation: operation, candidate: candidate, automatic: true)
     }
+    /// How many delivery turns, counting the first, one retained outcome may spend on conflicts.
+    ///
+    /// A turn that spends its whole budget on conflicts schedules another until this many have been
+    /// spent. After the last, the outcome waits for explicit reconciliation.
+    static let conflictTurnLimit = 16
     /// Explicit interference values describe commits between preparation and admission.
     ///
     /// No time, random source, effect, or mutable external dependency is reevaluated.
     mutating func deliveryTurn(_ operation: UInt64, interference: [Input] = []) -> ReferenceDelivery {
-        let budget = configuration.delivery == .retryPure ? 4 : 1
+        let budget = configuration.delivery == .retry ? 4 : 1
         ready.removeAll { $0 == operation }
         var result = ReferenceDelivery.notPending
         for attemptIndex in 0 ..< budget {
@@ -649,11 +671,18 @@ struct SequentialReference: Sendable {
                 if interference.indices.contains(attemptIndex), let edit = try? prepare(interference[attemptIndex]) {
                     _ = commit(edit)
                 }
-                result = finishAttempt(attempt, preparation: preparation)
+                result = finishAttempt(attempt, preparation: preparation, automatic: true)
                 guard case .pending(_, .retryScheduled) = result else { return result }
             }
         }
-        return result
+        guard case .pending(_, .retryScheduled) = result,
+            let index = pending.firstIndex(where: { $0.ticket.operation == operation })
+        else { return result }
+        pending[index].conflictTurns += 1
+        guard pending[index].conflictTurns >= Self.conflictTurnLimit else { return result }
+        pending[index].status = .reconciliationRequired
+        ready.removeAll { $0 == operation }
+        return .pending(operation, .reconciliationRequired)
     }
     /// One rotating ready round.
     ///

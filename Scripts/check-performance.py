@@ -267,7 +267,8 @@ def main():
             evidence.run('environment/' + name, command, timeout=120, allow_failure=name == 'git-head')
         status['candidateIdentity'] = 'Used-source SHA-256 map; git HEAD is supplementary and may be absent in this uncommitted checkout.'
         sdk = evidence.run('environment/sdk', ['xcrun', '--sdk', 'macosx', '--show-sdk-path'], timeout=120).strip()
-        manifest = json.loads(evidence.run('environment/package', ['swift', 'package', 'dump-package'], timeout=120))
+        manifest_scratch = args.scratch_path.resolve() if args.scratch_path else (args.build_root.resolve().parent.parent if args.build_root else output / 'swiftpm')
+        manifest = json.loads(evidence.run('environment/package', ['swift', 'package', '--scratch-path', manifest_scratch, 'dump-package'], timeout=120))
         if args.reuse_build_root:
             build_root = args.reuse_build_root.resolve()
             status['limitations'].append('Development reuse: shipping source/object identity is not established by a fresh package build.')

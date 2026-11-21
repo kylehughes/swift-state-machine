@@ -29,6 +29,30 @@ nonisolated public struct RuntimeScopeID: Equatable, Sendable {
     }
 }
 
+/// A domain instance key that names one keyed operation's work, such as an item identifier.
+///
+/// Preparation hashes and compares keys against an observation's key table, outside every lock, and
+/// resolves each to a retained engine identity. Admission then compares identities only. A key that
+/// no active work holds leaves the table, so inserting it again resolves to a fresh identity.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
+nonisolated public struct RuntimeKey: Sendable {
+    private let value: any Hashable & Sendable
+    private let hash: Int
+    /// Captures a key and its hash value.
+    public init<Key: Hashable & Sendable>(_ key: Key) {
+        value = key
+        hash = key.hashValue
+    }
+    /// Whether two keys are equal, comparing their hash values first.
+    func matches(_ other: RuntimeKey) -> Bool {
+        hash == other.hash && Self.equal(value, other.value)
+    }
+    private static func equal<Value: Hashable & Sendable>(_ value: Value, _ other: any Hashable & Sendable) -> Bool {
+        (other as? Value) == value
+    }
+}
+
 /// Schema-declared active-authority admission policy.
 ///
 /// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
@@ -110,6 +134,8 @@ nonisolated public struct RuntimeTicket: Equatable, Sendable {
     fileprivate let operation: RuntimeIdentity
     fileprivate let kind: UInt32
     fileprivate let bindings: [Binding]
+    /// The resolved identity of a keyed operation's key, or `nil` for an unkeyed operation.
+    fileprivate let key: RuntimeIdentity?
     /// Compares only retained owner, incarnation, and operation identity.
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.owner === rhs.owner && lhs.incarnation === rhs.incarnation && lhs.operation === rhs.operation
@@ -158,6 +184,12 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         let key: RuntimeScopeID
         let activation: RuntimeIdentity
     }
+    /// One key that active work of a keyed operation holds, and the identity it resolves to.
+    fileprivate struct KeyEntry: Sendable {
+        let kind: UInt32
+        let key: RuntimeKey
+        let identity: RuntimeIdentity
+    }
     /// A retained historical record and its raw validation context.
     public struct Snapshot {
         /// The historical immutable domain record.
@@ -166,10 +198,14 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         public let revision: UInt64
         /// Whether admission has permanently ended.
         public let isClosed: Bool
+        /// The identifier of the graph edge whose acceptance produced this root, or `nil` for the
+        /// initial root, a reset, closure, or a change that takes no declared edge.
+        public let edge: String?
         fileprivate let owner: RuntimeIdentity
         fileprivate let incarnation: RuntimeIdentity
         fileprivate let revisionIdentity: RuntimeIdentity
         fileprivate let scopes: [Scope]
+        fileprivate let keys: [KeyEntry]
         fileprivate let limits: Limits
     }
     /// A scope lifecycle edit, including fresh activation after reinsertion.
@@ -185,41 +221,109 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         public let operation: RuntimeOperation
         /// The inert descriptor.
         public let descriptor: Descriptor
+        /// The instance key of a keyed operation, which admission applies its policy to.
+        public let key: RuntimeKey?
         /// Creates a description without starting work.
-        public init(_ operation: RuntimeOperation, descriptor: Descriptor) {
+        public init(_ operation: RuntimeOperation, descriptor: Descriptor, key: RuntimeKey? = nil) {
             self.operation = operation
             self.descriptor = descriptor
+            self.key = key
         }
     }
-    /// The complete authority changes and ordered starts of one candidate.
+    /// A request to revoke a keyed operation's work: one key's, or with no key, all of it.
+    public struct Cancellation: Sendable {
+        /// The generated operation-kind tag.
+        public let kind: UInt32
+        /// The key whose work to revoke, or `nil` to revoke every key's.
+        public let key: RuntimeKey?
+        /// Describes a cancellation; a key that no active work holds cancels nothing.
+        public init(kind: UInt32, key: RuntimeKey?) {
+            self.kind = kind
+            self.key = key
+        }
+    }
+    /// A cancellation whose key preparation resolved to the identity active work holds.
+    fileprivate struct ResolvedCancellation: Sendable {
+        let kind: UInt32
+        /// The resolved key identity, or `nil` for every key of the kind.
+        let key: RuntimeIdentity?
+        func revokes(_ ticket: RuntimeTicket) -> Bool {
+            ticket.kind == kind && (key == nil || ticket.key === key)
+        }
+    }
+    /// A typed inert emission, published in its acceptance's batch and never executed.
+    public struct Emission {
+        /// The inert descriptor.
+        public let descriptor: Descriptor
+        /// How many of the plan's starts precede it in authored order.
+        public let position: Int
+        /// Creates an emission that follows the first `position` starts of its plan.
+        public init(_ descriptor: Descriptor, position: Int) {
+            self.descriptor = descriptor
+            self.position = position
+        }
+    }
+    /// The complete authority changes, ordered starts, and ordered emissions of one candidate.
     public struct Plan {
         /// Scope changes in generated order.
         public let scopes: [ScopeEdit]
         /// Accepted-only terminal retirements.
+        ///
+        /// Retiring an operation whose outcome is retained settles the result its work already
+        /// returned, so the batch queues no cancellation for that ticket. Retiring an operation with no
+        /// retained outcome revokes work that may still be running, and the batch cancels it. Only the
+        /// ticket a plan retires is spared: work the same plan revokes otherwise, and every ticket a
+        /// reset or closure revokes, is cancelled whether or not its outcome is retained.
         public let retire: [RuntimeTicket]
+        /// Keyed revocations, applied before the starts.
+        public let cancellations: [Cancellation]
         /// Starts in authored order.
         public let starts: [Start]
+        /// Emissions in authored order, each placed among the starts by its position.
+        public let emissions: [Emission]
         /// Whether to create a fresh owner incarnation.
         public let reset: Bool
         /// Explicit compact control descriptors, excluding implicit phase lifecycle edits.
         public let controlCount: Int
         /// The admitting preparation's completed attempt, acknowledged only on acceptance.
         public let finishingClaims: [RuntimeDeliveryClaim]
+        /// The identifier of the graph edge that produced the plan, which the accepted snapshot records,
+        /// or `nil` for a change that takes no declared edge.
+        public let edge: String?
         /// Creates an inert plan; `prepare` validates it before a candidate exists.
         public init(
             scopes: [ScopeEdit] = [],
             retire: [RuntimeTicket] = [],
+            cancellations: [Cancellation] = [],
             starts: [Start] = [],
+            emissions: [Emission] = [],
             reset: Bool = false,
             controlCount: Int = 0,
-            finishingClaims: [RuntimeDeliveryClaim] = []
+            finishingClaims: [RuntimeDeliveryClaim] = [],
+            edge: String? = nil
         ) {
+            self.edge = edge
             self.scopes = scopes
             self.retire = retire
+            self.cancellations = cancellations
             self.starts = starts
+            self.emissions = emissions
             self.reset = reset
             self.controlCount = controlCount
             self.finishingClaims = finishingClaims
+        }
+        fileprivate func finishing(_ claims: [RuntimeDeliveryClaim]) -> Plan {
+            Plan(
+                scopes: scopes,
+                retire: retire,
+                cancellations: cancellations,
+                starts: starts,
+                emissions: emissions,
+                reset: reset,
+                controlCount: controlCount,
+                finishingClaims: claims,
+                edge: edge
+            )
         }
     }
     /// An immutable candidate; raw clients can prepare only against a captured snapshot.
@@ -230,42 +334,32 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         fileprivate let plan: Plan
         fileprivate let scopes: [Scope]
         fileprivate let incarnation: RuntimeIdentity
-        // Delivery must retire its own terminal authority. The ledger owns the
-        // attempt acknowledgment; an authored candidate cannot finish another claim.
-        func validatedForDelivery(_ claim: RuntimeDeliveryClaim) -> Candidate? {
-            guard required.contains(claim.ticket), plan.retire.contains(claim.ticket) else { return nil }
-            return Candidate(
-                expected: expected,
-                model: model,
-                required: required,
-                plan: Plan(
-                    scopes: plan.scopes,
-                    retire: plan.retire,
-                    starts: plan.starts,
-                    reset: plan.reset,
-                    controlCount: plan.controlCount,
-                    finishingClaims: [claim]
-                ),
-                scopes: scopes,
-                incarnation: incarnation
-            )
-        }
-        func withoutFinishingClaims() -> Candidate {
+        /// The key table after preparation resolved the plan's keys against the expected one.
+        fileprivate let keys: [KeyEntry]
+        /// The resolved key identity of each start, in the plan's order.
+        fileprivate let startKeys: [RuntimeIdentity?]
+        /// The cancellations whose keys active work held when the plan was prepared.
+        fileprivate let cancellations: [ResolvedCancellation]
+        fileprivate func with(_ plan: Plan) -> Candidate {
             Candidate(
                 expected: expected,
                 model: model,
                 required: required,
-                plan: Plan(
-                    scopes: plan.scopes,
-                    retire: plan.retire,
-                    starts: plan.starts,
-                    reset: plan.reset,
-                    controlCount: plan.controlCount
-                ),
+                plan: plan,
                 scopes: scopes,
-                incarnation: incarnation
+                incarnation: incarnation,
+                keys: keys,
+                startKeys: startKeys,
+                cancellations: cancellations
             )
         }
+        // Delivery must retire its own terminal authority. The ledger owns the
+        // attempt acknowledgment; an authored candidate cannot finish another claim.
+        func validatedForDelivery(_ claim: RuntimeDeliveryClaim) -> Candidate? {
+            guard required.contains(claim.ticket), plan.retire.contains(claim.ticket) else { return nil }
+            return with(plan.finishing([claim]))
+        }
+        func withoutFinishingClaims() -> Candidate { with(plan.finishing([])) }
     }
     /// Admission rejection reasons; `commit(_:)` reports them in declaration order.
     ///
@@ -304,8 +398,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         /// Every acceptance and the terminal batch, for an owner that publishes each acceptance
         /// from its queue.
         case everyAcceptance
-        /// Only acceptances that cancel or start work, and the terminal batch, for a manual owner
-        /// whose caller receives every other receipt from the commit itself.
+        /// Only acceptances that cancel or start work or emit, and the terminal batch, for a manual
+        /// owner whose caller receives every other receipt from the commit itself.
         case commands
     }
     /// Historical acceptance or a rejection with coherent current observation.
@@ -321,12 +415,14 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         case cancel(RuntimeTicket)
         /// Consider this start against live authority before physical registration.
         case start(RuntimeWork<Descriptor>)
+        /// Publish this inert emission; it carries no authority and starts nothing.
+        case emit(Descriptor)
     }
     /// A whole FIFO receipt and its commands.
     public struct Batch {
         /// The historical accepted record.
         public let snapshot: Snapshot
-        /// Commands in deterministic cancellation-then-authored-start order.
+        /// Cancellations, then starts and emissions in authored order.
         public let commands: [Command]
         /// Whether this uses the separately reserved lifecycle slot.
         public let terminal: Bool
@@ -344,8 +440,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     package struct ReservationSnapshot: Sendable {
         /// The exact raw operation identity.
         package let ticket: RuntimeTicket
-        /// Known execution disposition.
-        package let execution: ShutdownDiagnostics.ExecutionDisposition
+        /// Known execution state.
+        package let execution: ShutdownDiagnostics.ExecutionState
         /// Retained delivery disposition.
         package let delivery: ShutdownDiagnostics.DeliveryDisposition
         /// Whether client preparation still owns an attempt claim.
@@ -366,7 +462,7 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     }
     private struct Reservation: Sendable {
         let ticket: RuntimeTicket
-        var execution: ShutdownDiagnostics.ExecutionDisposition = .queued
+        var execution: ShutdownDiagnostics.ExecutionState = .queued
         var delivery: ShutdownDiagnostics.DeliveryDisposition = .awaitingOutcome
         var claim: RuntimeIdentity?
         var releasable: Bool {
@@ -381,10 +477,13 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     private var incarnation = RuntimeIdentity()
     private var revisionIdentity = RuntimeIdentity()
     private var revision: UInt64 = 0
+    /// The graph edge of the acceptance that produced the current root.
+    private var edge: String?
     private var model: Model
     private var closed = false
     private let limits: Limits
     private var scopes: [Scope]
+    private var keys: [KeyEntry] = []
     private var active: [RuntimeTicket] = []
     private var reservations: [Reservation] = []
     private var queue: [Batch] = []
@@ -394,8 +493,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
 
     /// Creates independent raw ownership with fresh initial scope activations.
     ///
-    /// With `.commands` recording, an acceptance that cancels and starts nothing queues no batch and
-    /// takes no queue slot, so a run of such acceptances never waits for a drain.
+    /// With `.commands` recording, an acceptance that cancels, starts, and emits nothing queues no
+    /// batch and takes no queue slot, so a run of such acceptances never waits for a drain.
     public init(
         _ model: Model,
         scopes: [RuntimeScopeID] = [],
@@ -405,11 +504,36 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         self.model = model
         self.limits = limits
         self.recording = recording
-        var initial: [Scope] = []
-        for key in scopes where !initial.contains(where: { $0.key == key }) {
-            initial.append(Scope(key: key, activation: RuntimeIdentity()))
+        var examined = 0
+        self.scopes = Self.distinctScopeKeys(scopes, examined: &examined)
+            .map {
+                Scope(key: $0, activation: RuntimeIdentity())
+            }
+    }
+
+    /// The scope keys of `keys` in order, each once, as its first occurrence places it.
+    ///
+    /// It examines each key once against the keys already kept, through a set of their primitive
+    /// identities, so activating many scopes costs work linear in their number; `examined` counts the
+    /// examinations, which tests read as that work.
+    package static func distinctScopeKeys(_ keys: [RuntimeScopeID], examined: inout Int) -> [RuntimeScopeID] {
+        var seen = Set<SeenScope>()
+        var distinct: [RuntimeScopeID] = []
+        for key in keys {
+            examined += 1
+            if seen.insert(SeenScope(key)).inserted { distinct.append(key) }
         }
-        self.scopes = initial
+        return distinct
+    }
+    /// A scope key's primitive identity: its kind and the identity of its instance marker, which the
+    /// key retains while it is compared.
+    private struct SeenScope: Hashable {
+        let kind: UInt32
+        let instance: ObjectIdentifier?
+        init(_ key: RuntimeScopeID) {
+            kind = key.kind
+            instance = key.instance.map(ObjectIdentifier.init)
+        }
     }
 
     /// The current immutable record and retained validation identities.
@@ -418,10 +542,12 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             model: model,
             revision: revision,
             isClosed: closed,
+            edge: edge,
             owner: owner,
             incarnation: incarnation,
             revisionIdentity: revisionIdentity,
             scopes: scopes,
+            keys: keys,
             limits: limits
         )
     }
@@ -429,6 +555,8 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
     public func owns(_ snapshot: Snapshot) -> Bool { snapshot.owner === owner }
     /// Whether ordinary or terminal FIFO output remains queued.
     public var hasQueuedBatches: Bool { !queue.isEmpty || terminal != nil }
+    /// How many whole batches a drain would transfer, including the terminal batch.
+    public var queuedBatchCount: Int { queue.count + (terminal == nil ? 0 : 1) }
     /// Whether closure, FIFO transfer, and all execution/delivery obligations have settled.
     public var isQuiescent: Bool { closed && !hasQueuedBatches && reservations.isEmpty }
 
@@ -453,9 +581,17 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         requiring required: [RuntimeTicket] = [],
         plan: Plan = Plan()
     ) throws(PlanRejection) -> Candidate {
-        guard plan.controlCount >= 0 else { throw .invalidPlan }
-        guard plan.starts.count <= expected.limits.descriptors,
-            plan.controlCount <= expected.limits.descriptors - plan.starts.count,
+        guard plan.controlCount >= 0,
+            plan.emissions.enumerated()
+                .allSatisfy({ index, emission in
+                    emission.position >= 0 && emission.position <= plan.starts.count
+                        && (index == 0 || plan.emissions[index - 1].position <= emission.position)
+                })
+        else { throw .invalidPlan }
+        let descriptors = plan.starts.count + plan.emissions.count
+        // Each cancellation is one compact control descriptor, like an explicit invalidation.
+        guard descriptors <= expected.limits.descriptors,
+            plan.controlCount <= expected.limits.descriptors - descriptors - plan.cancellations.count,
             plan.starts.count <= expected.limits.executions
         else { throw .planTooLarge }
         let incarnation = plan.reset ? RuntimeIdentity() : expected.incarnation
@@ -472,17 +608,55 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             scopes.removeAll { $0.key == key }
             if case .activate = edit { scopes.append(Scope(key: key, activation: RuntimeIdentity())) }
         }
+        // Keys are hashed and compared here, outside every lock, against the observed key table.
+        // Cancellations resolve first, so a key cancelled and started in one plan gets a fresh identity.
+        var keys = plan.reset ? [] : expected.keys
+        var cancellations: [ResolvedCancellation] = []
+        for cancellation in plan.cancellations {
+            guard let key = cancellation.key else {
+                cancellations.append(ResolvedCancellation(kind: cancellation.kind, key: nil))
+                keys.removeAll { $0.kind == cancellation.kind }
+                continue
+            }
+            guard let index = keys.firstIndex(where: { $0.kind == cancellation.kind && $0.key.matches(key) }) else {
+                continue
+            }
+            cancellations.append(ResolvedCancellation(kind: cancellation.kind, key: keys[index].identity))
+            keys.remove(at: index)
+        }
+        var startKeys: [RuntimeIdentity?] = []
+        for start in plan.starts {
+            guard let key = start.key else {
+                startKeys.append(nil)
+                continue
+            }
+            if let entry = keys.first(where: { $0.kind == start.operation.kind && $0.key.matches(key) }) {
+                startKeys.append(entry.identity)
+            } else {
+                let entry = KeyEntry(kind: start.operation.kind, key: key, identity: RuntimeIdentity())
+                keys.append(entry)
+                startKeys.append(entry.identity)
+            }
+        }
         for (index, start) in plan.starts.enumerated() {
             guard scopes.contains(where: { $0.key == start.operation.scope }),
                 start.operation.dependencies.allSatisfy({ key in scopes.contains { $0.key == key } })
             else { throw .invalidPlan }
             if case .parallel(let count) = start.operation.policy, count <= 0 { throw .invalidPlan }
-            for previous in plan.starts.prefix(index)
-            where previous.operation.scope == start.operation.scope && previous.operation.kind == start.operation.kind {
+            var group = 1
+            for (offset, previous) in plan.starts.prefix(index).enumerated()
+            where previous.operation.scope == start.operation.scope && previous.operation.kind == start.operation.kind
+                && startKeys[offset] === startKeys[index]
+            {
                 guard case .parallel = start.operation.policy, previous.operation.policy == start.operation.policy
                 else {
                     throw .invalidPlan
                 }
+                group += 1
+            }
+            // A keyed operation's policy applies per key, so one key's starts in a plan stay within its limit.
+            if start.key != nil, case .parallel(let limit) = start.operation.policy, group > limit {
+                throw .invalidPlan
             }
         }
         return Candidate(
@@ -491,8 +665,16 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
             required: required,
             plan: plan,
             scopes: scopes,
-            incarnation: incarnation
+            incarnation: incarnation,
+            keys: keys,
+            startKeys: startKeys,
+            cancellations: cancellations
         )
+    }
+
+    /// The identity that active work of the operation kind `kind` holds for `key`, or `nil` when none does.
+    package func keyIdentity(kind: UInt32, key: RuntimeKey) -> RuntimeIdentity? {
+        keys.first { $0.kind == kind && $0.key.matches(key) }?.identity
     }
 
     /// Checks current operation authority independently of the starting root revision.
@@ -527,13 +709,14 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         var remaining = active.filter { ticket in
             !plan.reset && Self.bindingsValid(ticket, scopes: candidate.scopes)
                 && !plan.retire.contains { $0.operation === ticket.operation }
+                && !candidate.cancellations.contains { $0.revokes(ticket) }
         }
         var works: [RuntimeWork<Descriptor>] = []
-        for start in plan.starts {
-            // Preparation established every binding; generated tables use primitive keys only.
+        for (start, key) in zip(plan.starts, candidate.startKeys) {
+            // Preparation established every binding and resolved every key; admission compares identities only.
             let scope = candidate.scopes.first { $0.key == start.operation.scope }!
             let group = remaining.filter {
-                $0.kind == start.operation.kind && $0.bindings.first?.activation === scope.activation
+                $0.kind == start.operation.kind && $0.bindings.first?.activation === scope.activation && $0.key === key
             }
             switch start.operation.policy {
             case .latest:
@@ -553,15 +736,22 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
                 incarnation: candidate.incarnation,
                 operation: RuntimeIdentity(),
                 kind: start.operation.kind,
-                bindings: bindings
+                bindings: bindings,
+                key: key
             )
             remaining.append(ticket)
             works.append(RuntimeWork(descriptor: start.descriptor, ticket: ticket))
         }
         if revision == UInt64.max - 1 { return reject(.revisionExhausted) }
         let revoked = active.filter { ticket in !remaining.contains { $0.operation === ticket.operation } }
+        // Retiring work whose outcome is retained settles what that work already returned, so it gets no
+        // cancellation; it keeps its execution reservation until its termination is acknowledged.
+        let cancelled = revoked.filter { ticket in
+            !plan.retire.contains { $0.operation === ticket.operation }
+                || !reservations.contains { $0.ticket.operation === ticket.operation && $0.delivery == .pending }
+        }
         // A commandless acceptance under `.commands` recording queues nothing, so it needs no slot.
-        let queues = recording == .everyAcceptance || !revoked.isEmpty || !works.isEmpty
+        let queues = recording == .everyAcceptance || !cancelled.isEmpty || !works.isEmpty || !plan.emissions.isEmpty
         if queues, queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
         var prospective = reservations
         for index in prospective.indices
@@ -582,18 +772,25 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         scopes = candidate.scopes
         incarnation = candidate.incarnation
         active = remaining
+        // A key that no remaining work holds leaves the table; inserting it again mints a fresh identity.
+        keys = candidate.keys.filter { entry in remaining.contains { $0.key === entry.identity } }
         reservations = prospective
         revision += 1
         revisionIdentity = RuntimeIdentity()
+        edge = plan.edge
         let accepted = snapshot
         if queues {
-            queue.append(
-                Batch(
-                    snapshot: accepted,
-                    commands: revoked.map { .cancel($0) } + works.map { .start($0) },
-                    terminal: false
-                )
-            )
+            var commands = cancelled.map { Command.cancel($0) }
+            var emissions = plan.emissions[...]
+            for (index, work) in works.enumerated() {
+                while let emission = emissions.first, emission.position == index {
+                    commands.append(.emit(emission.descriptor))
+                    emissions.removeFirst()
+                }
+                commands.append(.start(work))
+            }
+            commands += emissions.map { .emit($0.descriptor) }
+            queue.append(Batch(snapshot: accepted, commands: commands, terminal: false))
         }
         return .committed(accepted)
     }
@@ -606,13 +803,61 @@ nonisolated public struct RuntimeState<Model, Descriptor> {
         reservations.removeAll { $0.releasable }
         active = []
         scopes = []
+        keys = []
         closed = true
         revision += 1
         revisionIdentity = RuntimeIdentity()
+        edge = nil
         let final = snapshot
         closeSnapshot = final
         terminal = Batch(snapshot: final, commands: cancelled.map { .cancel($0) }, terminal: true)
         return final
+    }
+
+    /// Replaces the model with `model` in a fresh incarnation whose only active scopes are `scopes`.
+    ///
+    /// Without `expected`, a reset expects no revision: it revokes every operation, retires every key,
+    /// and queues the cancellations with its acceptance, whatever the current root. With `expected`, it
+    /// replaces only that root, and otherwise rejects as a commit prepared on it would: `.foreignOwner`
+    /// for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after another reset, and
+    /// `.conflict` after any other acceptance. It still observes closure and revision exhaustion, and,
+    /// as a commit does, the commit queue's capacity whenever it queues a batch: always under
+    /// `.everyAcceptance` recording, and under `.commands` recording only when it revokes work. A
+    /// rejection changes nothing.
+    /// Revoked work keeps its execution reservation until it terminates or is skipped.
+    public mutating func reset(
+        _ model: Model,
+        scopes activated: [RuntimeScopeID],
+        expecting expected: Snapshot? = nil
+    ) -> Admission {
+        if let expected, expected.owner !== owner { return reject(.foreignOwner) }
+        if closed { return reject(.closed) }
+        if let expected {
+            if expected.incarnation !== incarnation { return reject(.obsoleteIncarnation) }
+            if expected.revisionIdentity !== revisionIdentity { return reject(.conflict) }
+        }
+        if revision == UInt64.max - 1 { return reject(.revisionExhausted) }
+        let revoked = active
+        let queues = recording == .everyAcceptance || !revoked.isEmpty
+        if queues, queue.count >= limits.commits { return reject(.capacityExceeded(.commitQueue)) }
+        for index in reservations.indices { reservations[index].delivery = .settled }
+        reservations.removeAll { $0.releasable }
+        var examined = 0
+        let fresh = Self.distinctScopeKeys(activated, examined: &examined)
+            .map {
+                Scope(key: $0, activation: RuntimeIdentity())
+            }
+        self.model = model
+        scopes = fresh
+        incarnation = RuntimeIdentity()
+        active = []
+        keys = []
+        revision += 1
+        revisionIdentity = RuntimeIdentity()
+        edge = nil
+        let accepted = snapshot
+        if queues { queue.append(Batch(snapshot: accepted, commands: revoked.map { .cancel($0) }, terminal: false)) }
+        return .committed(accepted)
     }
 
     /// Transfers whole FIFO batches, acknowledging revoked queued starts as skipped.
@@ -715,6 +960,7 @@ extension RuntimeWork: Sendable where Descriptor: Sendable {}
 extension RuntimeState: Sendable where Model: Sendable, Descriptor: Sendable {}
 extension RuntimeState.Snapshot: Sendable where Model: Sendable {}
 extension RuntimeState.Start: Sendable where Descriptor: Sendable {}
+extension RuntimeState.Emission: Sendable where Descriptor: Sendable {}
 extension RuntimeState.Plan: Sendable where Descriptor: Sendable {}
 extension RuntimeState.Candidate: Sendable where Model: Sendable, Descriptor: Sendable {}
 extension RuntimeState.Admission: Sendable where Model: Sendable {}

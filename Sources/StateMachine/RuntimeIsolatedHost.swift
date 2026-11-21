@@ -1,0 +1,790 @@
+/// A raw sole-writer owner confined to one caller-chosen actor instance, with joined execution handles.
+///
+/// The host is not `Sendable`. It belongs to the region of the actor passed to its initializer, so
+/// the compiler keeps it on that actor: a call from another actor or a nonisolated context does not
+/// compile. Every entry point also takes that actor as an `isolated` parameter and stops the program
+/// when it receives a different instance, so even code that escapes the compiler's checks cannot
+/// mutate the host from two actors.
+///
+/// This lower-guarantee runtime constructs its own authority. A sealed domain facade keeps this
+/// instance private and performs synchronous preparation and admission in one turn.
+///
+/// Support for the code that `@StateMachine` generates; it carries no source-stability promise.
+public final class RuntimeIsolatedHost<Owner: Actor, Model, Descriptor, Outcome, DomainFailure: Error> {
+    /// The embedded value admission algorithm.
+    public typealias Engine = RuntimeState<Model, Descriptor>
+    /// The embedded retained-outcome algorithm.
+    public typealias Ledger = RuntimeDeliveryLedger<Model, Descriptor, Outcome, DomainFailure>
+    /// Raw terminal delivery dispositions.
+    public typealias Delivery = RuntimeHostDelivery<Model, Descriptor>
+
+    private struct Subscriber {
+        let identity: RuntimeIdentity
+        let gate: RuntimeRegistrationGate
+        var revision: UInt64
+        let receive: (Engine.Snapshot) -> Void
+        let finish: () -> Void
+    }
+    private struct PendingSubscriber {
+        let identity: RuntimeIdentity
+        let gate: RuntimeRegistrationGate
+        let receive: ([Ledger.Pending]) -> Void
+        let finish: () -> Void
+        /// The ledger generation of the collection last offered to this registration, or `nil` before its first.
+        var offered: UInt64?
+    }
+    /// The values one change may replace or remove, retained until the change is complete.
+    private struct Displaceable {
+        let engine: Engine
+        let ledger: Ledger
+        let subscribers: [Subscriber]
+        let pendingSubscribers: [PendingSubscriber]
+    }
+    // Held weakly: the owning actor usually stores this host, so a strong reference would keep both alive.
+    private weak var owner: Owner?
+    private var engine: Engine
+    private var ledger = Ledger()
+    private var ready = RuntimeDeliveryReadyQueue()
+    // The capacity-conflict reports captured and not yet made.
+    private var owed = Ledger.OwedReports()
+    private var entries: [RuntimeConfinedExecution] = []
+    private var subscribers: [Subscriber] = []
+    private var pendingSubscribers: [PendingSubscriber] = []
+    // A replaced root, a disposed outcome, a skipped command, or a removed registration can run a
+    // destructor that reads this host. Each change retains what it may displace before it mutates,
+    // and the values are released once no mutable access is in progress and the change is complete.
+    private var displaced: [Displaceable] = []
+    // Whether a publication of the retained completions is offering them now.
+    private var publishingPending = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var draining = false
+    private var processedRevision: UInt64 = 0
+    private let subscriberCapacity: Int
+    private let policy: RuntimeCompletionPolicy
+    private let driver: (isolated Owner, RuntimeWork<Descriptor>) async -> Outcome
+    private let ticket: (Outcome) -> RuntimeTicket
+    private let prepare: (Ledger.Attempt) -> Ledger.Preparation
+    private let reconciliationRequired: (Ledger.Pending) -> Void
+    private let emit: (isolated Owner, Descriptor) -> Void
+
+    /// Creates fresh authority confined to `isolation`, retaining the execution selections.
+    ///
+    /// `driver` runs on `isolation` for each started operation. `emit` receives `isolation` and each
+    /// accepted emission in commit order, from the turn that processes its batch, after that batch's
+    /// cancellations and before its launch decisions and observers.
+    ///
+    /// The host holds `isolation` weakly. A running driver retains it, because the driver runs on it;
+    /// `close` or `shutdown` requests the drivers' cancellation, and a driver releases the actor when it
+    /// returns.
+    public init(
+        _ initial: Model,
+        scopes: [RuntimeScopeID],
+        isolation: isolated Owner,
+        configuration: ManagedConfiguration = .default,
+        policy: RuntimeCompletionPolicy = .manual,
+        driver: @escaping (isolated Owner, RuntimeWork<Descriptor>) async -> Outcome,
+        ticket: @escaping (Outcome) -> RuntimeTicket,
+        prepare: @escaping (Ledger.Attempt) -> Ledger.Preparation,
+        reconciliationRequired: @escaping (Ledger.Pending) -> Void = { _ in },
+        emit: @escaping (isolated Owner, Descriptor) -> Void = { _, _ in }
+    ) {
+        owner = isolation
+        engine = Engine(initial, scopes: scopes, limits: configuration.limits)
+        subscriberCapacity = configuration.subscriberCapacity
+        self.policy = policy
+        self.driver = driver
+        self.ticket = ticket
+        self.prepare = prepare
+        self.reconciliationRequired = reconciliationRequired
+        self.emit = emit
+    }
+    // Every host tears down in the same order, after the batches it accepted have drained: (1) the
+    // owner's lifetime gate, which every publisher of the owner reads, closes once, before any
+    // registration is notified and before any client code can run, and then the registrations that
+    // learn of the release at once are notified; (2) the workers are cancelled, whose cancellation
+    // handlers are client code that runs synchronously and can attach to a publisher, which already
+    // knows that the owner promises nothing more; (3) the client callbacks and values are released,
+    // whose captures' destructors are client code too, and a registration of an owner released without
+    // closing is finished, without a closed snapshot, on a later task.
+    //
+    // An isolated host has no publisher, so it has no lifetime gate to close and no registration that
+    // learns of the release at once: its registrations end only when their callbacks are released, not
+    // called, so (1) is that release, and it comes first, before any worker is cancelled, because a
+    // driver's cancellation handler must find every registration already ended. Everything is released
+    // where the host's last reference is released: no value of the owning actor's region can be sent to
+    // a generic actor from a destructor, so a caller releases the host on that actor when those values
+    // must not be destroyed elsewhere.
+    deinit {
+        subscribers = []
+        pendingSubscribers = []
+        displaced = []
+        for entry in entries { entry.worker.cancel() }
+    }
+    /// Stops the program unless `isolation` is the actor this host is confined to, then sweeps the
+    /// registrations: it removes those whose gates closed since the last sweep.
+    ///
+    /// A token dropped on another thread only closes its gate, so every entry point other than the count
+    /// reads, being a turn of the owning actor, is where the host releases those registrations' callbacks.
+    private func confirm(_ isolation: isolated Owner) {
+        check(isolation)
+        if pruneCancelledRegistrations() { releaseDisplaced() }
+    }
+    /// Stops the program unless `isolation` is the actor this host is confined to.
+    private func check(_ isolation: isolated Owner) {
+        precondition(owner === isolation, "A RuntimeIsolatedHost was used from an actor other than its owner.")
+    }
+    /// Copies a complete historical observation.
+    public func snapshot(isolation: isolated Owner) -> Engine.Snapshot {
+        confirm(isolation)
+        return engine.snapshot
+    }
+    /// Evaluates preparation outside mutable access, then admits in this same isolated turn.
+    public func prepareAndCommit<Failure: Error>(
+        isolation: isolated Owner,
+        _ preparation: (Engine.Snapshot) -> Result<Engine.Candidate, Failure>
+    ) -> Result<Engine.Admission, Failure> {
+        confirm(isolation)
+        let observation = engine.snapshot
+        switch preparation(observation) {
+        case .success(let candidate): return .success(commit(candidate, isolation: isolation))
+        case .failure(let failure): return .failure(failure)
+        }
+    }
+    /// Accepts or rejects a complete immutable candidate without suspension.
+    public func commit(_ candidate: Engine.Candidate, isolation: isolated Owner) -> Engine.Admission {
+        confirm(isolation)
+        retainDisplaceable()
+        let result = engine.commit(candidate)
+        if case .committed = result {
+            ledger.prune(in: engine)
+            scheduleDrain(isolation)
+        }
+        changed()
+        return result
+    }
+    /// Reports a defective plan with ordinary admission precedence against the current root.
+    public func reject(_ defect: Engine.DefectivePlan, isolation: isolated Owner) -> Engine.Admission {
+        confirm(isolation)
+        return engine.reject(defect)
+    }
+    /// Registers an observer of the initial and subsequent complete snapshots; callbacks run on the
+    /// owning actor outside mutable accesses.
+    ///
+    /// The returned registration stays in the owning actor's region, and only that actor can cancel
+    /// it, which removes the registration before returning, so none of its callbacks begins afterward.
+    /// A cancellation during a delivery, such as from another observer's callback, releases the
+    /// callbacks once that delivery has reached the other observers. Dropping it,
+    /// possibly on another thread, stops delivery and frees the slot at once; this host releases the
+    /// callbacks when it next sweeps its registrations or is destroyed.
+    public func subscribe(
+        _ receive: @escaping (Engine.Snapshot) -> Void,
+        onFinish: @escaping () -> Void = {},
+        isolation: isolated Owner
+    ) throws(SubscriptionFailure) -> IsolatedSnapshotSubscription<Owner> {
+        confirm(isolation)
+        let (initial, identity, gate) = try register(receive, onFinish: onFinish)
+        let token = Self.token(identity, gate, of: self, owner: isolation)
+        releaseDisplaced()
+        receive(initial)
+        if initial.isClosed { onFinish() }
+        return token
+    }
+    // Cancelling the token runs on the owning actor, which the token checks, and removes the
+    // registration there. Releasing it may happen on any thread, so it only closes the gate.
+    private static func token(
+        _ identity: RuntimeIdentity,
+        _ gate: RuntimeRegistrationGate,
+        of host: RuntimeIsolatedHost,
+        owner: Owner
+    ) -> IsolatedSnapshotSubscription<Owner> {
+        IsolatedSnapshotSubscription(
+            owner: owner,
+            gate: gate,
+            cancel: { [weak host] in
+                gate.close()
+                host?.remove(identity)
+            },
+            release: { gate.close() }
+        )
+    }
+    /// Registers an observer whose `Sendable` registration ends it from any thread.
+    ///
+    /// Cancelling the returned token stops delivery and frees the slot at once. This host releases the
+    /// callbacks when it next sweeps its registrations, on the owning actor, or is destroyed.
+    package func subscribeSendable(
+        _ receive: @escaping (Engine.Snapshot) -> Void,
+        onFinish: @escaping () -> Void = {},
+        isolation: isolated Owner
+    ) throws(SubscriptionFailure) -> SnapshotSubscription {
+        confirm(isolation)
+        let (initial, _, gate) = try register(receive, onFinish: onFinish)
+        let token = SnapshotSubscription(gate: gate) { gate.close() }
+        releaseDisplaced()
+        receive(initial)
+        if initial.isClosed { onFinish() }
+        return token
+    }
+    private func register(
+        _ receive: @escaping (Engine.Snapshot) -> Void,
+        onFinish: @escaping () -> Void
+    ) throws(SubscriptionFailure) -> (Engine.Snapshot, RuntimeIdentity, RuntimeRegistrationGate) {
+        let initial = engine.snapshot
+        let identity = RuntimeIdentity()
+        let gate = RuntimeRegistrationGate()
+        if !initial.isClosed {
+            _ = pruneCancelledRegistrations()
+            guard subscribers.count + pendingSubscribers.count < subscriberCapacity else {
+                releaseDisplaced()
+                throw .capacityExceeded
+            }
+            subscribers.append(
+                Subscriber(
+                    identity: identity,
+                    gate: gate,
+                    revision: initial.revision,
+                    receive: receive,
+                    finish: onFinish
+                )
+            )
+        }
+        return (initial, identity, gate)
+    }
+    /// Registers an observer of the retained completions, starting with the collection current now.
+    ///
+    /// Each later call receives the whole collection after a change to it, in the order of those changes.
+    /// The first is offered through the same publication as every later one, so a change made while
+    /// it is offered is offered after it. Closing delivers a final, empty collection and then
+    /// finishes; a closed owner delivers it at once. Cancelling the registration on the owning actor
+    /// removes it before returning; dropping it frees its slot at once, and this host releases its
+    /// callbacks when it next sweeps its registrations or is destroyed.
+    package func subscribePending(
+        _ receive: @escaping ([Ledger.Pending]) -> Void,
+        onFinish: @escaping () -> Void = {},
+        isolation: isolated Owner
+    ) throws(SubscriptionFailure) -> IsolatedSnapshotSubscription<Owner> {
+        confirm(isolation)
+        let (identity, gate, closed) = try registerPending(receive, onFinish: onFinish)
+        let token = Self.token(identity, gate, of: self, owner: isolation)
+        seedPending(receive, onFinish: onFinish, closed: closed)
+        return token
+    }
+    /// Registers an observer of the retained completions whose `Sendable` registration ends it from any thread.
+    package func subscribeSendablePending(
+        _ receive: @escaping ([Ledger.Pending]) -> Void,
+        onFinish: @escaping () -> Void = {},
+        isolation: isolated Owner
+    ) throws(SubscriptionFailure) -> SnapshotSubscription {
+        confirm(isolation)
+        let (_, gate, closed) = try registerPending(receive, onFinish: onFinish)
+        let token = SnapshotSubscription(gate: gate) { gate.close() }
+        seedPending(receive, onFinish: onFinish, closed: closed)
+        return token
+    }
+    // A closed owner registers nothing and delivers its final, empty collection at once; an open one
+    // offers the new registration its first collection through the ordered publication. `closed` is
+    // the admission's disposition, decided before the displaced values were released: their
+    // destructors can close this host, whose publication then delivers the final collection to the
+    // installed registration and finishes it, so reading the state again would deliver it twice.
+    private func seedPending(_ receive: ([Ledger.Pending]) -> Void, onFinish: () -> Void, closed: Bool) {
+        releaseDisplaced()
+        if closed {
+            receive(ledger.pending)
+            onFinish()
+        } else {
+            publishPending()
+        }
+    }
+    // Returns the registration's identity and gate, and whether the owner was closed, in which case it
+    // registered nothing.
+    private func registerPending(
+        _ receive: @escaping ([Ledger.Pending]) -> Void,
+        onFinish: @escaping () -> Void
+    ) throws(SubscriptionFailure) -> (RuntimeIdentity, RuntimeRegistrationGate, closed: Bool) {
+        let identity = RuntimeIdentity()
+        let gate = RuntimeRegistrationGate()
+        let closed = engine.snapshot.isClosed
+        if !closed {
+            _ = pruneCancelledRegistrations()
+            guard subscribers.count + pendingSubscribers.count < subscriberCapacity else {
+                releaseDisplaced()
+                throw .capacityExceeded
+            }
+            pendingSubscribers.append(
+                PendingSubscriber(identity: identity, gate: gate, receive: receive, finish: onFinish)
+            )
+        }
+        return (identity, gate, closed)
+    }
+    // Removes one registration on the owning actor; its callbacks are released after the stored
+    // collections no longer hold them.
+    private func remove(_ identity: RuntimeIdentity) {
+        guard
+            subscribers.contains(where: { $0.identity === identity })
+                || pendingSubscribers.contains(where: { $0.identity === identity })
+        else { return }
+        retainDisplaceable()
+        subscribers.removeAll { $0.identity === identity }
+        pendingSubscribers.removeAll { $0.identity === identity }
+        releaseDisplaced()
+    }
+    // Registrations whose gate closed, from a token released or a `Sendable` registration cancelled
+    // on any thread, are removed here, on the owning actor. Their callbacks are released with the
+    // change's other displaced values, after the stored collections no longer hold them. Returns
+    // whether it removed any.
+    private func pruneCancelledRegistrations() -> Bool {
+        guard
+            subscribers.contains(where: { !$0.gate.isOpen }) || pendingSubscribers.contains(where: { !$0.gate.isOpen })
+        else { return false }
+        retainDisplaceable()
+        subscribers.removeAll { !$0.gate.isOpen }
+        pendingSubscribers.removeAll { !$0.gate.isOpen }
+        return true
+    }
+    // Retains every value the next mutation can displace until `releaseDisplaced()`.
+    private func retainDisplaceable() { displaced.append(displaceable()) }
+    // Copies every value the next mutation can displace, for a caller that keeps the copy until that
+    // mutation is complete and then releases it itself, on every path.
+    private func displaceable() -> Displaceable {
+        Displaceable(
+            engine: engine,
+            ledger: ledger,
+            subscribers: subscribers,
+            pendingSubscribers: pendingSubscribers
+        )
+    }
+    // Releases the values earlier mutations displaced. Their destructors may read or change this host,
+    // so this runs only between mutations, once the change that displaced them is complete.
+    private func releaseDisplaced() {
+        guard !displaced.isEmpty else { return }
+        let released = displaced
+        displaced = []
+        withExtendedLifetime(released) {}
+    }
+    /// Retains exactly the first terminal outcome and attempts fresh synchronous preparation.
+    private func deliver(_ outcome: Outcome, isolation: isolated Owner) -> Delivery {
+        let authority = ticket(outcome)
+        retainDisplaceable()
+        let retention = ledger.retain(outcome, for: authority, in: &engine)
+        switch retention {
+        case .stale:
+            releaseDisplaced()
+            return .stale
+        case .foreignOwner:
+            releaseDisplaced()
+            return .foreignOwner
+        case .pending(let id):
+            defer { changed() }
+            guard let pending = ledger.pending.first(where: { $0.id == id }) else { return .notPending }
+            guard pending.status == .awaitingAdmission else { return .pending(id, pending.status) }
+            return reconcile(id: id, automatic: true, retained: pending.decision, isolation: isolation)
+        }
+    }
+    /// Historical first-outcome records, without acquiring a preparation claim.
+    public func pendingCompletions(isolation: isolated Owner) -> [Ledger.Pending] {
+        confirm(isolation)
+        return ledger.pending
+    }
+    /// Acquires one explicit reconciliation attempt against the current root.
+    public func reconcile(id: RuntimePendingID, isolation: isolated Owner) -> Delivery {
+        confirm(isolation)
+        return reconcile(id: id, automatic: false, isolation: isolation)
+    }
+    private func reconcile(
+        id: RuntimePendingID,
+        automatic: Bool,
+        retained: RuntimeDeliveryDecision? = nil,
+        scheduledRetry: Bool = false,
+        isolation: isolated Owner
+    ) -> Delivery {
+        reportOwed(id)
+        // Only the first claim of a queued turn depends on the decision that queued it.
+        var scheduledClaim = scheduledRetry
+        let preparation = prepare
+        let result = Ledger.reconcile(
+            id,
+            policy: policy,
+            automatic: automatic,
+            retained: retained,
+            claim: { decision in
+                defer { scheduledClaim = false }
+                // The claim keeps what it may displace until the claim is complete and releases it on every
+                // result, so a claim of a settled or claimed record leaves nothing retained behind it.
+                let retained = self.displaceable()
+                let claim = self.ledger.claim(
+                    id,
+                    in: &self.engine,
+                    continuing: decision,
+                    scheduledRetry: scheduledClaim
+                )
+                withExtendedLifetime(retained) {}
+                return claim
+            },
+            prepare: preparation,
+            finish: { attempt, candidate in
+                // The attempt's decision is captured before any callout. A callout can reconcile again,
+                // and each attempt must report its own decision once.
+                self.retainDisplaceable()
+                let finish = self.ledger.finish(attempt, preparation: candidate, in: &self.engine)
+                let conflicts = self.capacityConflicts()
+                let pending = self.ledger.pending.first { $0.id == id }
+                let retrying: Bool
+                if automatic, case .retry = self.policy, case .admission(.conflict) = pending?.lastRejection {
+                    retrying = true
+                } else {
+                    retrying = false
+                }
+                self.scheduleDrain(isolation)
+                if !retrying, let pending, pending.status == .reconciliationRequired {
+                    self.reconciliationRequired(pending)
+                }
+                self.handleCapacityConflicts(conflicts.filter { $0.id != id }, isolation: isolation)
+                self.changed()
+                return (finish, pending)
+            },
+            scheduleRetry: { self.scheduleRetry($0, after: $1, isolation: isolation) }
+        )
+        switch result {
+        case .inProgress: return .inProgress
+        case .notPending: return .notPending
+        case .finished(let finish): return Self.project(finish)
+        }
+    }
+    private static func project(_ result: Ledger.Finish) -> Delivery {
+        switch result {
+        case .committed(let snapshot): return .committed(snapshot)
+        case .pending(let id, let status): return .pending(id, status)
+        case .notPending: return .notPending
+        }
+    }
+    /// Settles retained delivery by an authority-only admission.
+    public func discardPending(id: RuntimePendingID, isolation: isolated Owner) -> Delivery {
+        confirm(isolation)
+        reportOwed(id)
+        retainDisplaceable()
+        guard let result = ledger.discard(id, in: &engine) else {
+            releaseDisplaced()
+            return .notPending
+        }
+        changed()
+        switch result {
+        case .committed(let snapshot):
+            scheduleDrain(isolation)
+            return .discarded(snapshot)
+        case .rejected(let rejection, _): return .rejected(rejection)
+        }
+    }
+    /// Closes admission and schedules the reserved terminal FIFO batch.
+    public func close(isolation: isolated Owner) -> Engine.Snapshot {
+        confirm(isolation)
+        let wasClosed = engine.snapshot.isClosed
+        retainDisplaceable()
+        let snapshot = engine.close()
+        ledger.prune(in: engine)
+        if !wasClosed { ledger.close() }
+        scheduleDrain(isolation)
+        changed()
+        return snapshot
+    }
+    /// Replaces the model in a fresh incarnation, revoking all work and disposing every retained completion.
+    ///
+    /// Without `expected`, it expects no revision, and rejects only on closure, revision exhaustion, or a
+    /// full commit queue, because this host queues every reset to publish it. With `expected`, it also
+    /// rejects unless the owner still holds that root, as the engine's `reset` describes. A rejection
+    /// changes nothing.
+    public func reset(
+        _ model: Model,
+        scopes: [RuntimeScopeID],
+        expecting expected: Engine.Snapshot? = nil,
+        isolation: isolated Owner
+    ) -> Engine.Admission {
+        confirm(isolation)
+        retainDisplaceable()
+        let result = engine.reset(model, scopes: scopes, expecting: expected)
+        if case .committed = result {
+            ledger.prune(in: engine)
+            ready.prune(keeping: ledger.pending.map(\.id))
+            scheduleDrain(isolation)
+        }
+        changed()
+        return result
+    }
+    // The drain retains this host until it has processed every accepted batch, so releasing the host
+    // after an accepted change still runs that change's emissions, launches, and observer deliveries.
+    // It is finite: it holds nothing while no batch is queued, and never waits on a driver.
+    private func scheduleDrain(_ isolation: isolated Owner) {
+        guard !draining, engine.hasQueuedBatches else { return }
+        draining = true
+        Task {
+            _ = isolation
+            self.drainTurn(isolation)
+        }
+    }
+    private func drainTurn(_ isolation: isolated Owner) {
+        _ = pruneCancelledRegistrations()
+        for _ in 0 ..< 32 {
+            retainDisplaceable()
+            let batch = engine.drain(limit: 1).first
+            retryCapacity(isolation)
+            guard let batch else {
+                if engine.hasQueuedBatches { continue }
+                draining = false
+                changed()
+                return
+            }
+            for command in batch.commands {
+                if case .cancel(let ticket) = command {
+                    entries.first { $0.ticket == ticket }?.worker.cancel()
+                }
+            }
+            // Initial observation may already include batches awaiting FIFO processing.
+            // Advance each registration before callbacks so synchronous reentry cannot regress it.
+            let observers = subscribers.filter { batch.snapshot.revision > $0.revision }
+            if batch.terminal {
+                subscribers = []
+            } else {
+                for index in subscribers.indices where subscribers[index].revision < batch.snapshot.revision {
+                    subscribers[index].revision = batch.snapshot.revision
+                }
+            }
+            // Emissions, launch decisions, and flush accounting come first, so an observer that waits on
+            // this batch's work, or is merely slow, cannot hold them back. The drain flag keeps an event
+            // handler's own commit from processing a batch inside this one.
+            for command in batch.commands {
+                if case .emit(let descriptor) = command { emit(isolation, descriptor) }
+            }
+            for command in batch.commands {
+                if case .start(let work) = command { start(work, isolation: isolation) }
+            }
+            processedRevision = batch.snapshot.revision
+            changed()
+            // A callback can cancel a registration, its own included; the gate keeps any later
+            // callback from beginning.
+            for observer in observers where observer.gate.isOpen {
+                observer.receive(batch.snapshot)
+                if batch.terminal, observer.gate.isOpen { observer.finish() }
+            }
+        }
+        Task {
+            _ = isolation
+            await Task.yield()
+            self.drainTurn(isolation)
+        }
+    }
+    private func start(_ work: RuntimeWork<Descriptor>, isolation: isolated Owner) {
+        guard !entries.contains(where: { $0.ticket == work.ticket }) else { return }
+        guard engine.isActive(work.ticket) else {
+            _ = engine.acknowledge(work.ticket, skippedBeforeStart: true)
+            retryCapacity(isolation)
+            return
+        }
+        let driver = driver
+        let identity = RuntimeIdentity()
+        // Only the driver call retains the owning actor, because it runs on it. The worker records its
+        // own termination after delivery, so no separate task waits on it.
+        let worker = Task { [weak self] in
+            let outcome = await driver(isolation, work)
+            _ = self?.deliver(outcome, isolation: isolation)
+            self?.terminated(work.ticket, identity: identity, isolation: isolation)
+        }
+        entries.append(RuntimeConfinedExecution(ticket: work.ticket, identity: identity, worker: worker))
+    }
+    private func terminated(_ ticket: RuntimeTicket, identity: RuntimeIdentity, isolation: isolated Owner) {
+        _ = pruneCancelledRegistrations()
+        guard let index = entries.firstIndex(where: { $0.ticket == ticket && $0.identity === identity }) else {
+            releaseDisplaced()
+            return
+        }
+        entries.remove(at: index)
+        _ = engine.acknowledge(ticket, skippedBeforeStart: false)
+        retryCapacity(isolation)
+        scheduleDrain(isolation)
+        changed()
+    }
+    private func capacityConflicts() -> [Ledger.Pending] {
+        retainDisplaceable()
+        let results = ledger.retryCapacity(in: &engine)
+        return results.compactMap { result in
+            guard case .pending(let id, .reconciliationRequired) = result,
+                let pending = ledger.pending.first(where: { $0.id == id }),
+                case .admission(.conflict) = pending.lastRejection
+            else { return nil }
+            return pending
+        }
+    }
+    private func retryCapacity(_ isolation: isolated Owner) {
+        handleCapacityConflicts(capacityConflicts(), isolation: isolation)
+    }
+    // Reports a batch of capacity conflicts, each as captured when it was found. A handler that
+    // reconciles a later entry synchronously makes that entry's report first, so each completion's
+    // attempts are reported in order and once each.
+    private func handleCapacityConflicts(_ conflicts: [Ledger.Pending], isolation: isolated Owner) {
+        CapacityConflictPause.reached(conflicts, \.id)
+        guard case .manual = policy else {
+            for pending in conflicts { _ = scheduleRetry(pending.id, after: pending.decision, isolation: isolation) }
+            return
+        }
+        for serial in owed.owe(conflicts) {
+            for pending in owed.take(through: serial) { reconciliationRequired(pending) }
+        }
+    }
+    // Makes the reports still owed for `id` before anything else happens to that completion.
+    private func reportOwed(_ id: RuntimePendingID) {
+        for pending in owed.take(id) { reconciliationRequired(pending) }
+    }
+    // Scheduling is bound to the decision that lost the conflict, so a newer attempt keeps its own.
+    // An envelope that used its last turn parks, and that is when reconciliation is required.
+    private func scheduleRetry(
+        _ id: RuntimePendingID,
+        after decision: RuntimeDeliveryDecision,
+        isolation: isolated Owner
+    ) -> Bool {
+        switch ledger.scheduleRetry(id, after: decision) {
+        case .scheduled: break
+        case .superseded: return false
+        case .exhausted:
+            reportOwed(id)
+            if let pending = ledger.pending.first(where: { $0.id == id }) { reconciliationRequired(pending) }
+            return false
+        }
+        guard ready.enqueue(id) else { return true }
+        Task { [weak self] in
+            _ = isolation
+            await Task.yield()
+            self?.retryTurn(isolation)
+        }
+        return true
+    }
+    private func retryTurn(_ isolation: isolated Owner) {
+        _ = pruneCancelledRegistrations()
+        ready.prune(keeping: ledger.pending.map(\.id))
+        let ids = ready.takeRound()
+        for id in ids { _ = reconcile(id: id, automatic: true, scheduledRetry: true, isolation: isolation) }
+        if ready.finishRound() {
+            Task { [weak self] in
+                _ = isolation
+                await Task.yield()
+                self?.retryTurn(isolation)
+            }
+        }
+        changed()
+    }
+    private func changed() {
+        publishPending()
+        let prior = waiters
+        waiters = []
+        for waiter in prior { waiter.resume() }
+        releaseDisplaced()
+    }
+    /// Offers the retained completions to each pending-completion registration that has not yet received
+    /// the current collection, its first included, and ends every registration with the final, empty
+    /// collection once the owner is closed.
+    ///
+    /// Publications never nest. A callback that changes the collection, or registers another observer,
+    /// leaves it to this publication, which stops offering the older collection and offers the newer one
+    /// to every registration, so each registration receives collections in ledger order and the newest
+    /// one last, even when the change happens inside the callback that receives its first collection.
+    private func publishPending() {
+        guard !publishingPending else { return }
+        publishingPending = true
+        defer { publishingPending = false }
+        var image: (generation: UInt64, pending: [Ledger.Pending])?
+        while true {
+            let generation = ledger.generation
+            guard
+                let index = pendingSubscribers.firstIndex(where: { $0.gate.isOpen && $0.offered != generation })
+            else {
+                // The last collection offered is released while publications still cannot nest. Its
+                // destructors can change the collection or end a registration, so the registrations are
+                // checked again after it.
+                if let retired = image {
+                    image = nil
+                    withExtendedLifetime(retired) {}
+                    continue
+                }
+                // Closing ends every registration once each has received the final collection. The
+                // copy keeps the callbacks until the stored collection no longer holds them.
+                guard engine.snapshot.isClosed, !pendingSubscribers.isEmpty else { return }
+                let finishing = pendingSubscribers
+                pendingSubscribers = []
+                for observer in finishing where observer.gate.isOpen { observer.finish() }
+                continue
+            }
+            // An older collection is released before a recipient is chosen, because its destructors can
+            // change the collection or end the registration that would be chosen.
+            guard let current = image, current.generation == generation else {
+                let retired = image
+                image = (generation, ledger.pending)
+                withExtendedLifetime(retired) {}
+                continue
+            }
+            pendingSubscribers[index].offered = generation
+            let observer = pendingSubscribers[index]
+            observer.receive(current.pending)
+        }
+    }
+    private func waitForChange(deadline: ContinuousClock.Instant? = nil, isolation: isolated Owner) async {
+        let timer = deadline.map { deadline in
+            Task { [weak self] in
+                _ = isolation
+                try? await Task.sleep(until: deadline, clock: ContinuousClock())
+                guard !Task.isCancelled else { return }
+                self?.changed()
+            }
+        }
+        defer { timer?.cancel() }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    /// Waits for FIFO processing through this owner-bound historical receipt.
+    public func flush(through snapshot: Engine.Snapshot, isolation: isolated Owner) async -> Bool {
+        confirm(isolation)
+        guard engine.owns(snapshot) else { return false }
+        while processedRevision < snapshot.revision { await waitForChange(isolation: isolation) }
+        return true
+    }
+    /// The number of physical workers whose joined termination has not yet been processed.
+    ///
+    /// Like every member that reads this host's state, it runs on the owning actor and stops the
+    /// program when `isolation` is another instance.
+    public func runningCount(isolation: isolated Owner) -> Int {
+        check(isolation)
+        return entries.count
+    }
+    /// The number of live observer registrations.
+    public func subscriberCount(isolation: isolated Owner) -> Int {
+        check(isolation)
+        return subscribers.filter(\.gate.isOpen).count + pendingSubscribers.filter(\.gate.isOpen).count
+    }
+    /// Whether closure, FIFO, executions, retained delivery, and claims have all settled.
+    public func isQuiescent(isolation: isolated Owner) -> Bool {
+        check(isolation)
+        return quiescent
+    }
+    private var quiescent: Bool { engine.isQuiescent && entries.isEmpty && !draining && ready.isIdle }
+    /// Captures the obligations still tracked, without exposing a ticket or other authority.
+    private func diagnostics() -> ShutdownDiagnostics {
+        ShutdownDiagnostics(
+            engine: engine,
+            processedThrough: processedRevision,
+            isDraining: draining,
+            isRetrying: !ready.isIdle,
+            pendingCompletions: ledger.pending.map(\.id)
+        )
+    }
+    /// Closes admission, then waits until every execution, delivery, and preparation obligation settles
+    /// or `deadline` passes.
+    ///
+    /// Returns `nil` once the owner is quiescent. Otherwise it returns the obligations observed in the
+    /// same actor turn that found the deadline expired; that work stays tracked and can still settle.
+    @discardableResult
+    public func shutdown(
+        deadline: ContinuousClock.Instant? = nil,
+        isolation: isolated Owner
+    ) async -> ShutdownDiagnostics? {
+        let receipt = close(isolation: isolation)
+        while !quiescent || processedRevision < receipt.revision {
+            if let deadline, ContinuousClock.now >= deadline { return diagnostics() }
+            await waitForChange(deadline: deadline, isolation: isolation)
+        }
+        return nil
+    }
+}

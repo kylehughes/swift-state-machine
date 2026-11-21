@@ -265,10 +265,10 @@ import os
         #expect(owner.subscriberCount == 1)
         try owner.send(.load(ProfileRequest(userID: user)))
         await started.wait()
-        #expect(await owner.runningCount == 1)
+        #expect(owner.runningCount == 1)
         release.open()
         #expect(await owner.shutdown() == .quiescent)
-        #expect(await owner.runningCount == 0)
+        #expect(owner.runningCount == 0)
         // Closing released the remaining registration.
         #expect(owner.subscriberCount == 0)
         withExtendedLifetime(snapshots) {}
@@ -348,5 +348,29 @@ import os
         await finished.wait()
         #expect(!closed)
         subscription?.cancel()
+    }
+}
+
+/// A registration's initial value, like a synchronous read, shows the admitted state at once; event
+/// handlers and later deliveries follow commit order.
+@Suite struct InitialObservationOrderingTests {
+    @MainActor @Test func aNewSubscriptionSeesTheAdmittedStateBeforeThatCommitsEventHandlerRuns() async throws {
+        var logged: [String] = []
+        let host = GeneratedTransfers.MainActorHost(
+            downloadDriver: { _, _ in .success("") },
+            onLogged: { logged.append($0) }
+        )
+        let offline = try host.send(.goOffline)
+        var seen: [UInt64] = []
+        let subscription = try host.subscribe({ seen.append($0.revision) }, onFinish: {})
+        #expect(seen == [offline.revision])
+        #expect(host.snapshot().revision == offline.revision)
+        #expect(logged.isEmpty)
+        #expect(await host.flush(through: offline) == .processed)
+        #expect(logged == ["offline"])
+        // The subscription had already seen this revision, so processing its batch delivers nothing new.
+        #expect(seen == [offline.revision])
+        subscription.cancel()
+        await host.shutdown()
     }
 }

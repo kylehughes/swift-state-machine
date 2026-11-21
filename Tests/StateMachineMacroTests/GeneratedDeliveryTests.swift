@@ -16,20 +16,23 @@ nonisolated private enum DeliveryFlow: Sendable {
     }
     @Initial case idle(Idle)
     case loading(Loading)
-    case loaded(Loaded)
-    enum Scope { case load }
+    @Terminal case loaded(Loaded)
+    enum Scope {
+        @Active(in: [Loading.self])
+        case load
+    }
     enum Input: Sendable {
         case begin(Int)
         case edit(Int)
         case audit(Int)
     }
-    @Operation(scope: Scope.load, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.load, admission: .latest)
     enum Fetch {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(scope: Scope.load, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.load, admission: .latest)
     enum Audit {
         typealias Input = Int
         typealias Output = Int
@@ -117,7 +120,7 @@ nonisolated private enum DeliveryFlow: Sendable {
         #expect(await starts.next() == 1)
         // A managed owner exposes its retained first outcome only as an inert value.
         let retained = try #require(owner.pendingCompletions().first)
-        guard case .fetch(7) = retained.outcome else { throw Failure.unexpected }
+        guard case .fetch(7, let request) = retained.outcome, request.input == 7 else { throw Failure.unexpected }
         #expect(retained.status == .preparing)
         let beforeDuplicates = owner.snapshot()
         guard case .loading(let beforeLoading) = beforeDuplicates else { throw Failure.unexpected }
@@ -177,13 +180,15 @@ nonisolated private enum DeliveryFlow: Sendable {
         await owner.shutdown()
         #expect(owner.isQuiescent)
     }
-    @Test func generatedDefaultPolicyPreparesAConflictingCompletionAgain() async throws {
+    @Test func generatedRetryPolicyPreparesAConflictingCompletionAgain() async throws {
         let gate = DeliveryFlow.gate
         let entries = gate.configure(blocks: 1)
-        // No policy is named, so a conflicting completion is prepared again rather than parked.
+        // The router can throw, so the owner has no default policy; the retry policy prepares a
+        // conflicting completion again rather than parking it.
         let owner = DeliveryFlow.Shared(
             .init(presentation: 0),
-            drivers: .init(fetch: { gate.execute($0) }, audit: { gate.execute($0) })
+            drivers: .init(fetch: { gate.execute($0) }, audit: { gate.execute($0) }),
+            completionPolicy: .retry
         )
         let (snapshots, events) = AsyncStream<DeliveryFlow.Snapshot>.makeStream()
         let token = try owner.subscribe { events.yield($0) }
@@ -214,13 +219,13 @@ nonisolated private enum DeliveryFlow: Sendable {
         await owner.shutdown()
         #expect(owner.isQuiescent)
     }
-    @Test func generatedRetryPureReevaluatesAfterConflictsWithoutRepeatingDriver() async throws {
+    @Test func generatedRetryReevaluatesAfterConflictsWithoutRepeatingDriver() async throws {
         let gate = DeliveryFlow.gate
         let entries = gate.configure(blocks: 6)
         let owner = DeliveryFlow.Shared(
             .init(presentation: 0),
             drivers: .init(fetch: { gate.execute($0) }, audit: { gate.execute($0) }),
-            completionPolicy: .retryPure
+            completionPolicy: .retry
         )
         let (snapshots, events) = AsyncStream<DeliveryFlow.Snapshot>.makeStream()
         let token = try owner.subscribe { events.yield($0) }

@@ -72,15 +72,15 @@ private struct Signal: Sendable {
 @MainActor @Suite(.timeLimit(.minutes(1))) struct MainActorSnapshotSequenceTests {
     @Test func deliversInitialAcceptedAndTerminalSnapshotsThenEnds() async throws {
         let owner = try makeMainHost()
-        var iterator = try owner.snapshots().makeAsyncIterator()
-        #expect(await iterator.next()?.revision == 0)
+        var snapshots = try owner.snapshots()
+        #expect(await snapshots.next()?.revision == 0)
         try owner.advance()
-        #expect(await iterator.next()?.revision == 1)
+        #expect(await snapshots.next()?.revision == 1)
         let closed = owner.close()
-        let final = await iterator.next()
+        let final = await snapshots.next()
         #expect(final?.revision == closed.revision && final?.isClosed == true)
-        #expect(await iterator.next() == nil)
-        #expect(await iterator.next() == nil)
+        #expect(await snapshots.next() == nil)
+        #expect(await snapshots.next() == nil)
         #expect(owner.subscriberCount == 0)
         await owner.shutdown()
     }
@@ -90,7 +90,8 @@ private struct Signal: Sendable {
         let closed = owner.close()
         #expect(await owner.flush(through: closed))
         var revisions: [UInt64] = []
-        for await snapshot in try owner.snapshots() { revisions.append(snapshot.revision) }
+        var snapshots = try owner.snapshots()
+        while let snapshot = await snapshots.next() { revisions.append(snapshot.revision) }
         #expect(revisions == [closed.revision])
         #expect(owner.subscriberCount == 0)
         await owner.shutdown()
@@ -98,14 +99,14 @@ private struct Signal: Sendable {
 
     @Test func unreadSnapshotsCoalesceToTheFinalSnapshot() async throws {
         let owner = try makeMainHost()
-        let snapshots = try owner.snapshots()
+        var snapshots = try owner.snapshots()
         try owner.advance()
         try owner.advance()
         let closed = owner.close()
         // Completion edge: the owner has delivered every batch through the close.
         #expect(await owner.flush(through: closed))
         var observed: [Engine.Snapshot] = []
-        for await snapshot in snapshots { observed.append(snapshot) }
+        while let snapshot = await snapshots.next() { observed.append(snapshot) }
         #expect(observed.map(\.revision) == [closed.revision])
         #expect(observed.last?.isClosed == true)
         await owner.shutdown()
@@ -114,7 +115,8 @@ private struct Signal: Sendable {
     @Test func sendingFromInsideTheLoopObservesEveryRevisionInOrder() async throws {
         let owner = try makeMainHost()
         var revisions: [UInt64] = []
-        for await snapshot in try owner.snapshots() {
+        var snapshots = try owner.snapshots()
+        while let snapshot = await snapshots.next() {
             revisions.append(snapshot.revision)
             if snapshot.revision < 2 { try owner.advance() } else if !snapshot.isClosed { _ = owner.close() }
         }
@@ -124,27 +126,24 @@ private struct Signal: Sendable {
 
     @Test func aConsumerCancelledBeforeItsFirstElementReceivesNothingAndFreesItsSlot() async throws {
         let owner = try makeMainHost(subscribers: 1)
-        // The test keeps the sequence alive, so only the cancelled iterator can free the slot.
-        let snapshots = try owner.snapshots()
         let consumer = Task {
-            var iterator = snapshots.makeAsyncIterator()
-            return await iterator.next()?.revision
+            var snapshots = try owner.snapshots()
+            return await snapshots.next()?.revision
         }
         // The task has not run yet: it starts on the main actor only after this function suspends.
         consumer.cancel()
-        #expect(await consumer.value == nil)
-        _ = snapshots
+        #expect(try await consumer.value == nil)
         #expect(owner.subscriberCount == 0)
         await owner.shutdown()
     }
 
-    @Test func cancellingTheConsumerEndsTheSequenceAndFreesItsSlot() async throws {
+    @Test func cancellingTheConsumerEndsTheStreamAndFreesItsSlot() async throws {
         let owner = try makeMainHost(subscribers: 1)
-        let snapshots = try owner.snapshots()
         let received = Signal()
         let consumer = Task {
             var revisions: [UInt64] = []
-            for await snapshot in snapshots {
+            var snapshots = try owner.snapshots()
+            while let snapshot = await snapshots.next() {
                 revisions.append(snapshot.revision)
                 received.raise()
             }
@@ -152,22 +151,22 @@ private struct Signal: Sendable {
         }
         await received.wait()
         consumer.cancel()
-        #expect(await consumer.value == [0])
+        #expect(try await consumer.value == [0])
         // The consumer removed its registration on the main actor before returning.
         #expect(owner.subscriberCount == 0)
         _ = try owner.snapshots()
         await owner.shutdown()
     }
 
-    @Test func releasingTheSequenceFreesItsSlot() async throws {
+    @Test func releasingTheStreamFreesItsSlot() async throws {
         let owner = try makeMainHost(subscribers: 1)
         let detached = Signal()
         do {
             let snapshots = try owner.snapshots({ $0 }, onDetach: { detached.raise() })
-            #expect(throws: SubscriptionFailure.capacityExceeded) { try owner.snapshots() }
-            _ = snapshots
+            #expect(throws: SubscriptionFailure.capacityExceeded) { _ = try owner.snapshots() }
+            _ = consume snapshots
         }
-        // Cleanup edge: the owner has released this sequence's callbacks.
+        // Cleanup edge: the owner has released this stream's callbacks.
         await detached.wait()
         #expect(owner.subscriberCount == 0)
         await owner.shutdown()
@@ -176,30 +175,24 @@ private struct Signal: Sendable {
     @Test func releasingAnUnclosedOwnerEndsASuspendedConsumer() async throws {
         var owner: MainHost? = try makeMainHost()
         weak let released = owner
-        let snapshots = try #require(owner).snapshots()
+        let registered = Signal()
         let received = Signal()
-        let consumer = Task {
+        // The consumer holds the owner only while it registers.
+        let consumer = Task { [weak owner] in
             var observed: [Engine.Snapshot] = []
-            for await snapshot in snapshots {
+            var snapshots = try #require(owner).snapshots()
+            registered.raise()
+            while let snapshot = await snapshots.next() {
                 observed.append(snapshot)
                 received.raise()
             }
             return observed.map(\.isClosed)
         }
+        await registered.wait()
         await received.wait()
         owner = nil
         #expect(released == nil)
-        #expect(await consumer.value == [false])
-    }
-
-    @Test func onlyTheFirstIteratorReceivesElements() async throws {
-        let owner = try makeMainHost()
-        let snapshots = try owner.snapshots()
-        var first = snapshots.makeAsyncIterator()
-        var second = snapshots.makeAsyncIterator()
-        #expect(await second.next() == nil)
-        #expect(await first.next()?.revision == 0)
-        await owner.shutdown()
+        #expect(try await consumer.value == [false])
     }
 
     @Test func carriesSnapshotsThatAreNotSendable() async throws {
@@ -212,7 +205,8 @@ private struct Signal: Sendable {
         )
         let shared = Box(2)
         var values: [Int] = []
-        for await snapshot in try owner.snapshots() {
+        var snapshots = try owner.snapshots()
+        while let snapshot = await snapshots.next() {
             values.append(snapshot.model.value)
             if snapshot.revision == 0 {
                 _ = owner.commit(try RuntimeState<Box, Int>.prepare(on: owner.snapshot(), next: shared))
@@ -547,8 +541,10 @@ private func collect<Source: AsyncSequence & Sendable>(
         }
         await received.wait()
         owner = nil
-        #expect(released == nil)
         #expect(await consumer.value == [false])
+        // The consumer ends from the owner's destructor. An actor's executor can hold the actor for a
+        // moment after its last job, so the reference is read once that destructor has run.
+        #expect(released == nil)
     }
 
     @Test func onlyTheFirstIteratorReceivesElements() async throws {

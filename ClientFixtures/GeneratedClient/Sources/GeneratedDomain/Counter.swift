@@ -18,7 +18,7 @@ nonisolated public enum Counter: Sendable {
         public init(_ value: Int) { self.value = value }
     }
     @Initial case idle(Idle)
-    case done(Done)
+    @Terminal case done(Done)
     /// Closed dynamic inputs.
     public enum Input: Sendable {
         case add(Int)

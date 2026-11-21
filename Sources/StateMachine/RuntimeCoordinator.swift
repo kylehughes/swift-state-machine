@@ -1,3 +1,5 @@
+import os
+
 /// Owns physical execution separately from operation authority and outcome delivery.
 ///
 /// Hosts validate batch ownership and order before forwarding starts and cancellations.
@@ -15,8 +17,15 @@ package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     private let authorized: @Sendable (RuntimeTicket) -> Bool
     private let terminated: @Sendable (RuntimeTicket, Outcome, RuntimeCoordinator<Descriptor, Outcome>) -> Void
     private let skipped: @Sendable (RuntimeTicket) -> Void
-    private var entries: [Entry] = []
+    private var entries: [Entry] = [] {
+        didSet {
+            let count = entries.count
+            registered.withLock { $0 = count }
+        }
+    }
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    // Mirrors the entry count for synchronous readers; it carries no authority.
+    private nonisolated let registered = OSAllocatedUnfairLock(initialState: 0)
 
     /// Creates an execution owner with synchronous host authority and settlement hooks.
     package init(
@@ -41,6 +50,9 @@ package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     /// The number of workers whose actual termination has not yet been processed.
     package var runningCount: Int { entries.count }
 
+    /// The same count, read without entering the actor.
+    package nonisolated var currentRunningCount: Int { registered.withLock { $0 } }
+
     /// Registers each authorized start without suspending between its authority checks.
     ///
     /// An already registered ticket is ignored. Hosts prevent replay of completed batches.
@@ -55,8 +67,12 @@ package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
 
             let descriptor = work.descriptor
             let driver = driver
-            let worker = Task.detached { await driver(descriptor) }
             let ticket = work.ticket
+            let pause = DriverStartPause.beforeStarting
+            let worker = Task.detached {
+                pause?(ticket)
+                return await driver(descriptor)
+            }
             let identity = RuntimeIdentity()
             entries.append(Entry(ticket: ticket, identity: identity, worker: worker))
             let index = entries.count - 1
@@ -103,4 +119,18 @@ package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
         waiters = []
         for waiter in completed { waiter.resume() }
     }
+}
+
+/// A pause that a test inserts at the start of a detached driver task, which a `Shared` owner's
+/// coordinator and an `ActorHost` launch, before the driver runs, with the ticket of the work it drives.
+///
+/// A detached task inherits no task-local value, so the owner reads the pause once where it launches
+/// the driver task, on the task that processes the batch, and the driver task runs that value. The
+/// task that processes the batch inherits the value from the call that scheduled that processing,
+/// which can be an earlier call of the same owner, such as a registration, so a test binds the pause
+/// around the owner's creation and every call up to the one that launches the work. A confined owner's
+/// driver task runs on the owner's actor, which the pause would block, so it has none. It is `nil`
+/// everywhere else.
+nonisolated package enum DriverStartPause {
+    @TaskLocal package static var beforeStarting: (@Sendable (RuntimeTicket) -> Void)?
 }

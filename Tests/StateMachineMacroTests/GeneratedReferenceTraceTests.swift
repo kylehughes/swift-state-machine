@@ -49,7 +49,7 @@ import Testing
         guard case .fetch(let gWork) = generated.drainCommands(limit: 1).first?.commands.first,
             case .start(let hWork) = handwritten.drainCommands(limit: 1).first?.commands.first,
             let ticket = oracle.drain(limit: 1).first?.starts.first,
-            case .loading(let gLoading) = generated.snapshot(), case .loading(let hLoading) = handwritten.snapshot()
+            case .loading(let gLoading) = generated.snapshot()
         else { throw Failure.unexpected }
         let prior = oracle.snapshot
         if acknowledgeBefore {
@@ -64,26 +64,25 @@ import Testing
             else { throw Failure.unexpected }
         }
         let gOutcome = gWork.succeeded(Profile(userID: user, name: "2"))
-        guard case .success(let hOutcome) = hWork.succeeded(Profile(userID: user, name: "2")),
-            case .loading(let hCurrent) = handwritten.snapshot()
-        else { throw Failure.unexpected }
-        let expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .success(2)))
-        // The generated owner admits a completion only through delivery; revoked authority makes it stale.
+        let hOutcome = ReferenceProfile.Completion.fetch(hWork.succeeded(Profile(userID: user, name: "2")))
+        // Every owner admits a completion only through delivery, which retains the outcome first; revoked
+        // authority makes it stale.
         let gResult = generated.deliver(gOutcome)
-        let hResult = handwritten.commit(hCurrent.received(hOutcome))
+        let hResult = handwritten.deliver(hOutcome)
         if invalidate {
-            guard case .rejected(.inactiveAuthority) = expected, case .stale = gResult,
-                case .rejected(.inactiveAuthority, _) = hResult
+            guard case .discarded(.inactiveAuthority) = oracle.retain(ticket, outcome: .success(2)),
+                case .stale = gResult, case .stale = hResult
             else { throw Failure.unexpected }
         } else {
-            guard case .committed = expected, case .committed = gResult, case .committed = hResult else {
-                throw Failure.unexpected
-            }
+            guard case .pending = oracle.retain(ticket, outcome: .success(2)),
+                case .committed = oracle.deliveryTurn(ticket.operation), case .committed = gResult,
+                case .committed = hResult
+            else { throw Failure.unexpected }
         }
         compare(generated.snapshot(), handwritten.snapshot(), oracle.snapshot)
         // A copied outcome cannot authorize a second admission, even with its original phase observation.
         guard case .stale = generated.deliver(gOutcome),
-            case .rejected(.inactiveAuthority, _) = handwritten.commit(hLoading.received(hOutcome)),
+            case .stale = handwritten.deliver(hOutcome),
             case .rejected(.inactiveAuthority) = oracle.commit(
                 try oracle.prepareCompletion(ticket, outcome: .success(2), on: prior)
             )
@@ -95,11 +94,13 @@ import Testing
         }
         let gBatches = generated.drainCommands(limit: 20)
         let hBatches = handwritten.drainCommands(limit: 20)
-        let referenceBatches = oracle.drain(limit: 20)
+        // The reference records every acceptance, and a `Local` queues only those that carry commands. An
+        // admitted completion retires its own work without cancelling it, so it carries none.
+        let referenceBatches = oracle.drain(limit: 20).filter { !$0.cancelled.isEmpty || !$0.starts.isEmpty }
         #expect(gBatches.map(\.receipt.revision) == referenceBatches.map { $0.snapshot.stamp.revision })
         #expect(hBatches.map(\.receipt.revision) == referenceBatches.map { $0.snapshot.stamp.revision })
-        #expect(gBatches.map { $0.commands.count } == referenceBatches.map { $0.revoked.count + $0.starts.count })
-        #expect(hBatches.map { $0.commands.count } == referenceBatches.map { $0.revoked.count + $0.starts.count })
+        #expect(gBatches.map { $0.commands.count } == referenceBatches.map { $0.cancelled.count + $0.starts.count })
+        #expect(hBatches.map { $0.commands.count } == referenceBatches.map { $0.cancelled.count + $0.starts.count })
         _ = generated.close()
         _ = handwritten.close()
         _ = oracle.close()

@@ -102,6 +102,55 @@ import os
             #expect(releases.withLock { $0 } == 1)
         }
     }
+    /// The tickets that the next queued batch cancels.
+    private func drainedCancellations(_ storage: AtomicRecordStorage<State>) throws -> [RuntimeTicket] {
+        try update(storage) { state in
+            guard let batch = state.core.drain(limit: 1).first else { throw Failure.candidate }
+            return batch.commands.compactMap { command in
+                if case .cancel(let ticket) = command { ticket } else { nil }
+            }
+        }
+    }
+    @Test func retiringARetainedOutcomeQueuesNoCancellationForTheWorkThatReturnedIt() throws {
+        let scope = RuntimeScopeID(kind: 0)
+        for path in [Path.accepted, .discard] {
+            let storage = AtomicRecordStorage(State(core: Core(0, scopes: [scope], limits: try .init())))
+            let releases = OSAllocatedUnfairLock(initialState: 0)
+            let ticket = try start(storage, scope: scope)
+            let id = try retain(storage, ticket: ticket, count: releases)
+            try retire(path, storage: storage, ticket: ticket, id: id)
+            #expect(try drainedCancellations(storage).isEmpty)
+        }
+        // Retiring work that has returned no outcome revokes work that may still be running, so it is cancelled.
+        let storage = AtomicRecordStorage(State(core: Core(0, scopes: [scope], limits: try .init())))
+        let ticket = try start(storage, scope: scope)
+        try update(storage) { state in
+            let candidate = try Core.prepare(on: state.core.snapshot, next: 2, plan: .init(retire: [ticket]))
+            guard case .committed = state.core.commit(candidate) else { throw Failure.candidate }
+        }
+        #expect(try drainedCancellations(storage) == [ticket])
+    }
+    @Test func anAcceptedCompletionStillCancelsOtherWorkItRevokes() throws {
+        let own = RuntimeScopeID(kind: 0)
+        let other = RuntimeScopeID(kind: 1)
+        let storage = AtomicRecordStorage(State(core: Core(0, scopes: [own, other], limits: try .init())))
+        let releases = OSAllocatedUnfairLock(initialState: 0)
+        let ticket = try start(storage, scope: own)
+        let unrelated = try start(storage, scope: other)
+        let id = try retain(storage, ticket: ticket, count: releases)
+        try update(storage) { state in
+            guard case .claimed(let attempt) = state.ledger.claim(id, in: &state.core) else { throw Failure.claim }
+            let candidate = try Core.prepare(
+                on: attempt.snapshot,
+                next: 2,
+                requiring: [ticket],
+                plan: .init(scopes: [.remove(other)], retire: [ticket], controlCount: 1)
+            )
+            guard case .committed = state.ledger.finish(attempt, preparation: .success(candidate), in: &state.core)
+            else { throw Failure.candidate }
+        }
+        #expect(try drainedCancellations(storage) == [unrelated])
+    }
     @Test func duplicateEnvelopeAndInvalidatedClaimReleaseOutsideLock_RT024_RT041() throws {
         let scope = RuntimeScopeID(kind: 0)
         let storage = AtomicRecordStorage(State(core: Core(0, scopes: [scope], limits: try .init())))

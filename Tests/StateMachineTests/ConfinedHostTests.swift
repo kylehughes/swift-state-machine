@@ -142,7 +142,7 @@ import Testing
             drivers: .init(fetch: driver.fetch, audit: driver.audit)
         )
         let trace = SnapshotTrace<GeneratedProfile.Snapshot>()
-        let observation = editor.presentation.$snapshot.sink { trace.record($0) }
+        let observation = editor.presentation.presentedSnapshots.sink { trace.record($0) }
         defer { observation.cancel() }
         _ = try editor.load()
         guard case .loading = editor.presentation.snapshot else { throw Failure.unexpected }
@@ -198,7 +198,7 @@ import Testing
         guard case .idle = returned.presentation.snapshot else { throw Failure.unexpected }
         #expect(returned.presentation.snapshot.revision == 0 && returned.presentation.isObserving)
         let trace = SnapshotTrace<GeneratedProfile.Snapshot>()
-        let observation = returned.presentation.$snapshot.sink { trace.record($0) }
+        let observation = returned.presentation.presentedSnapshots.sink { trace.record($0) }
         _ = try returned.load()
         let newRequest = await network.nextRequest()
         #expect(newRequest.id != oldRequest.id)

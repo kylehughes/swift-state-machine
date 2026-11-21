@@ -75,6 +75,17 @@ import os
         }
     }
 
+    private static func compare(_ actual: Flow.DeliveryResult, _ expected: ReferenceDelivery, context: String) {
+        switch (actual, expected) {
+        case (.committed(let receipt), .committed(let snapshot)):
+            #expect(Self.snapshot(receipt.snapshot, like: snapshot) == snapshot, "\(context)")
+        case (.pending(_, let status), .pending(_, let expectedStatus)):
+            #expect(ReferencePendingStatus(status) == expectedStatus, "\(context)")
+        case (.stale, .discarded(.inactiveAuthority)), (.stale, .discarded(.closed)): break
+        default: Issue.record("\(context): production and independent interpreter disagree on delivery")
+        }
+    }
+
     /// Optional external receipts keep invocation/response data and replay commands out of the package.
     ///
     /// The test assertions do not depend on file output.
@@ -96,7 +107,6 @@ import os
         var saved = flow.snapshot()
         var savedOracle = oracle.snapshot
         var loading = flow.snapshot()
-        var loadingOracle = oracle.snapshot
         var prepared: Flow.Prepared?
         var candidate: ReferenceCandidate?
         var issued: [(Flow.FetchWork, ReferenceTicket)] = []
@@ -129,12 +139,12 @@ import os
                 }
                 let tickets = reference.starts.filter { oracle.valid($0) }
                 #expect(starts.count == tickets.count)
-                #expect(cancels == reference.revoked.count)
+                #expect(cancels == reference.cancelled.count)
                 let actualCancellations = batch.commands.compactMap { command -> Flow.ExecutionHandle? in
                     if case .cancel(let handle) = command { return handle }
                     return nil
                 }
-                let expectedCancellations = reference.revoked.compactMap { operation in
+                let expectedCancellations = reference.cancelled.compactMap { operation in
                     issued.first { $0.1.operation == operation }?.0.execution
                 }
                 #expect(actualCancellations == expectedCancellations)
@@ -145,7 +155,7 @@ import os
                         case .start: "start"
                         default: "unexpected"
                         }
-                    } == Array(repeating: "cancel", count: reference.revoked.count)
+                    } == Array(repeating: "cancel", count: reference.cancelled.count)
                         + Array(repeating: "start", count: tickets.count)
                 )
                 for (work, ticket) in zip(starts, tickets) {
@@ -216,7 +226,6 @@ import os
             case 6, 16, 20: drain()
             case 7:
                 loading = flow.snapshot()
-                loadingOracle = oracle.snapshot
                 if (step / 25) % 2 == 1 {
                     commands[commands.count - 1] += " authenticationInvalidationWhileActive"
                     let expected = oracle.commit(try oracle.prepare(.authentication))
@@ -228,36 +237,29 @@ import os
                     )
                 }
             case 8:
+                // Outcomes reach the model only through delivery, which prepares on the current root.
                 let (work, ticket) = try #require(issued.last)
-                guard case .loading(let observed) = loading else {
+                guard case .loading = loading else {
                     Issue.record("Missing loading observation")
                     return
                 }
-                let expected: ReferenceAdmission
-                let actual: Flow.CommitResult
+                let expected: ReferenceDelivery
+                let actual: Flow.DeliveryResult
                 if seed % 2 == 0 {
-                    guard case .success(let completion) = work.succeeded(Profile(userID: id, name: String(value)))
-                    else { return }
-                    expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .success(value)))
-                    actual = flow.commit(observed.received(completion))
+                    expected = oracle.deliver(ticket, outcome: .success(value))
+                    actual = flow.deliver(.fetch(work.succeeded(Profile(userID: id, name: String(value)))))
                 } else {
-                    guard case .failure(let completion) = work.failed(.unavailable) else { return }
-                    expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .failure(1)))
-                    actual = flow.commit(observed.failed(completion))
+                    expected = oracle.deliver(ticket, outcome: .failure(1))
+                    actual = flow.deliver(.fetch(work.failed(.unavailable)))
                 }
-                Self.compare(actual, expected, current: oracle.snapshot, context: context)
+                Self.compare(actual, expected, context: context)
             case 9, 18:
+                // A later outcome for settled or revoked work is refused.
                 let (work, ticket) = try #require(issued.last)
-                guard case .loading(let observed) = loading,
-                    case .success(let completion) = work.succeeded(Profile(userID: id, name: "2"))
-                else { return }
-                let expected = oracle.commit(
-                    try oracle.prepareCompletion(ticket, outcome: .success(2), on: loadingOracle)
-                )
+                let expected = oracle.deliver(ticket, outcome: .success(2))
                 Self.compare(
-                    flow.commit(observed.received(completion)),
+                    flow.deliver(.fetch(work.succeeded(Profile(userID: id, name: "2")))),
                     expected,
-                    current: oracle.snapshot,
                     context: context
                 )
             case 10, 19:
@@ -301,7 +303,6 @@ import os
                 _ = foreign.close()
             case 17:
                 loading = flow.snapshot()
-                loadingOracle = oracle.snapshot
                 guard case .loading(let observed) = loading else {
                     Issue.record("Missing cancellable loading")
                     return
@@ -423,6 +424,12 @@ extension ProductionHistoryTests {
 
     // Dispatch worker coordination is synchronous and bounded; the async test
     // awaits managed shutdown only after every worker has responded.
+    //
+    // Each client records its invocation, then waits at a rendezvous until both clients have recorded
+    // theirs, and only then calls the facade and records the response. Both invocations therefore
+    // precede both responses, so the wave's two calls overlap in every schedule and on every machine,
+    // however loaded: their intervals overlap by construction, and the two calls then run against the
+    // production implementation concurrently, in whatever order the threads reach it.
     private static func runWave(
         _ wave: Int,
         schedule: Int,
@@ -432,8 +439,10 @@ extension ProductionHistoryTests {
         recorder: HistoryRecorder
     ) {
         let ready = DispatchSemaphore(value: 0)
+        let invoked = DispatchSemaphore(value: 0)
         let finished = DispatchSemaphore(value: 0)
         let permits = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
+        let calls = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
         let first = (schedule >> (wave * 2)) & 1
         for client in [first, 1 - first] {
             DispatchQueue.global()
@@ -450,8 +459,16 @@ extension ProductionHistoryTests {
                         finished.signal()
                         return
                     }
+                    // Recorded before the rendezvous, so each call's interval contains the other's
+                    // invocation.
+                    let invocation = recorder.event()
+                    invoked.signal()
+                    guard calls[client].wait(timeout: .now() + 10) == .success else {
+                        Issue.record("Rendezvous timed out")
+                        finished.signal()
+                        return
+                    }
                     if let prepared = proposal.take() {
-                        let invocation = recorder.event()
                         let actual = flow.commit(prepared)
                         let response = recorder.event()
                         recorder.response(
@@ -462,7 +479,6 @@ extension ProductionHistoryTests {
                             result: .admission(Self.admission(actual, like: template))
                         )
                     } else {
-                        let invocation = recorder.event()
                         let actual = flow.snapshot()
                         let response = recorder.event()
                         recorder.response(
@@ -481,6 +497,11 @@ extension ProductionHistoryTests {
         let releaseFirst = (schedule >> (wave * 2 + 1)) & 1
         permits[releaseFirst].signal()
         permits[1 - releaseFirst].signal()
+        // Both invocations are recorded before either call begins.
+        #expect(invoked.wait(timeout: .now() + 10) == .success)
+        #expect(invoked.wait(timeout: .now() + 10) == .success)
+        calls[releaseFirst].signal()
+        calls[1 - releaseFirst].signal()
         #expect(finished.wait(timeout: .now() + 10) == .success)
         #expect(finished.wait(timeout: .now() + 10) == .success)
     }
@@ -488,16 +509,18 @@ extension ProductionHistoryTests {
     @Test(.timeLimit(.minutes(1)), arguments: 0 ..< 16)
     func fourCallTwoClientProductionWitness_RT034(schedule: Int) async throws {
         // Two waves preserve each client's program order and establish real-time
-        // edges from wave one to wave two. Four bits choose launch and permit
-        // order in each wave. Permits precede invocation recording: they cannot
-        // manufacture overlap by padding an operation's recorded interval.
-        // At most 128 attempts find actual overlapping recorded facade calls.
+        // edges from wave one to wave two. Four bits choose launch order and the
+        // order in which the permits and the rendezvous release the clients in
+        // each wave. The rendezvous makes the two calls of each wave overlap in
+        // every attempt, so each attempt is a genuinely concurrent history of the
+        // production facade, and every attempt must have a witness. The first is
+        // retained as evidence.
         var selected: [ReferenceHistoryCall] = []
         var selectedAttempt = 0
         var selectedPreparations: [String] = []
         var attemptedHistories: [[String: Any]] = []
         var selectedInitial = ReferenceReplay(.init(owner: 1))
-        for attempt in 0 ..< 128 {
+        for attempt in 0 ..< 8 {
             let id = try UserID("kyle")
             let flow = Flow.Shared(
                 .init(userID: id),
@@ -555,15 +578,15 @@ extension ProductionHistoryTests {
                     ]
                 },
             ])
-            if overlap {
+            #expect(overlap, "The calls of attempt \(attempt) did not overlap, schedule=\(schedule)")
+            if overlap, selected.isEmpty {
                 selected = calls
                 selectedAttempt = attempt
                 selectedPreparations = recorder.preparations
                 selectedInitial = replay
-                break
             }
         }
-        #expect(selected.count == 4, "No real production overlap within 128 bounded attempts, schedule=\(schedule)")
+        #expect(selected.count == 4, "No overlapping production history, schedule=\(schedule)")
         guard selected.count == 4 else { return }
         let verdict = ReferenceHistoryChecker.check(selected, initial: selectedInitial)
         guard case .witness(let witness) = verdict else {

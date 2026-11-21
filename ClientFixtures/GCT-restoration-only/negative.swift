@@ -1,0 +1,27 @@
+import StateMachine
+
+@StateMachine(mode: .shared)
+nonisolated enum Archive: Sendable {
+    struct Draft: Sendable { var text = "" }
+    struct Saving: Sendable { let text: String }
+    struct Published: Sendable { let text: String }
+    @Initial case draft(Draft = Draft())
+    case saving(Saving)
+    @Terminal case published(Published)
+    enum Input: Sendable { case save }
+    @Operation(activeIn: [Saving.self])
+    enum Save { typealias Input = String }
+    @Restoration(only: [Saving.self, Published.self])
+    fileprivate static func restore(_ saved: String) -> Restoration { .published(Published(text: saved)) }
+    @Transition(on: Input.save, starts: [Save.self])
+    fileprivate static func save(_ source: Draft) -> Change<Saving, Effect.Save> {
+        Change(Saving(text: source.text), effects: [.save(source.text)])
+    }
+    @Transition(onSuccess: Save.self)
+    fileprivate static func saved(_ source: Saving) -> Published { Published(text: source.text) }
+}
+// A resting phase that only: does not list is not restorable.
+nonisolated func misuse() {
+    let restored: Archive.Restoration = .draft(Archive.Draft())
+    _ = restored
+}

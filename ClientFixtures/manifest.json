@@ -102,8 +102,38 @@
   },
   {
     "id": "CT-009",
-    "pattern": "cannot convert value.*AuditSuccessCompletion.*FetchSuccessCompletion",
+    "pattern": "cannot convert value.*AuditCompletion.*FetchCompletion",
     "scope": "handwritten facade distinct accepted fetch/audit operation types"
+  },
+  {
+    "id": "CT-021",
+    "pattern": "inaccessible|no member 'received'",
+    "scope": "a handwritten observation offers no fetch success edge, so a second result cannot bypass the retained first one"
+  },
+  {
+    "id": "CT-022",
+    "pattern": "no member 'failed'",
+    "scope": "a handwritten observation offers no fetch failure edge, so a second result cannot bypass the retained first one"
+  },
+  {
+    "id": "CT-023",
+    "pattern": "no member 'audited'",
+    "scope": "a handwritten observation offers no audit success edge, so a second result cannot bypass the retained first one"
+  },
+  {
+    "id": "CT-024",
+    "pattern": "no member 'auditFailed'",
+    "scope": "a handwritten observation offers no audit failure edge, so a second result cannot bypass the retained first one"
+  },
+  {
+    "id": "CT-025",
+    "pattern": "inaccessible|no member 'deliver'",
+    "scope": "the handwritten managed owner runs its own work and offers no deliver"
+  },
+  {
+    "id": "CT-026",
+    "pattern": "cannot convert value.*RuntimePendingID.*PendingCompletionID",
+    "scope": "the handwritten graph has a nominal pending identity, so a raw runtime identity does not type-check"
   },
   {
     "id": "GCT-001",
@@ -247,7 +277,7 @@
   },
   {
     "id": "GMT-003-operation",
-    "pattern": "cannot assign value|conflicting arguments|cannot convert value",
+    "pattern": "cannot assign value|conflicting arguments|cannot convert value|_stateMachineTakes(Output|Failure|Request)' is unavailable",
     "scope": "invariant semantic equality witness rejects subtype/existential coercion"
   },
   {
@@ -271,9 +301,9 @@
     "scope": "actionable unsupported declaration diagnostic from actual macro expansion"
   },
   {
-    "id": "GMT-004-snapshot-case",
-    "pattern": "reserved by generated Snapshot",
-    "scope": "deterministic reserved Snapshot case diagnostic"
+    "id": "GMT-004-wrapper-member",
+    "pattern": "would generate the Observed method revision\\(\\), which redeclares Observed's revision property",
+    "scope": "a generated method collides with a wrapper member only when it has the member's full name"
   },
   {
     "id": "GMT-005-forbidden-effect",
@@ -322,13 +352,48 @@
   },
   {
     "id": "GHOST-IsolatedSequence",
-    "pattern": "main actor-isolated|MainActor",
-    "scope": "G5 normal-import confined snapshot sequence iterated off the main actor"
+    "pattern": "sending .* risks causing data races",
+    "scope": "G5 confined MainActor snapshot stream read off the main actor"
   },
   {
     "id": "GHOST-IsolatedSequenceOperators",
-    "pattern": "main actor-isolated conformance",
-    "scope": "G5 confined snapshot sequence passed to a sequence operator below the isolated-iteration OS floor"
+    "pattern": "has no member 'map'",
+    "scope": "G5 a confined MainActor snapshot stream offers no sequence operators; a Sendable projection does"
+  },
+  {
+    "id": "GHOST-IsolatedHostStream",
+    "pattern": "to conform to 'AsyncSequence'",
+    "scope": "G5 an IsolatedHost's confined snapshot stream is read with next(), not for await"
+  },
+  {
+    "id": "GHOST-IsolatedHostStreamOperators",
+    "pattern": "has no member 'map'",
+    "scope": "G5 an IsolatedHost's confined snapshot stream offers no sequence operators; Sendable projections do"
+  },
+  {
+    "id": "GHOST-IsolatedHostStreamEscape",
+    "pattern": "sending .* risks causing data races",
+    "scope": "G5 an IsolatedHost's confined snapshot stream cannot move to another actor"
+  },
+  {
+    "id": "GHOST-IsolatedSubscriptionEscape",
+    "pattern": "sending' parameter risks causing data races",
+    "scope": "G5 an IsolatedHost registration stays on its owning actor"
+  },
+  {
+    "id": "GHOST-ConfinedPublisher",
+    "pattern": "does not conform to the 'Sendable' protocol",
+    "scope": "G5 a Combine publisher of a confined owner carries only a Sendable projection"
+  },
+  {
+    "id": "GHOST-PresentedSnapshots",
+    "pattern": "does not conform to the 'Sendable' protocol",
+    "scope": "UI-007 a presentation publishes a confined snapshot only as a Sendable projection"
+  },
+  {
+    "id": "GHOST-ConfinedPendingProjection",
+    "pattern": "does not conform to the 'Sendable' protocol",
+    "scope": "G5 a confined owner's pending-completion projection must be Sendable"
   },
   {
     "id": "GHOST-SharedSnapshots",
@@ -369,5 +434,820 @@
     "id": "GCT-infallible-failed",
     "pattern": "no member 'failed'",
     "scope": "the work of an operation that cannot fail seals no failure"
+  },
+  {
+    "id": "GMT-generated-names",
+    "pattern": "would generate Route.Choose, which router 'choose' also generates",
+    "scope": "generated names are validated where they are emitted: two routers whose choice types share a name are diagnosed, and a router name another router's absent result type would use is accepted"
+  },
+  {
+    "id": "GCT-restoration-only",
+    "pattern": "no member 'draft'",
+    "scope": "@Restoration(only:) generates exactly the listed phases, excluding an unlisted resting phase"
+  },
+  {
+    "id": "GCT-void-input",
+    "pattern": "no member 'input'",
+    "scope": "an operation without an Input alias takes Void: its effect has no payload and its work has no input"
+  },
+  {
+    "id": "GCT-effect-equatable",
+    "pattern": "binary operator '==' cannot be applied",
+    "scope": "effects are Equatable in another module only when the schema's inheritance clause lists Equatable"
+  },
+  {
+    "id": "GMT-route-failure",
+    "pattern": "thrown expression type .*Other.* cannot be converted to error type .*Problem",
+    "scope": "a router that pins its failure keeps its method's signature, and the compiler checks every throwing candidate against it"
+  },
+  {
+    "id": "GCT-same-name-effect",
+    "pattern": "'Retry' is not a member type|no member 'Retry'",
+    "scope": "same-named edges in different phases that start different operations have only phase-qualified effect types"
+  },
+  {
+    "id": "GMT-same-phase-name",
+    "pattern": "already has an edge or router named 'edit'",
+    "scope": "edges may share a name across phases but not within one phase"
+  },
+  {
+    "id": "GMT-from-completion",
+    "pattern": "Only an input transition lists its source phases in from:|extra argument 'from'",
+    "scope": "a transition lists several source phases only for an input; a completion edge names its source"
+  },
+  {
+    "id": "GCT-owners",
+    "pattern": "'Shared' is not a member type|no member 'Shared'",
+    "scope": "a schema that selects owners generates no deselected owner"
+  },
+  {
+    "id": "GMT-scope-active",
+    "pattern": "runs in the phases of its scope's @Active",
+    "scope": "an operation inherits its named scope's phases and cannot also list its own"
+  },
+  {
+    "id": "GMT-terminal-edge",
+    "pattern": "Terminal phase 'broken' cannot have an outgoing transition 'mend'",
+    "scope": "a terminal phase has no outgoing edge"
+  },
+  {
+    "id": "GMT-unreachable-phase",
+    "pattern": "Phase 'refunded' is unreachable from the initial phase 'cart'",
+    "scope": "every phase is reachable from the initial phase or a restorable phase"
+  },
+  {
+    "id": "GMT-missing-exit",
+    "pattern": "Phase 'sent' has no outgoing transitions; mark it '@Terminal'",
+    "scope": "a phase without an outgoing edge is marked terminal"
+  },
+  {
+    "id": "GCT-event-handler",
+    "pattern": "missing argument for parameter 'onTracked'",
+    "scope": "a managed owner takes a required handler for each event"
+  },
+  {
+    "id": "GMT-owners-mode",
+    "pattern": "Owner '.shared' is unavailable in .isolated",
+    "scope": "an owner selection lists only owners the mode supports"
+  },
+  {
+    "id": "GCT-keyed-effect",
+    "pattern": "missing argument for parameter 'key'",
+    "scope": "A keyed operation's effect names its key"
+  },
+  {
+    "id": "GCT-cancel-unlisted",
+    "pattern": "has no member 'cancelDownload'",
+    "scope": "an edge cancels only the operations its cancels: list names"
+  },
+  {
+    "id": "GCT-request-type",
+    "pattern": "_stateMachineTakesRequest' is unavailable: A completion edge or router takes its operation's request in the parameter labeled request:",
+    "scope": "a completion edge's request: parameter is exactly its operation's request"
+  },
+  {
+    "id": "GCT-key-hashable",
+    "pattern": "does not conform to protocol 'Hashable'",
+    "scope": "an operation's key is Hashable and Sendable"
+  },
+  {
+    "id": "GCT-keyed-driver",
+    "pattern": "expects 2 arguments",
+    "scope": "a keyed operation's driver takes its key and its input"
+  },
+  {
+    "id": "GCT-policy-default",
+    "pattern": "missing argument for parameter 'completionPolicy'",
+    "scope": "a managed owner of a schema whose completion can refuse takes no default completion policy"
+  },
+  {
+    "id": "GCT-reset-default",
+    "pattern": "missing argument for parameter 'to'",
+    "scope": "reset(to:) defaults its argument only when the initial phase declares a default"
+  },
+  {
+    "id": "GCT-pending-updates",
+    "pattern": "has no member 'pendingCompletionUpdates'",
+    "scope": "only a managed owner offers pending-completion updates"
+  },
+  {
+    "id": "GMT-cancels-unkeyed",
+    "pattern": "'Download' declares no Key, so it has no work to cancel by key",
+    "scope": "an edge cancels only a keyed operation's work"
+  },
+  {
+    "id": "GMT-schema-effect-shadow",
+    "pattern": "which hides the schema 'Search' inside Effect",
+    "scope": "an edge's effect type cannot hide its schema inside Effect"
+  },
+  {
+    "id": "GCT-isolated-host-actor",
+    "pattern": "call to actor-isolated instance method 'send\\(_:isolation:\\)' in a synchronous actor-isolated context",
+    "scope": "an IsolatedHost cannot be used from an actor other than its owner's type"
+  },
+  {
+    "id": "GCT-isolated-host-instance",
+    "pattern": "sending .* risks causing data races",
+    "scope": "an IsolatedHost cannot move to another instance of its owning actor's type"
+  },
+  {
+    "id": "GCT-isolated-host-nonisolated",
+    "pattern": "call to actor-isolated instance method 'send\\(_:isolation:\\)' in a synchronous nonisolated context",
+    "scope": "an IsolatedHost cannot be used from a nonisolated context"
+  },
+  {
+    "id": "GCT-isolated-token-destructor",
+    "pattern": "call to actor-isolated instance method 'cancel\\(isolation:\\)' in a synchronous nonisolated context",
+    "scope": "an IsolatedHost registration cannot be cancelled from an ordinary object's destructor, which can run on any thread"
+  },
+  {
+    "id": "GCT-isolated-stream-nil",
+    "pattern": "'nil' is not compatible with expected argument type 'any Actor'",
+    "scope": "a confined snapshot stream ends only on an actor: cancel(isolation:) takes no absent actor"
+  },
+  {
+    "id": "GCT-isolated-stream-destructor",
+    "pattern": "call to actor-isolated instance method 'cancel\\(isolation:\\)' in a synchronous nonisolated context",
+    "scope": "a confined snapshot stream cannot be ended from an ordinary object's destructor, which can run on any thread"
+  },
+  {
+    "id": "GCT-isolated-token-actor",
+    "pattern": "call to actor-isolated instance method 'cancel\\(isolation:\\)' in a synchronous main actor-isolated context",
+    "scope": "an IsolatedHost registration cannot be cancelled on an actor other than its owner's type"
+  },
+  {
+    "id": "GCT-isolated-host-counts",
+    "pattern": "call to actor-isolated instance method '(runningCount|subscriberCount|isQuiescent)\\(isolation:\\)' in a synchronous nonisolated context",
+    "scope": "an IsolatedHost's counts cannot be read outside its owning actor"
+  },
+  {
+    "id": "GMT-void-success",
+    "pattern": "succeeds without output, so its success edge takes no output parameter",
+    "scope": "a success edge of an operation whose Output is Void takes no output parameter, only the source and optionally the request"
+  },
+  {
+    "id": "GMT-unaccepted-failure",
+    "pattern": "its failure is never accepted",
+    "scope": "every outcome of a fallible operation needs a completion edge that can accept it where the work can be active"
+  },
+  {
+    "id": "GMT-label-collision",
+    "pattern": "both name the managed initializer parameter 'onPrintDriver'",
+    "scope": "an operation's driver label and an event's handler label share one initializer and cannot collide"
+  },
+  {
+    "id": "GMT-bounded-parallel",
+    "pattern": "Completion edge 'three' can never fire",
+    "scope": "bounded unkeyed parallel work retires one execution per completion, so a completion beyond the bound cannot fire"
+  },
+  {
+    "id": "GCT-managed-completion",
+    "pattern": "uses a fileprivate type|inaccessible",
+    "scope": "without Local, a selection hands no completion to its caller, so its completion types are not public"
+  },
+  {
+    "id": "GCT-coverage-owner",
+    "pattern": "cannot convert value of type 'ManualMachineTest<Twin.Local>'",
+    "scope": "graph coverage is bound to one owner type, so a run of another schema with the same structure cannot count"
+  },
+  {
+    "id": "GMT-joint-reachability",
+    "pattern": "Phase 'published' is unreachable from the initial phase 'drafting'",
+    "scope": "reachability follows each path's own outstanding work, so work one path starts is never combined with work only another path holds"
+  },
+  {
+    "id": "GMT-owned-completions",
+    "pattern": "Phase 'done' is unreachable from the initial phase 'ready'",
+    "scope": "an Owned-only graph checks phase paths without ticket counts, and a selection with a hosted owner counts the executions its tickets settle"
+  },
+  {
+    "id": "GMT-standard-library-shadow",
+    "pattern": "'String' is not a member type of enum",
+    "scope": "generated code names standard-library types through module selectors, so module-level and schema-level types of the same names, including Swift, compile, and authored spellings keep their lexical meaning"
+  },
+  {
+    "id": "GMT-dictionary-key-payload",
+    "pattern": "cannot convert value of type .*Scores\\.Input",
+    "scope": "a dictionary input payload keyed by a type nested in Input is qualified as a type, and the reducer must still take the payload the case's constructor carries"
+  },
+  {
+    "id": "GMT-reservation-gating",
+    "pattern": "A throwing router cannot choose an edge named 'rejected'",
+    "scope": "generated case names are reserved only by the owners and declarations whose expansion uses them"
+  },
+  {
+    "id": "GMT-void-comment",
+    "pattern": "succeeds without output, so its success edge takes no output parameter",
+    "scope": "an empty tuple is Void whatever its comments"
+  },
+  {
+    "id": "GMT-effect-list-order",
+    "pattern": "name its effects Effect.Off.Tap",
+    "scope": "edges of one name share an effect type when their lists declare the same effects in any order"
+  },
+  {
+    "id": "GMT-infallible-failure-edge",
+    "pattern": "Operation 'Fetch' cannot fail: its Failure is Never, so this onFailure: transition can never run",
+    "scope": "a failure edge of an operation that cannot fail is rejected before reachability credits the phase it enters"
+  },
+  {
+    "id": "GMT-never-success-edge",
+    "pattern": "Operation 'Fetch' never succeeds: its Output is Never, so this onSuccess: transition can never run",
+    "scope": "an operation whose Output is Never has no success edge; it ends only by failing"
+  },
+  {
+    "id": "GMT-never-finishing-operation",
+    "pattern": "Operation 'Fetch' can never finish: its Output and its Failure are both Never",
+    "scope": "an operation that can neither succeed nor fail could never return from its driver, so it is rejected"
+  },
+  {
+    "id": "GMT-never-input-trigger",
+    "pattern": "Input case 'pay' carries Never, so no input can ever have this case",
+    "scope": "an input case that carries Never can never be sent, so it is rejected where it is declared, before reachability credits its edges"
+  },
+  {
+    "id": "GMT-never-start",
+    "pattern": "Operation 'Upload' takes Never as its key, so no transition can start it",
+    "scope": "an operation whose key or input is Never has no effect a transition could return, so it is rejected"
+  },
+  {
+    "id": "GMT-custom-attribute-payload",
+    "pattern": "cannot convert value of type 'Decoder.Input.Int' to expected argument type 'Int'",
+    "scope": "input payloads keep their lexical meaning: custom attributes are qualified, built-in attributes kept, and module selectors respected"
+  },
+  {
+    "id": "GMT-schema-local-never",
+    "pattern": "Result<\\(\\), Lookup.Never>|Result<Void, Lookup.Never>",
+    "scope": "a schema that declares its own Never keeps that type: an operation whose Failure names it is fallible and its driver returns a Result"
+  },
+  {
+    "id": "GMT-schema-local-void",
+    "pattern": "closure argument list expects 1 argument",
+    "scope": "a schema that declares its own Void keeps that type: an operation input, output, and event payload that name it carry a value"
+  },
+  {
+    "id": "GMT-namespace-local-never",
+    "pattern": "Result<\\(\\), Lookup.Fetch.Never>|Result<Void, Lookup.Fetch.Never>",
+    "scope": "an operation namespace that declares its own Never keeps that type: an operation whose Failure names it is fallible and its driver returns a Result"
+  },
+  {
+    "id": "GMT-namespace-local-void",
+    "pattern": "closure argument list expects 1 argument",
+    "scope": "an operation namespace and an event namespace that declare their own Void keep that type: the operation input, output, and event payload that name it carry a value"
+  },
+  {
+    "id": "GMT-module-never-failure",
+    "pattern": "has no onFailure: edge or router, so the macro reads its Failure as Never, but it resolves to a type with values",
+    "scope": "a bare Never is read as the standard library's, so without a failure edge an operation whose Failure names a Never declared outside the schema reads as one that cannot fail, and fails a generated same-type check"
+  },
+  {
+    "id": "GMT-module-void-output",
+    "pattern": "succeeds without output, as its onSuccess: edges and routers take none, but its Output resolves to a type other than Void",
+    "scope": "a bare Void is read as the standard library's, and success edges that take no output say the Output is Void, so an Output that names a Void declared outside the schema fails a generated same-type check"
+  },
+  {
+    "id": "GMT-module-void-payload",
+    "pattern": "The macro reads this type as the standard library's Void, but it resolves to a different type",
+    "scope": "a bare Void is read as the standard library's, so an event Payload that names a Void declared outside the schema fails a generated same-type check"
+  },
+  {
+    "id": "GMT-module-never-effect",
+    "pattern": "The macro reads this type as the standard library's Never, but it resolves to a different type",
+    "scope": "a bare Never is read as the standard library's in a schema's own signatures, so an effect type that names a Never declared outside the schema fails a generated same-type check"
+  },
+  {
+    "id": "GMT-router-failure-spelling",
+    "pattern": "thrown expression type 'Door.Problem' cannot be converted to error type 'Door.Other'",
+    "scope": "a router's failure groups its candidates' thrown types by what they name, and its result type is compared through syntax"
+  },
+  {
+    "id": "GMT-module-named-namespace",
+    "pattern": "type 'Compiler.Route.Swift' has no member 'link'",
+    "scope": "a generated choice or effect type named Swift or StateMachine does not capture the module inside its namespace"
+  },
+  {
+    "id": "GMT-route-result-schema-name",
+    "pattern": "This router's owned result type would be Route.FlowResult, which hides the schema 'FlowResult' inside Route",
+    "scope": "a router's owned result type cannot hide its schema inside Route"
+  },
+  {
+    "id": "GMT-captured-spellings",
+    "pattern": "cannot convert value of type 'Gate.Shut' to expected argument type",
+    "scope": "authored types named Owner, Phase, or Host keep their meaning inside the generated generic owners and hosts"
+  },
+  {
+    "id": "GMT-cancellation-case-collision",
+    "pattern": "Keyed operation 'Sync' generates the effect case 'cancelAllSync' to cancel all of its work",
+    "scope": "every emitted Effect case is checked against the others, including two keyed operations' cancellation cases"
+  },
+  {
+    "id": "GMT-rejection-case-names",
+    "pattern": "'invalidPhase' is already a PreparationRejection case; rename this throwing transition",
+    "scope": "a throwing function's PreparationRejection case is checked by the name it finally has"
+  },
+  {
+    "id": "GMT-effect-fixed-members",
+    "pattern": "Event 'Cancel' would generate the case 'cancel' in Local's Command",
+    "scope": "an effect name collides with a fixed member only where the expansion emits that member"
+  },
+  {
+    "id": "GMT-operation-type-names",
+    "pattern": "Operation 'Pending' would generate the type 'PendingCompletion', which the expansion already declares",
+    "scope": "an operation's generated request, completion, and work types are checked against the types the expansion declares"
+  },
+  {
+    "id": "GCT-isolated-driver-destructor",
+    "pattern": "call to actor-isolated instance method 'succeed\\(_:isolation:\\)' in a synchronous nonisolated context",
+    "scope": "a confined controlled driver's call finishes only on its owning actor, never from an ordinary object's destructor"
+  },
+  {
+    "id": "GCT-isolated-driver-input",
+    "pattern": "call to actor-isolated instance method 'input\\(isolation:\\)' in a synchronous nonisolated context",
+    "scope": "a confined controlled driver's call hands out its input only on its owning actor"
+  },
+  {
+    "id": "GCT-isolated-driver-actor",
+    "pattern": "call to actor-isolated instance method 'succeed\\(_:isolation:\\)' in a synchronous main actor-isolated context",
+    "scope": "a confined keyed controlled driver's call cannot be finished on an actor other than its owner's type"
+  },
+  {
+    "id": "GMT-alias-void-output",
+    "pattern": "Operation 'Push' succeeds without output, so its success edge takes no output parameter",
+    "scope": "a Void the namespace declares through an alias decides the success edge arity as Void does"
+  },
+  {
+    "id": "GMT-alias-never-failure",
+    "pattern": "Operation 'Push' cannot fail: its Failure is Never",
+    "scope": "a Never the schema declares through an alias is read as Never; the namespace reads that alias from the schema, where a member an extension gives the namespace could hide it, so the failure edge makes the operation fallible and the expansion's check of its Failure reports that it cannot fail"
+  },
+  {
+    "id": "GMT-alias-router-failure",
+    "pattern": "cannot convert value of type 'Picker.Problem' to specified type 'Picker.PreparationRejection'",
+    "scope": "router candidates whose failures differ only by a schema alias keep one common error and one owned result"
+  },
+  {
+    "id": "GMT-imported-never-failure",
+    "pattern": "Operation 'Push' cannot fail: its Failure is Never, so its onFailure: edges and routers can never run",
+    "scope": "a Failure that names Never through an alias the macro cannot see fails a generated probe instead of compiling an impossible edge"
+  },
+  {
+    "id": "GMT-dotted-name-lexical",
+    "pattern": "Operation 'Push' cannot fail: its Failure is Never",
+    "scope": "a dotted name means what its first component resolves to where the author wrote it"
+  },
+  {
+    "id": "GMT-file-scope-module-names",
+    "pattern": "does not conform to protocol 'Error'",
+    "scope": "generated module references survive file-scope types named for the modules"
+  },
+  {
+    "id": "GMT-pinned-failure-owned",
+    "pattern": "thrown expression type 'Picker.Other' cannot be converted to error type 'Picker.Problem'",
+    "scope": "every throwing function of a pinned router group is checked against its pinned failure independently of the generated owners"
+  },
+  {
+    "id": "GMT-spelling-alias-capture",
+    "pattern": "cannot convert value of type|cannot assign value of type",
+    "scope": "an aliased spelling is documented on one line and its alias takes a name no authored spelling uses"
+  },
+  {
+    "id": "GMT-spelling-alias-access",
+    "pattern": "uses a fileprivate type",
+    "scope": "an alias exists only for a use a generated scope captures and takes its access from that use"
+  },
+  {
+    "id": "GMT-declared-names",
+    "pattern": "'Owned' is reserved for generated members; rename the authored declaration",
+    "scope": "every direct type declaration and every identifier a pattern binds is checked against the generated names"
+  },
+  {
+    "id": "GMT-graph-outcomes",
+    "pattern": "missing arguments for parameters 'canFail', 'canSucceed' in call",
+    "scope": "a graph operation records whether it can fail and succeed beside its authored spellings"
+  },
+  {
+    "id": "GMT-omitted-type-spelling",
+    "pattern": "cannot convert value of type .* to expected argument type 'Ledger\\.(Load|Closing)\\.(Void|Never)\\.Type'",
+    "scope": "the graph spells an omitted Input, Output, Failure, or event Payload through the standard library's module, which a namespace's own Swift, Void, or Never cannot shadow"
+  },
+  {
+    "id": "GCT-testing-default-reset",
+    "pattern": "requires that 'Counter.Local' conform to 'DefaultingLocalStateMachine'",
+    "scope": "the testing harness offers reset() and reset(expecting:) only for an owner whose schema declares an initial default"
+  },
+  {
+    "id": "GMT-never-input-case",
+    "pattern": "Input case 'refund' carries Never, so no input can ever have this case",
+    "scope": "an Input case that carries Never is rejected where it is declared, whether or not an edge uses it"
+  },
+  {
+    "id": "GMT-structural-member-type",
+    "pattern": "Operation 'Load' succeeds without output, so its success edge takes no output parameter",
+    "scope": "a member of a structural or parenthesized base reads through its base, and an alias of a parenthesized namespace keeps its members"
+  },
+  {
+    "id": "GMT-generic-alias-outcome",
+    "pattern": "Operation 'Load' cannot fail: its Failure is Never",
+    "scope": "a generic alias reads with its arguments, so Identity<Never> is read as Never, which the failure edge's check reports, and Identity<Void> leaves its success no output"
+  },
+  {
+    "id": "GMT-imported-never-input",
+    "pattern": "takes Never as its input, so no transition can start it",
+    "scope": "an operation Input that names Never through an alias the macro cannot see fails a generated probe instead of compiling an operation no transition can start"
+  },
+  {
+    "id": "GMT-imported-never-key",
+    "pattern": "takes Never as its key, so no transition can start it",
+    "scope": "an operation Key that names Never through an alias the macro cannot see fails a generated probe instead of compiling an operation no transition can start"
+  },
+  {
+    "id": "GMT-throws-never-candidate",
+    "pattern": "thrown expression type 'Picker.Other' cannot be converted to error type 'Picker.Problem'",
+    "scope": "a function that throws Never, spelled directly or through an alias the schema declares, is nonthrowing in every witness, result, and wrapper"
+  },
+  {
+    "id": "GMT-sugar-failure-key",
+    "pattern": "thrown expression type 'Picker.PreparationRejection' cannot be converted to error type 'Picker.Problem<\\[Picker.Detail\\]>'",
+    "scope": "array, dictionary, and optional sugar key as the types they abbreviate, so candidates that throw one type however spelled share one failure"
+  },
+  {
+    "id": "GMT-escaped-identifiers",
+    "pattern": "Name the case with a Swift identifier that needs no backticks, such as one that is not a keyword",
+    "scope": "redundant backticks change no name: escaped references are looked up and shielded by their names, and escaped declarations name their declarations"
+  },
+  {
+    "id": "GMT-pending-member-operations",
+    "pattern": "The schema name is reserved or shadowed by a direct member; choose a distinct domain name",
+    "scope": "an operation named like PendingCompletion's nested Outcome or Rejection keeps its own types, and the schema's own name is reserved against both"
+  },
+  {
+    "id": "GMT-escaping-payload",
+    "pattern": "Take this payload without '@autoclosure'",
+    "scope": "a payload parameter keeps @escaping on the parameters generated code declares, and names the underlying closure type in witnesses and aliases"
+  },
+  {
+    "id": "GMT-alias-chain",
+    "pattern": "Type alias 'A' names itself, directly or through other aliases",
+    "scope": "an alias chain of any length reads through to the type it names, and an alias that names itself, once a reading reaches it, is diagnosed where it is declared"
+  },
+  {
+    "id": "GMT-graph-signature",
+    "pattern": "'graph' is reserved for generated members; rename the authored declaration",
+    "scope": "the generated static let graph collides with a static property, a type, a case without a payload, or a synchronous static method without parameters of its name, and with nothing else: a phase case and an async method are other declarations"
+  },
+  {
+    "id": "GMT-imported-never-throws",
+    "pattern": "The macro reads this type as one with values, but it names Never through a declaration the macro cannot read",
+    "scope": "a thrown type that names Never through an alias the macro cannot see fails a generated probe instead of generating a rejection that can never happen"
+  },
+  {
+    "id": "GMT-never-event-payload",
+    "pattern": "Event 'Tracked' carries Never, so no transition can emit it",
+    "scope": "an event whose payload is Never could never be emitted, so it is rejected where it is declared"
+  },
+  {
+    "id": "GMT-type-spelling-matrix",
+    "pattern": "Operation 'Rejection' succeeds without output, as its onSuccess: edges and routers take none",
+    "scope": "every kind of type spelling, in each position an authored type takes, compiles with the meaning Swift gives it, and a success edge for a generic alias of Never as an Output fails a generated check"
+  },
+  {
+    "id": "GMT-shadowed-error-input",
+    "pattern": "Operation 'Push' takes Never as its input",
+    "scope": "a bare standard-library name such as Error is a reading the macro cannot confirm, so an operation input that names a file-scope Error of Never fails a generated probe, and one of a type with values compiles"
+  },
+  {
+    "id": "GMT-inherited-member-never",
+    "pattern": "Operation 'Push' takes Never as its input",
+    "scope": "the macro does not read inherited members, so an alias that reaches Never through a superclass fails a generated probe instead of being read as the enclosing schema's type"
+  },
+  {
+    "id": "GMT-existential-metatype-failures",
+    "pattern": "cannot convert value of type 'Problem<any Part\\.Type>'",
+    "scope": "an existential metatype and the metatype of an existential are two failure types, so router candidates throwing them get separate rejection cases"
+  },
+  {
+    "id": "GMT-isolated-sending-payload",
+    "pattern": "does not conform to the 'Sendable' protocol",
+    "scope": "an isolated observing owner keeps an input it receives, so it passes a sending payload on only when the payload's type is Sendable, which a generated requirement checks; an Owned edge, which holds the value alone, receives it transferred"
+  },
+  {
+    "id": "GMT-isolated-sending-router",
+    "pattern": "An Owned router takes this value as sending, which gives it away",
+    "scope": "an isolated router passes its payload on to the edge it selects, so it takes the payload as sending only when the payload's type is Sendable, which a generated check reports with its cause; a router that borrows the payload with a Sendable phase lets its edges take it as sending"
+  },
+  {
+    "id": "GMT-restoration-sending",
+    "pattern": "sending 'archive' risks causing data races",
+    "scope": "a restoration function's sending saved data is repeated by every restoring initializer and reset, and RestoringLocalStateMachine takes it as sending, so Local conforms and the caller gives the data up"
+  },
+  {
+    "id": "GMT-function-input-driver",
+    "pattern": "non-escaping parameter",
+    "scope": "a driver takes an input the macro confirms is a function type as escaping, so it can return or keep it; one spelled through an alias the macro cannot see reaches the driver as it is, so the driver can call it but not return it"
+  },
+  {
+    "id": "GMT-implementation-names",
+    "pattern": "'_StateMachineEngine' names a declaration the expansion makes inside the schema for its own use",
+    "scope": "a spelling naming an outside declaration by an implementation name is diagnosed; the local alias of a generated check takes a name the schema never spells"
+  },
+  {
+    "id": "GMT-expression-schema-name",
+    "pattern": "cannot convert value of type 'String' to expected argument type 'Int'",
+    "scope": "generated expressions name the schema through a private alias, so a schema named like a generated parameter compiles"
+  },
+  {
+    "id": "GMT-unicode-identifiers",
+    "pattern": "Operation 'Sprout' cannot fail: its Failure is Never",
+    "scope": "redundant backticks around identifiers Swift's lexer accepts, such as an emoji or a precomposed accent, change no name, so the escaped alias of Never is read as Never and its failure edge's check reports it"
+  },
+  {
+    "id": "GMT-identifier-bytes",
+    "pattern": "The name .* is not in Unicode Normalization Form C; spell it",
+    "scope": "a name not written in Normalization Form C, here an alias spelled with a combining accent, is refused at each of its tokens, and its precomposed spelling compiles and names its declaration"
+  },
+  {
+    "id": "GMT-identifier-encoding-variants",
+    "pattern": "The name .* is not in Unicode Normalization Form C; spell it",
+    "scope": "two edges whose names differ only in how an accent is encoded are refused at the one not in Normalization Form C rather than taken for one name, and two edges with distinct composed names compile"
+  },
+  {
+    "id": "GMT-path-key-budget",
+    "pattern": "cannot convert return expression of type .*PreparationRejection",
+    "scope": "an alias whose key outgrows the key budget reads as its own identity whether a chain or a path of aliases read it first, so the router's failure type does not depend on what another declaration read before"
+  },
+  {
+    "id": "GMT-value-conformance-shadow",
+    "pattern": "The schema's inheritance clause names Equatable, which the macro reads as the standard library's Swift::Equatable",
+    "scope": "generated effect and restoration types repeat a bare Equatable or Hashable of the schema's inheritance clause through the module, so a file-scope protocol of that name fails a generated check that the schema conforms to the standard library's protocol"
+  },
+  {
+    "id": "GMT-schema-name-in-namespace",
+    "pattern": "Operation 'Push' takes Never as its input",
+    "scope": "a nested scope's extension can take the schema's own name, so a reading through it is unconfirmed and the operation's input is checked where the compiler resolves it, which rejects an input that is Never"
+  },
+  {
+    "id": "GMT-schema-name-extension",
+    "pattern": "names another type inside the schema, where an extension declares a member of that name",
+    "scope": "every expansion checks that the schema's name names the schema at its own scope, where an extension could declare a member of that name"
+  },
+  {
+    "id": "GMT-input-case-extension",
+    "pattern": "Input case 'refill' carries Never, so no input can ever have this case",
+    "scope": "an Input case's payload is read inside Input, where an extension can declare a member, so its witness and its Never check infer the payload through the case's constructor"
+  },
+  {
+    "id": "GMT-namespace-extension-never",
+    "pattern": "Operation 'Load' takes Never as its input, so no transition can start it",
+    "scope": "an operation's Input, Key, or Output and an event's Payload that the namespace reads as Never through a name an extension could take are checked rather than diagnosed, and the check finds the extension's type"
+  },
+  {
+    "id": "GMT-unconfirmed-outcome",
+    "pattern": "Operation 'Fetch' cannot fail: its Failure is Never, so its onFailure: edges and routers can never run",
+    "scope": "an outcome an edge takes is one its author says can happen, so a Never the macro cannot confirm gives way to it and is checked on the operation's own alias"
+  },
+  {
+    "id": "GMT-inherited-alias-cycle",
+    "pattern": "references itself|circular reference",
+    "scope": "a cycle through a link that a superclass's or an extension's member could change is left for the compiler, which resolves the inherited member"
+  },
+  {
+    "id": "GMT-value-conformance-body",
+    "pattern": "The schema's inheritance clause names Equatable, which the macro reads as the standard library's Swift::Equatable",
+    "scope": "the schema's inheritance clause is read outside its body, and a bare or dotted Equatable or Hashable in it is checked on the schema itself, which conforms to the standard library's protocol or fails with a message"
+  },
+  {
+    "id": "GMT-backticked-type",
+    "pattern": "Operation 'Push' has no onFailure: edge or router, so the macro reads its Failure as Never",
+    "scope": "a backticked Type or Protocol declares the name a bare Type looks up where no period precedes it, so the macro reads the alias as Swift does"
+  },
+  {
+    "id": "GMT-router-unconfirmed-result",
+    "pattern": "A router with no edge to choose returns Never and throws a typed rejection",
+    "scope": "a router result the macro cannot confirm is no Never is checked to be one, with the router's diagnostic"
+  },
+  {
+    "id": "GMT-sending-request",
+    "pattern": "does not conform to the 'Sendable' protocol",
+    "scope": "a completion's request keeps its sending convention where the generated method passes it on, and an observing owner, which keeps the request, has it declare Sendable, which the compiler checks from its stored fields"
+  },
+  {
+    "id": "GMT-failure-identity",
+    "pattern": "PreparationRejection",
+    "scope": "router candidates share a failure only when their spellings name one type by a compiler-checked equivalence: an alias, a qualified name, sugar, any, a composition's or attributes' order, a nested composition flattened and a repeated member, parentheses, a throw of Never or any Error, Swift's metatype rule, and the concrete metatype of a sugared standard type; any other difference keeps two failures"
+  },
+  {
+    "id": "GMT-input-payload-exact",
+    "pattern": "_TriggerPayloadMatchesDeclaration",
+    "scope": "the witness that an edge takes its Input case's payload infers the payload from the case's constructor alone and compares it with the parameter in a statement of its own, so no optional promotion, erasure, or function conversion adapts one to the other"
+  },
+  {
+    "id": "GMT-authored-output",
+    "pattern": "succeeds without output, as its onSuccess: edges and routers take none",
+    "scope": "where the macro cannot confirm an operation's Output, the success edges and routers decide whether a success carries a value, and the expansion checks the type"
+  },
+  {
+    "id": "GMT-authored-outcomes",
+    "pattern": "has no onFailure: edge or router, so the macro reads its Failure as Never",
+    "scope": "where the macro cannot confirm an operation's Failure or Output, its onFailure: and onSuccess: edges and routers decide whether that outcome happens, and the expansion checks the type"
+  },
+  {
+    "id": "GMT-carried-function",
+    "pattern": "may allow it to escape",
+    "scope": "a request that carries an input and a work that can succeed store their input and output through a generic parameter, so a closure the macro cannot see is stored without @escaping and a non-escaping one is rejected"
+  },
+  {
+    "id": "GMT-never-spelling-revised",
+    "pattern": "reads this type as the standard library's Never, but it resolves to a different type",
+    "scope": "a router with no edge to choose shows that the spelling it throws names a type with values, every function that throws the same spelling is revised with it, and each check belongs to its own declaration"
+  },
+  {
+    "id": "GMT-sending-request-shared",
+    "pattern": "Sendable",
+    "scope": "a request an observing owner keeps and passes to a sending parameter declares Sendable, which the compiler checks from its stored fields, public or not"
+  },
+  {
+    "id": "GMT-sending-router-once",
+    "pattern": "Sendable",
+    "scope": "an Owned router's sending request is transferred once unless an edge it selects also takes it, which needs the request to be Sendable"
+  },
+  {
+    "id": "GMT-routed-transfer-phase",
+    "pattern": "reads this value with its source phase",
+    "scope": "an Owned router reads its payload or request with its source phase, so an edge it selects takes the value as sending only when the value or the phase is Sendable, which a generated check reports"
+  },
+  {
+    "id": "GMT-schema-name-value",
+    "pattern": "names another type inside the schema",
+    "scope": "every expansion checks the schema's name in type position, where a value of that name is no candidate, and names the schema through its alias where an expression needs it"
+  },
+  {
+    "id": "GMT-reading-budget",
+    "pattern": "nests too deeply, or reaches its type through too many aliases",
+    "scope": "a chain of aliases that each name the next reads without nesting at any length, and a reading that passes a step or nesting budget is diagnosed at its declaration, never guessed"
+  },
+  {
+    "id": "GMT-failure-identity-distinct",
+    "pattern": "PreparationRejection",
+    "scope": "two failures are one only when the macro proves it, so a qualified custom attribute names the type its own scope finds and two such spellings in different scopes stay distinct"
+  },
+  {
+    "id": "GMT-success-request-order",
+    "pattern": "succeeds with output, so its success edge takes the output, unlabeled, after the source",
+    "scope": "a success edge of an operation that succeeds with output takes the output unlabeled before its request:, so one that takes only the request is diagnosed at the request"
+  },
+  {
+    "id": "GMT-request-label-order",
+    "pattern": "Take the request last, labeled request:, after the source and the operation.s failure",
+    "scope": "a completion takes its request last, after the source and the outcome, which the declaration diagnoses otherwise"
+  },
+  {
+    "id": "GMT-request-label-input-edge",
+    "pattern": "Only a completion edge or router takes its operation.s request, labeled request:",
+    "scope": "a function an input triggers takes no request, so a request: label there is diagnosed"
+  },
+  {
+    "id": "GMT-request-label-output",
+    "pattern": "_stateMachineTakesOutput' is unavailable: .*take the request with the argument label request:",
+    "scope": "an unlabeled parameter after the source is the output, the request's own type included, and the witness that compares it with the Output names the label a request takes"
+  },
+  {
+    "id": "GMT-request-label-spellings",
+    "pattern": "_stateMachineTakesOutput' is unavailable",
+    "scope": "the review's spellings: a schema alias named like the request, an Output that is the request's backing type, and an alias of the generated request whose Output an extension makes Void, each taking the role its label says"
+  },
+  {
+    "id": "GMT-request-label-no-request",
+    "pattern": "has no Key and takes no input, so its completion carries no request",
+    "scope": "an operation without a key or an input has no request, so a request: parameter is diagnosed whatever it spells"
+  },
+  {
+    "id": "GMT-key-only-request-hashable",
+    "pattern": "does not conform to (the )?.Hashable.|requires that .* conform to .Hashable.",
+    "scope": "a request that carries only a key is Hashable and Sendable, and one that carries an input is Hashable exactly when its input is"
+  },
+  {
+    "id": "GMT-carried-input-never",
+    "pattern": "takes Never as its input",
+    "scope": "an unkeyed operation whose completion takes its request carries its input, so carriage is decided first and a carried input the macro reads as Void through a name it cannot confirm is checked not to be Never"
+  },
+  {
+    "id": "GMT-noncopyable-owned-input",
+    "pattern": "Input is noncopyable, which only Owned supports",
+    "scope": "an Owned verb repeats the ownership its transition declares for a payload, so a noncopyable input moves through Owned, and an owner that keeps inputs rejects a noncopyable Input where it is declared"
+  },
+  {
+    "id": "GMT-noncopyable-routed-payload",
+    "pattern": "cannot be both given away and passed on",
+    "scope": "an Owned router's method lends a noncopyable payload to the router and passes it on, so a router that consumes it, leaving nothing for the edge it selects, is rejected by a check that names the cause"
+  },
+  {
+    "id": "GMT-routed-borrowing",
+    "pattern": "borrowed and cannot be consumed",
+    "scope": "an Owned routed method borrows its payload when the router and every edge it may select borrow it, so a borrowing caller can call it, and consumes it when an edge consumes it"
+  },
+  {
+    "id": "GMT-routed-closure-payload",
+    "pattern": "'consuming' cannot be applied to nonescaping closure",
+    "scope": "an Owned routed method and its direct verbs take a nonescaping closure payload the ways the router and its edges may, plain, sending, borrowing, __owned, and __shared sending, so the expansion compiles whenever the authored functions do, and a consuming nonescaping closure is Swift's own rejection at the authored function"
+  },
+  {
+    "id": "GMT-routed-mixed-escaping",
+    "pattern": "passing non-escaping parameter 'work' to function expecting an '@escaping' closure",
+    "scope": "a router and its edges that differ in taking a closure payload @escaping, borrowing or __shared, with or without sending, give an Owned routed method that takes the payload escaping and compiles, so a caller passes an escaping closure, which may be one it only borrows"
+  },
+  {
+    "id": "GMT-routed-copyable-router",
+    "pattern": "borrowed and cannot be consumed",
+    "scope": "an Owned router that consumes a payload its edges then borrow gets an implicit copy from a plain method parameter, so a borrowing caller can route it, while an edge that consumes it, every function declaring an ownership, makes the method consume it"
+  },
+  {
+    "id": "GMT-success-parameter-role",
+    "pattern": "succeeds with output, so its success edge takes the output, unlabeled, after the source",
+    "scope": "the argument label decides a completion parameter's role: an unlabeled parameter after the source is the output, whatever it spells, the request's own type included, and the parameter labeled request: is the request, through any alias"
+  },
+  {
+    "id": "GMT-tuple-wildcard-label",
+    "pattern": "cannot be converted to error type",
+    "scope": "a tuple element's wildcard label is no label, as Swift reads it, so (_: A, B) and (A, B) are one failure and (_: ()) is Void, while a backticked label is its own"
+  },
+  {
+    "id": "GMT-initial-qualified-default",
+    "pattern": "Put this construction in a static function that returns Idle",
+    "scope": "an initial case that qualifies its payload, as Form.Idle or Self.Idle, names the one phase payload, whose default construction every fresh entry point spells once through the schema's alias"
+  },
+  {
+    "id": "GMT-routed-transfer-joined",
+    "pattern": "reads this value with the other value it passes on",
+    "scope": "an Owned router joins every value it reads without sending, so an edge it selects that sends one while another stays in use needs one of the two Sendable, which a generated check reports however Sendable the source phase is"
+  },
+  {
+    "id": "GMT-routed-request-sendable",
+    "pattern": "reads this value with its source phase",
+    "scope": "a request is Sendable exactly when its input is, through the runtime's conditional conformance, so a public request that carries an Int passes through a router to edges that send it beside a phase that is not Sendable"
+  },
+  {
+    "id": "GMT-routed-edges-differ",
+    "pattern": "takes this value as sending and another takes it without",
+    "scope": "a value one edge an Owned router may select sends while another reads it must be Sendable, even when the router never takes it, because the router's method keeps a value it may give away"
+  },
+  {
+    "id": "GMT-standard-kind",
+    "pattern": "has no onSuccess: edge or router",
+    "scope": "a standard-library name confirms its kind only from the macro's table: UnboundedRange is the function type it aliases, so a driver keeps it, and another standard name such as the caseless Unicode is checked wherever the shape rests on it"
+  },
+  {
+    "id": "GMT-parenthesized-signature",
+    "pattern": "Destination 'Swift\\.Int' is not a phase payload type declared in this schema",
+    "scope": "parentheses around a phase payload, source, destination, router choice, effect type, or the base of a member type change no shape the macro reads; a parenthesized destination that is no phase is diagnosed by its plain spelling"
+  },
+  {
+    "id": "GMT-underscored-source",
+    "pattern": "Use a plain or borrowing phase payload as the source parameter",
+    "scope": "a __shared source lends it as borrowing does and an .ownedOnly __owned source takes it as consuming does; an __owned source outside .ownedOnly is diagnosed as consuming is"
+  },
+  {
+    "id": "GMT-available-edge",
+    "pattern": "Remove '@available' and give the schema this availability instead",
+    "scope": "generated members have only the schema's availability, so an authored function cannot carry @available, which the macro cannot compare with the deployment target; a schema whose availability is above the client's deployment target, with its payload types annotated, compiles"
+  },
+  {
+    "id": "GMT-lowercase-attribute",
+    "pattern": "Remove '@uiActor': generated code calls this function from nonisolated code",
+    "scope": "an authored function takes only the macro's markers and Swift's @discardableResult, @inlinable, @inline, and @usableFromInline, so a custom attribute is refused whatever its capitalization"
+  },
+  {
+    "id": "GMT-public-helper-basename",
+    "pattern": "Declare 'Notes' public: the public schema 'Approval' generates public members that name it",
+    "scope": "a public schema requires its access of the declarations its generated signatures name, each resolved where its spelling is written, so a private helper sharing a basename with a public payload compiles and a type named through a path needs the access at every step"
+  },
+  {
+    "id": "GMT-integer-literal-spelling",
+    "pattern": "Use .parallel\\(limit: N\\) with a positive integer literal representable as Int",
+    "scope": "an admission limit is read as Swift reads an integer literal, with separators or in another base, and a limit of zero in any spelling is refused"
+  },
+  {
+    "id": "GMT-uncomposed-body",
+    "pattern": "The name .* is not in Unicode Normalization Form C; spell it",
+    "scope": "the Normalization Form C rule covers the names the macro interprets, so a function body, an accessor, and a closure may call a declaration whose name is not composed, while a signature that names it is refused"
   }
 ]

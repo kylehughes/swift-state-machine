@@ -1,3 +1,5 @@
+import Combine
+import Observation
 import StateMachine
 import StateMachineUI
 
@@ -23,8 +25,8 @@ nonisolated private enum PlatformLookup: Sendable {
     enum Problem: Error, Sendable { case unavailable }
     @Initial case idle(Idle = Idle())
     case loading(Loading)
-    case loaded(Loaded)
-    case failed(Failed)
+    @Terminal case loaded(Loaded)
+    @Terminal case failed(Failed)
     enum Input: Sendable { case load(Int) }
     @Operation(activeIn: [Loading.self])
     enum Fetch {
@@ -48,7 +50,7 @@ nonisolated private enum PlatformNote {
     struct Draft: ~Sendable { let text: String }
     struct Saved: ~Sendable { let text: String }
     @Initial case draft(Draft)
-    case saved(Saved)
+    @Terminal case saved(Saved)
     enum Input: ~Sendable { case save }
     @Transition(on: Input.save)
     fileprivate static func save(_ source: Draft) -> Saved { Saved(text: source.text) }
@@ -106,7 +108,8 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
     let note = PlatformNote.MainActorHost(PlatformNote.Draft(text: "platform-sequence"))
     var last: UInt64 = 0
     for await revision in try note.snapshots({ $0.revision }).prefix(1) { last += revision }
-    for await snapshot in try note.snapshots() {
+    var snapshots = try note.snapshots()
+    while let snapshot = await snapshots.next() {
         last = snapshot.revision
         if !snapshot.isClosed { note.close() }
     }
@@ -131,12 +134,105 @@ public func stateMachineActorPlatformCheck() async throws -> UInt64 {
     let main = PlatformLookup.MainActorHost(fetchDriver: { _ in .failure(.unavailable) })
     let sequence: PlatformLookup.Snapshots = try main.snapshots()
     for await revision in sequence.map({ $0.revision }).prefix(1) { last += revision }
-    // Another owner's sequence starts from that owner's current snapshot.
-    presentation.observe(try main.snapshots(), startingAt: main.snapshot())
+    // Another owner's sequence seeds the presentation with its first element.
+    presentation.observe(try main.snapshots())
     presentation.stopObserving()
+    // A host of one's own builds a sequence from its own callbacks.
+    let own = try SnapshotSequence<UInt64> { receive, finish in
+        receive(1)
+        finish()
+        return SnapshotSubscription(onCancel: {})
+    }
+    for await revision in own { last += revision }
     await main.shutdown()
     await note.shutdown()
     await shared.shutdown()
     await actor.shutdown()
     return last
+}
+
+/// The actor that owns a confined host in the platform check.
+private actor PlatformDesk {
+    private var host: PlatformLookup.IsolatedHost<PlatformDesk>?
+
+    func run() async throws -> UInt64 {
+        let host = PlatformLookup.IsolatedHost(isolation: self, fetchDriver: { _, query in .success(query) })
+        self.host = host
+        let receipt = try host.send(.load(4))
+        var counted: UInt64 = 0
+        for await revision in try host.snapshots({ $0.revision }) {
+            counted = revision
+            if revision > receipt.revision { break }
+        }
+        await host.shutdown()
+        return counted
+    }
+}
+
+/// Links the confined host, Observation tracking, Combine publishers, distinct projections, a shared
+/// executor, and source-bound presentations at every deployment floor.
+@MainActor public func stateMachineHostPlatformCheck() async throws -> UInt64 {
+    var total = try await PlatformDesk().run()
+    let main = PlatformLookup.MainActorHost(fetchDriver: { _ in .failure(.unavailable) })
+    if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+        withObservationTracking { _ = main.currentSnapshot } onChange: {}
+        func observable(_ host: some Observable) {}
+        observable(main)
+    }
+    var published: [UInt64] = []
+    let cancellable = try main.snapshotPublisher().sink { published.append($0.revision) }
+    let presentation = SnapshotObservableObject(main.snapshot())
+    try presentation.observe(main)
+    let shared = PlatformLookup.Shared(fetchDriver: { _ in .failure(.unavailable) })
+    try presentation.observe(shared)
+    let distinct = try shared.distinctSnapshots { $0.isClosed }
+    shared.close()
+    for await closed in distinct { total += closed ? 1 : 0 }
+    let anchor = PlatformDesk()
+    let actor = PlatformLookup.ActorHost(fetchDriver: { _ in .failure(.unavailable) }, isolatedTo: anchor)
+    try await presentation.observe(actor)
+    presentation.stopObserving()
+    total += try await actor.send(.load(5)).revision
+    await actor.shutdown()
+    cancellable.cancel()
+    await main.shutdown()
+    return total + UInt64(published.count)
+}
+
+/// Links the testing product at every deployment floor: the manual harness, graph coverage, and
+/// each controlled driver form.
+public func stateMachineTestingPlatformCheck() async throws -> Int {
+    var test = ManualMachineTest(PlatformLookup.Local())
+    try test.send(.load(6))
+    let works = test.drainFlattenedCommands().compactMap { command -> PlatformLookup.FetchWork? in
+        if case .fetch(let work) = command { work } else { nil }
+    }
+    guard let work = works.first, case .committed = test.deliver(.fetch(work.succeeded(7))) else { return 0 }
+    _ = test.acknowledgeExecution(work.execution)
+    var coverage = GraphCoverage(for: PlatformLookup.Local.self)
+    coverage.record(test)
+    let fetch = ControlledDriver<Int, Int, PlatformLookup.Problem>()
+    let owner = PlatformLookup.Shared(fetchDriver: fetch.run)
+    try owner.send(.load(8))
+    let call = try await fetch.nextStarted()
+    call.succeed(call.input)
+    await owner.shutdown()
+    let keyed = KeyedControlledDriver<Int, Void, Int, Never>()
+    let confined = await PlatformBench().startedCount()
+    return coverage.exercisedEdgeIDs.count + fetch.startedCount + keyed.startedCount + confined
+}
+
+/// The actor that owns the confined controlled drivers in the platform check.
+private actor PlatformBench {
+    let save = IsolatedControlledDriver<PlatformBench, PlatformNote.Draft, PlatformNote.Saved, Never>()
+    let open = KeyedIsolatedControlledDriver<PlatformBench, Int, PlatformNote.Draft, PlatformNote.Saved, Never>()
+
+    func startedCount() -> Int { save.startedCount + open.startedCount }
+}
+
+/// Links the MainActor controlled drivers with values that stay on the main actor.
+@MainActor public func stateMachineMainActorTestingPlatformCheck() async throws -> Int {
+    let save = MainActorControlledDriver<PlatformNote.Draft, PlatformNote.Saved, Never>()
+    let open = KeyedMainActorControlledDriver<Int, PlatformNote.Draft, PlatformNote.Saved, Never>()
+    return save.startedCount + open.startedCount
 }

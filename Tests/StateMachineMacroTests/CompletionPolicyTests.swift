@@ -1,3 +1,4 @@
+import Observation
 import StateMachine
 import Testing
 
@@ -24,7 +25,7 @@ nonisolated private enum RefusingFlow: Sendable {
     }
 }
 
-/// The pure-retry policy can still tell its caller about a completion that only the caller can settle.
+/// The retry policy can still tell its caller about a completion that only the caller can settle.
 @Suite(.timeLimit(.minutes(1))) struct CompletionPolicyTests {
     private struct Unexpected: Error {}
 
@@ -38,7 +39,7 @@ nonisolated private enum RefusingFlow: Sendable {
     private func expectRefused(_ pending: RefusingFlow.PendingCompletion) {
         #expect(pending.status == .reconciliationRequired)
         #expect(pending.attempts == 1)
-        guard case .check(-1) = pending.outcome,
+        guard case .check(-1, let request) = pending.outcome, request.input == -1,
             case .preparation(.checked(.negative)) = pending.lastRejection
         else {
             Issue.record("The handler received a different completion")
@@ -55,11 +56,11 @@ nonisolated private enum RefusingFlow: Sendable {
         return []
     }
 
-    @Test func aPureRetryHandlerReportsACompletionItsEdgeRefusesOnSharedAndActorOwners() async throws {
+    @Test func aRetryHandlerReportsACompletionItsEdgeRefusesOnSharedAndActorOwners() async throws {
         let (sharedStream, sharedReport) = AsyncStream<RefusingFlow.PendingCompletion>.makeStream()
         let shared = RefusingFlow.Shared(
             checkDriver: { $0 },
-            completionPolicy: .retryPure(onReconciliationRequired: { sharedReport.yield($0) })
+            completionPolicy: .retry(onReconciliationRequired: { sharedReport.yield($0) })
         )
         let sharedSnapshots = try shared.snapshots()
         try shared.send(.check(1))
@@ -77,7 +78,7 @@ nonisolated private enum RefusingFlow: Sendable {
         let (actorStream, actorReport) = AsyncStream<RefusingFlow.PendingCompletion>.makeStream()
         let actor = RefusingFlow.ActorHost(
             checkDriver: { $0 },
-            completionPolicy: .retryPure(onReconciliationRequired: { actorReport.yield($0) })
+            completionPolicy: .retry(onReconciliationRequired: { actorReport.yield($0) })
         )
         let actorSnapshots = try await actor.snapshots()
         try await actor.send(.check(2))
@@ -92,11 +93,11 @@ nonisolated private enum RefusingFlow: Sendable {
         #expect(await actorReports.next() == nil)
     }
 
-    @MainActor @Test func aPureRetryHandlerRunsOnTheMainActorForAMainActorOwner() async throws {
+    @MainActor @Test func aRetryHandlerRunsOnTheMainActorForAMainActorOwner() async throws {
         let (stream, report) = AsyncStream<RefusingFlow.PendingCompletion>.makeStream()
         let owner = RefusingFlow.MainActorHost(
             checkDriver: { $0 },
-            completionPolicy: .retryPure(onReconciliationRequired: { pending in
+            completionPolicy: .retry(onReconciliationRequired: { pending in
                 MainActor.assertIsolated()
                 report.yield(pending)
             })
@@ -109,5 +110,54 @@ nonisolated private enum RefusingFlow: Sendable {
         guard case .discarded = owner.discardPending(id: refused.id) else { throw Unexpected() }
         #expect(owner.pendingCompletions().isEmpty)
         #expect(await owner.shutdown() == .quiescent)
+    }
+}
+
+/// An Observation reader that reconciles the first refused completion the moment it becomes visible,
+/// from inside the change that refused it.
+@available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
+@MainActor private final class EagerReconciler {
+    private let host: RefusingFlow.MainActorHost
+    private(set) var reconciled = false
+
+    init(_ host: RefusingFlow.MainActorHost) { self.host = host }
+
+    func track() {
+        withObservationTracking {
+            _ = host.pendingCompletions()
+        } onChange: {
+            MainActor.assumeIsolated { self.changed() }
+        }
+    }
+
+    private func changed() {
+        guard !reconciled else { return }
+        guard let refused = host.pendingCompletions().first, refused.status == .reconciliationRequired else {
+            track()
+            return
+        }
+        reconciled = true
+        _ = host.reconcile(id: refused.id)
+    }
+}
+
+/// Each attempt reports its own decision to the policy handler, even when a reader reconciles inside it.
+@Suite(.timeLimit(.minutes(1))) struct ReentrantReconciliationTests {
+    @MainActor @Test func anObservationReaderThatReconcilesSynchronouslyLeavesEachAttemptReportedOnce() async throws {
+        guard #available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) else { return }
+        let (reports, report) = AsyncStream<UInt64>.makeStream()
+        let host = RefusingFlow.MainActorHost(
+            checkDriver: { $0 },
+            completionPolicy: .manual(onReconciliationRequired: { report.yield($0.attempts) })
+        )
+        let reader = EagerReconciler(host)
+        reader.track()
+        try host.send(.check(-1))
+        var reported = reports.makeAsyncIterator()
+        let first = await reported.next()
+        let second = await reported.next()
+        #expect(reader.reconciled)
+        #expect([first, second] == [1, 2])
+        await host.shutdown()
     }
 }

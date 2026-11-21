@@ -7,6 +7,68 @@ import SwiftUI
 import Testing
 import os
 
+/// Fake registrations that record their receivers, finishes, and cancellations, in order.
+@MainActor private final class SourceRegistrations {
+    var receivers: [String: @MainActor (GeneratedProfile.Snapshot) -> Void] = [:]
+    var finishers: [String: @MainActor () -> Void] = [:]
+    var cancelled: [String] = []
+    func register(
+        _ name: String,
+        _ receive: @escaping @MainActor (GeneratedProfile.Snapshot) -> Void,
+        _ finish: @escaping @MainActor () -> Void,
+        whileCancelling: (@MainActor @Sendable () -> Void)?
+    ) -> MainActorSnapshotSubscription {
+        receivers[name] = receive
+        finishers[name] = finish
+        return MainActorSnapshotSubscription(onCancel: { [self] in
+            cancelled.append(name)
+            whileCancelling?()
+        })
+    }
+}
+
+/// A `MainActor` source that delivers its snapshot synchronously when it registers, as a generated host
+/// does, and can run a callback while it registers or while its registration is cancelled.
+///
+/// It conforms to the host protocol, which confers no authority, so a presentation observes it through
+/// the same `observe(_:)` as a generated host.
+@MainActor private final class FakeSource: MainActorStateMachineHost {
+    struct Receipt: StateMachineReceipt {
+        let snapshot: GeneratedProfile.Snapshot
+        var edgeID: String? { nil }
+    }
+    struct Prepared: ~Copyable {}
+    enum SendRejection: Error {}
+
+    private let name: String
+    private let current: GeneratedProfile.Snapshot
+    private let registrations: SourceRegistrations
+    /// Runs inside `subscribe`, before the registration exists.
+    var whileRegistering: (@MainActor @Sendable () -> Void)?
+    /// Runs when the registration is cancelled, after it is recorded.
+    var whileCancelling: (@MainActor @Sendable () -> Void)?
+
+    init(_ name: String, _ current: GeneratedProfile.Snapshot, _ registrations: SourceRegistrations) {
+        self.name = name
+        self.current = current
+        self.registrations = registrations
+    }
+
+    func snapshot() -> GeneratedProfile.Snapshot { current }
+    func send(_ input: Never) throws(SendRejection) -> Receipt {}
+    func commit(_ prepared: consuming Prepared) {}
+    func subscribe(
+        _ receive: @escaping @MainActor (GeneratedProfile.Snapshot) -> Void,
+        onFinish: @escaping @MainActor () -> Void
+    ) throws(SubscriptionFailure) -> MainActorSnapshotSubscription {
+        whileRegistering?()
+        let token = registrations.register(name, receive, onFinish, whileCancelling: whileCancelling)
+        receive(current)
+        return token
+    }
+    func close() -> Receipt { Receipt(snapshot: current) }
+}
+
 @MainActor @Suite struct PresentationTests {
     private enum Failure: Error { case unexpected }
 
@@ -152,7 +214,7 @@ import os
         let presentation = StateMachineObservableObject(host(user))
         var published: [UInt64] = []
         // `@Published` emits from `willSet`, so this closes while revision 1 is still being assigned.
-        let closing = presentation.$snapshot.dropFirst()
+        let closing = presentation.presentedSnapshots.dropFirst()
             .sink {
                 published.append($0.revision)
                 if $0.revision == 1 { presentation.close() }
@@ -171,7 +233,7 @@ import os
         let presentation = SnapshotObservableObject(owner.snapshot())
         let first = try owner.send(.load(ProfileRequest(userID: user)))
         let second = owner.close()
-        let nested = presentation.$snapshot.dropFirst()
+        let nested = presentation.presentedSnapshots.dropFirst()
             .sink {
                 if $0.revision == first.revision { presentation.apply(second.snapshot) }
             }
@@ -229,12 +291,16 @@ import os
     @Test func publishesASharedOwnersSnapshotsUntilItCloses() async throws {
         let owner = try host()
         let presentation = SnapshotObservableObject(owner.snapshot(), revision: \.revision)
-        presentation.observe(try owner.snapshots())
-        #expect(presentation.isObserving)
+        let live = Signal()
         let ended = Signal()
         var published: [UInt64] = []
-        let snapshots = presentation.$snapshot.dropFirst().sink { published.append($0.revision) }
-        let observing = presentation.$isObserving.dropFirst().sink { if !$0 { ended.raise() } }
+        let snapshots = presentation.presentedSnapshots.dropFirst().sink { published.append($0.revision) }
+        let observing = presentation.$isObserving.dropFirst().sink { $0 ? live.raise() : ended.raise() }
+        presentation.observe(try owner.snapshots())
+        // The sequence's first element reaches the presentation on the registration's delivery task;
+        // the observation is live once it is shown.
+        await live.wait()
+        #expect(presentation.isObserving)
         try advance(owner)
         let closed = owner.close()
         // Completion edge: the sequence delivered the closed snapshot and then ended.
@@ -250,23 +316,28 @@ import os
     @Test func stoppingDiscardsLaterSnapshotsAndAReplacementKeepsObserving() async throws {
         let owner = try host()
         let presentation = SnapshotObservableObject(owner.snapshot(), revision: \.revision)
-        // Each `observe` first stops the previous observation, then starts its own.
-        let expected = [false, true, false, false, true, false]
+        // Each `observe` first stops the previous observation, which publishes nothing when none is
+        // live, then starts its own, which is live once its first element is shown.
+        let expected = [true, false, true, false]
         var observing: [Bool] = []
+        let live = Signal()
         let ended = Signal()
         let history = presentation.$isObserving.dropFirst()
             .sink {
                 observing.append($0)
+                if $0 { live.raise() }
                 if observing.count == expected.count { ended.raise() }
             }
         let detached = Signal()
         presentation.observe(try owner.snapshots({ $0 }, onDetach: { detached.raise() }))
+        await live.wait()
         try advance(owner)
         presentation.stopObserving()
         // Cleanup edge: the stopped consumer has removed its registration.
         await detached.wait()
         #expect(presentation.snapshot.revision == 0)
         presentation.observe(try owner.snapshots())
+        await live.wait()
         let closed = owner.close()
         await ended.wait()
         #expect(observing == expected)
@@ -342,7 +413,7 @@ import os
         let model = SnapshotPresentation(owner.snapshot(), revision: \.revision)
         let detached = Signal()
         model.observe(try owner.snapshots({ $0 }, onDetach: { detached.raise() }))
-        #expect(model.isObserving)
+        await untilObserving(model)
         try advance(owner)
         model.stopObserving()
         // Cleanup edge: the stopped consumer has removed its registration.
@@ -417,31 +488,25 @@ import os
         let second = host(user)
         let presentation = SnapshotObservableObject(first.snapshot())
         // The first source keeps its callbacks, so the test can deliver late on its behalf.
-        var lateReceive: (@MainActor (GeneratedProfile.Snapshot) -> Void)?
-        var lateFinish: (@MainActor () -> Void)?
-        try presentation.observe { receive, finish in
-            lateReceive = receive
-            lateFinish = finish
-            return MainActorSnapshotSubscription(onCancel: {})
-        }
+        let registrations = SourceRegistrations()
+        try presentation.observe(FakeSource("first", first.snapshot(), registrations))
         let shown = try advance(first, user)
         presentation.apply(shown.snapshot)
         #expect(presentation.snapshot.revision == 3)
         // The second owner counts its own revisions from zero.
-        try presentation.observe(startingAt: second.snapshot()) { (receive, finish) throws(SubscriptionFailure) in
-            try second.subscribe(receive, onFinish: finish)
-        }
+        try presentation.observe(second)
         guard case .idle = presentation.snapshot else { throw Failure.unexpected }
         #expect(presentation.snapshot.revision == 0 && presentation.isObserving)
-        lateReceive?(first.close().snapshot)
-        lateFinish?()
+        #expect(registrations.cancelled == ["first"])
+        registrations.receivers["first"]?(first.close().snapshot)
+        registrations.finishers["first"]?()
         guard case .idle = presentation.snapshot else { throw Failure.unexpected }
         #expect(presentation.isObserving)
         // The new source's next change is shown, though its revision is below the old source's.
         // The owner's driver can settle at once, so the test keeps the snapshot that was published.
         let published = Signal()
         var shownNext: GeneratedProfile.Snapshot?
-        let sink = presentation.$snapshot.dropFirst()
+        let sink = presentation.presentedSnapshots.dropFirst()
             .sink {
                 guard $0.revision == 1 else { return }
                 shownNext = $0
@@ -458,7 +523,7 @@ import os
         await second.shutdown()
     }
 
-    @Test func aSequenceFromAnotherOwnerStartsFromItsCurrentSnapshot() async throws {
+    @Test func aSequenceFromAnotherOwnerSeedsTheRevisionCheckWithItsFirstElement() async throws {
         let user = try UserID("kyle")
         let shared = GeneratedProfile.Shared(
             .init(userID: user),
@@ -469,23 +534,25 @@ import os
         let presentation = SnapshotObservableObject(first.snapshot())
         presentation.apply(try advance(first, user).snapshot)
         #expect(presentation.snapshot.revision == 3)
-        // Without a starting snapshot, a lower revision from another owner would be discarded.
-        presentation.observe(try shared.snapshots(), startingAt: shared.snapshot())
+        // The other owner's first element has a lower revision, and it is shown, because it seeds the check.
+        let seeded = Signal()
+        let sink = presentation.presentedSnapshots.dropFirst().sink { if $0.revision == 0 { seeded.raise() } }
+        presentation.observe(try shared.snapshots())
+        await seeded.wait()
+        sink.cancel()
         guard case .idle = presentation.snapshot else { throw Failure.unexpected }
-        #expect(presentation.snapshot.revision == 0)
+        #expect(presentation.isObserving)
         let closed = shared.close()
-        await presentation.follow(try shared.snapshots(), startingAt: shared.snapshot())
+        await presentation.follow(try shared.snapshots())
         #expect(presentation.snapshot.isClosed && presentation.snapshot.revision == closed.revision)
         if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
             // The first owner's own driver may have settled its load since, so read its revision again.
             let shown = first.snapshot()
             let model = SnapshotPresentation(shown)
-            await model.follow(try shared.snapshots(), startingAt: shared.snapshot())
+            await model.follow(try shared.snapshots())
             #expect(model.snapshot.isClosed && model.snapshot.revision == closed.revision)
             let current = first.snapshot()
-            try model.observe(startingAt: current) { (receive, finish) throws(SubscriptionFailure) in
-                try first.subscribe(receive, onFinish: finish)
-            }
+            try model.observe(first)
             #expect(model.snapshot.revision == current.revision && model.isObserving)
             model.stopObserving()
         }
@@ -500,19 +567,6 @@ import os
 /// A synchronous callback can switch a passive presentation to another source while it shows a new
 /// one. The newest observation keeps its registration, and the one it replaced keeps none.
 @MainActor @Suite(.timeLimit(.minutes(1))) struct ReentrantSourceReplacementTests {
-    /// Fake registrations that record their receivers and their cancellation, in order.
-    @MainActor private final class Registrations {
-        var receivers: [String: @MainActor (GeneratedProfile.Snapshot) -> Void] = [:]
-        var cancelled: [String] = []
-        func register(
-            _ name: String,
-            _ receive: @escaping @MainActor (GeneratedProfile.Snapshot) -> Void
-        ) -> MainActorSnapshotSubscription {
-            receivers[name] = receive
-            return MainActorSnapshotSubscription(onCancel: { [self] in cancelled.append(name) })
-        }
-    }
-
     /// Snapshots from three separate owners.
     ///
     /// A is shown first, B is the source being installed, and C replaces it. B's late snapshot has a
@@ -554,34 +608,36 @@ import os
     @Test func aSinkThatSwitchesSourcesWhileBIsShownKeepsCsRegistration() async throws {
         let sources = try sources()
         let presentation = SnapshotObservableObject(sources.a)
-        let registrations = Registrations()
+        let registrations = SourceRegistrations()
+        let c = FakeSource("C", sources.c, registrations)
         var switched = false
-        let sink = presentation.$snapshot.dropFirst()
+        let sink = presentation.presentedSnapshots.dropFirst()
             .sink { _ in
                 guard !switched else { return }
                 switched = true
-                try? presentation.observe(startingAt: sources.c) { receive, _ in registrations.register("C", receive) }
+                try? presentation.observe(c)
             }
-        try presentation.observe(startingAt: sources.b) { receive, _ in registrations.register("B", receive) }
+        // B's first delivery shows B, and the sink switches to C before B's registration returns.
+        try presentation.observe(FakeSource("B", sources.b, registrations))
         sink.cancel()
-        #expect(registrations.cancelled == [])
-        #expect(registrations.receivers.keys.sorted() == ["C"])
+        #expect(registrations.cancelled == ["B"])
+        #expect(registrations.receivers.keys.sorted() == ["B", "C"])
         registrations.receivers["B"]?(sources.bLate)
         #expect(presentation.snapshot.revision == sources.c.revision)
         #expect(presentation.isObserving)
         presentation.stopObserving()
-        #expect(registrations.cancelled == ["C"])
+        #expect(registrations.cancelled == ["B", "C"])
         await finish(sources)
     }
 
     @Test func aRegistrationThatSwitchesSourcesLosesToTheSourceItStarted() async throws {
         let sources = try sources()
         let presentation = SnapshotObservableObject(sources.a)
-        let registrations = Registrations()
-        try presentation.observe(startingAt: sources.b) { receive, _ in
-            try? presentation.observe(startingAt: sources.c) { receive, _ in registrations.register("C", receive) }
-            return registrations.register("B", receive)
-        }
+        let registrations = SourceRegistrations()
+        let b = FakeSource("B", sources.b, registrations)
+        let c = FakeSource("C", sources.c, registrations)
+        b.whileRegistering = { try? presentation.observe(c) }
+        try presentation.observe(b)
         // B's registration came back after C replaced it, so it is cancelled and C's is kept.
         #expect(registrations.cancelled == ["B"])
         registrations.receivers["B"]?(sources.bLate)
@@ -592,7 +648,7 @@ import os
         await finish(sources)
     }
 
-    @Test func aSequenceReplacedWhileItsSourceIsShownIsNeverFollowed() async throws {
+    @Test func aSourceReplacedWhileItsSnapshotIsShownIsNeverFollowed() async throws {
         let sources = try sources()
         let user = try UserID("kyle")
         let shared = GeneratedProfile.Shared(
@@ -601,19 +657,20 @@ import os
             auditDriver: { _ in .failure(.unavailable) }
         )
         let presentation = SnapshotObservableObject(sources.a)
-        let registrations = Registrations()
+        let registrations = SourceRegistrations()
+        let c = FakeSource("C", sources.c, registrations)
         var switches = 0
-        let sink = presentation.$snapshot.dropFirst()
+        let sink = presentation.presentedSnapshots.dropFirst()
             .sink { snapshot in
                 guard snapshot.revision == shared.snapshot().revision, case .idle = snapshot else { return }
                 switches += 1
-                try? presentation.observe(startingAt: sources.c) { receive, _ in registrations.register("C", receive) }
+                try? presentation.observe(c)
             }
-        presentation.observe(try shared.snapshots(), startingAt: shared.snapshot())
-        // The replaced sequence is released at once rather than followed.
+        // The shared owner's snapshot is shown first, and the switch to C means it never registers.
+        try presentation.observe(shared)
         #expect(shared.subscriberCount == 0)
-        // `follow` returns at once when its sequence is replaced before it starts.
-        await presentation.follow(try shared.snapshots(), startingAt: shared.snapshot())
+        // A followed sequence whose first element switches to C is released, and `follow` returns.
+        await presentation.follow(try shared.snapshots())
         #expect(shared.subscriberCount == 0)
         sink.cancel()
         #expect(switches == 2)
@@ -625,35 +682,155 @@ import os
         await finish(sources)
     }
 
+    @Test func cancellingTheOldSourceThatSwitchesSourcesKeepsTheNewestRegistration() async throws {
+        let sources = try sources()
+        let presentation = SnapshotObservableObject(sources.a)
+        let registrations = SourceRegistrations()
+        let a = FakeSource("A", sources.a, registrations)
+        let c = FakeSource("C", sources.c, registrations)
+        // A's token switches the presentation to C while it is being cancelled.
+        a.whileCancelling = { try? presentation.observe(c) }
+        try presentation.observe(a)
+        try presentation.observe(FakeSource("B", sources.b, registrations))
+        // C started while A was being cancelled, so B neither registers nor shows its snapshot.
+        #expect(registrations.cancelled == ["A"])
+        #expect(registrations.receivers.keys.sorted() == ["A", "C"])
+        #expect(presentation.snapshot.revision == sources.c.revision)
+        #expect(presentation.isObserving)
+        registrations.receivers["A"]?(sources.bLate)
+        #expect(presentation.snapshot.revision == sources.c.revision)
+        presentation.stopObserving()
+        #expect(registrations.cancelled == ["A", "C"])
+        await finish(sources)
+    }
+
+    @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
+    @Test func cancellingTheOldSourceThatSwitchesSourcesKeepsTheNewestObservableRegistration() async throws {
+        let sources = try sources()
+        let model = SnapshotPresentation(sources.a)
+        let registrations = SourceRegistrations()
+        let a = FakeSource("A", sources.a, registrations)
+        let c = FakeSource("C", sources.c, registrations)
+        a.whileCancelling = { try? model.observe(c) }
+        try model.observe(a)
+        try model.observe(FakeSource("B", sources.b, registrations))
+        #expect(registrations.cancelled == ["A"])
+        #expect(registrations.receivers.keys.sorted() == ["A", "C"])
+        #expect(model.snapshot.revision == sources.c.revision)
+        #expect(model.isObserving)
+        model.stopObserving()
+        #expect(registrations.cancelled == ["A", "C"])
+        await finish(sources)
+    }
+
+    @MainActor private final class PresentationBox {
+        var presentation: SnapshotObservableObject<GeneratedProfile.Snapshot>?
+    }
+
+    @Test func aRevisionProjectionThatSwitchesSourcesDiscardsTheDeliveryBeingProjected() async throws {
+        let sources = try sources()
+        let registrations = SourceRegistrations()
+        let box = PresentationBox()
+        let c = FakeSource("C", sources.c, registrations)
+        let late = sources.bLate.revision
+        var switching = true
+        // Projecting B's late snapshot switches the presentation to C before the snapshot is shown.
+        let presentation = SnapshotObservableObject(sources.a) { snapshot in
+            if switching, snapshot.revision == late {
+                switching = false
+                try? box.presentation?.observe(c)
+            }
+            return snapshot.revision
+        }
+        box.presentation = presentation
+        try presentation.observe(FakeSource("B", sources.b, registrations))
+        registrations.receivers["B"]?(sources.bLate)
+        #expect(!switching)
+        #expect(registrations.cancelled == ["B"])
+        #expect(presentation.snapshot.revision == sources.c.revision)
+        #expect(presentation.isObserving)
+        presentation.stopObserving()
+        #expect(registrations.cancelled == ["B", "C"])
+        box.presentation = nil
+        await finish(sources)
+    }
+
+    @Test func stoppingASequenceFreesItsRegistrationInTheSameTurn() async throws {
+        let owner = RuntimeSharedHost<Int, Int, RuntimeTicket, Never>(
+            manual: 0,
+            scopes: [],
+            limits: try Limits(),
+            subscriberCapacity: 1,
+            ticket: { $0 },
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
+        )
+        let presentation = SnapshotObservableObject(owner.snapshot(), revision: \.revision)
+        presentation.observe(try owner.snapshots())
+        presentation.stopObserving()
+        #expect(owner.subscriberCount == 0)
+        // The only slot is free again, so a replacement registers in the same main-actor turn.
+        presentation.observe(try owner.snapshots())
+        // The replacement holds the slot; it is live once its first element arrives.
+        #expect(owner.subscriberCount == 1)
+        presentation.stopObserving()
+        if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            let model = SnapshotPresentation(owner.snapshot(), revision: \.revision)
+            model.observe(try owner.snapshots())
+            model.stopObserving()
+            model.observe(try owner.snapshots())
+            #expect(owner.subscriberCount == 1)
+            model.stopObserving()
+        }
+        #expect(owner.subscriberCount == 0)
+    }
+
+    @Test func stoppingAnActorSequenceFreesItsRegistrationBeforeTheNextOne() async throws {
+        let owner = RuntimeActorHost<Int, Int, RuntimeTicket, Never>(
+            0,
+            scopes: [],
+            configuration: try ManagedConfiguration(subscribers: 1),
+            driver: { $0.ticket },
+            ticket: { $0 },
+            prepare: { _ in .failure(.admission(.plan(.invalidPlan))) }
+        )
+        let presentation = SnapshotObservableObject(await owner.snapshot(), revision: \.revision)
+        presentation.observe(try await owner.snapshots())
+        presentation.stopObserving()
+        presentation.observe(try await owner.snapshots())
+        #expect(presentation.isObserving)
+        presentation.stopObserving()
+        _ = await owner.close()
+        await owner.shutdown()
+    }
+
     @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
     @Test func anObservationChangeThatSwitchesSourcesKeepsTheNewestRegistration() async throws {
         let sources = try sources()
         let model = SnapshotPresentation(sources.a)
-        let registrations = Registrations()
-        let c = sources.c
+        let registrations = SourceRegistrations()
+        let c = FakeSource("C", sources.c, registrations)
         withObservationTracking {
             _ = model.snapshot
         } onChange: {
-            MainActor.assumeIsolated {
-                try? model.observe(startingAt: c) { receive, _ in registrations.register("C", receive) }
-            }
+            MainActor.assumeIsolated { try? model.observe(c) }
         }
-        try model.observe(startingAt: sources.b) { receive, _ in registrations.register("B", receive) }
-        #expect(registrations.cancelled == [])
-        #expect(registrations.receivers.keys.sorted() == ["C"])
+        // B's first delivery changes the snapshot, and the change switches to C before B's registration returns.
+        try model.observe(FakeSource("B", sources.b, registrations))
+        #expect(registrations.cancelled == ["B"])
+        #expect(registrations.receivers.keys.sorted() == ["B", "C"])
         registrations.receivers["B"]?(sources.bLate)
         #expect(model.snapshot.revision == sources.c.revision)
         #expect(model.isObserving)
         // A registration that switches sources loses to the source it started.
-        try model.observe(startingAt: sources.b) { receive, _ in
-            try? model.observe(startingAt: c) { receive, _ in registrations.register("C2", receive) }
-            return registrations.register("B2", receive)
-        }
-        #expect(registrations.cancelled == ["C", "B2"])
+        let b2 = FakeSource("B2", sources.b, registrations)
+        let c2 = FakeSource("C2", sources.c, registrations)
+        b2.whileRegistering = { try? model.observe(c2) }
+        try model.observe(b2)
+        #expect(registrations.cancelled == ["B", "C", "B2"])
         registrations.receivers["B2"]?(sources.bLate)
         #expect(model.snapshot.revision == sources.c.revision)
         model.stopObserving()
-        #expect(registrations.cancelled == ["C", "B2", "C2"])
+        #expect(registrations.cancelled == ["B", "C", "B2", "C2"])
         await finish(sources)
     }
 }

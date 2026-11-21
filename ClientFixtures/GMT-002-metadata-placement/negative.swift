@@ -1,5 +1,8 @@
 import StateMachine
-enum Scope { case work }
+enum Scope {
+    @Active(in: [Loading.self])
+    case work
+}
 struct Loading {}
-@Operation(scope: Scope.work, activeIn: [Loading.self], admission: .latest)
+@Operation(scope: Scope.work, admission: .latest)
 enum Standalone { typealias Input = Int; typealias Output = Int; typealias Failure = Never }

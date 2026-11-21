@@ -33,8 +33,8 @@ nonisolated public enum GeneratedRetry: Sendable {
         public init(attempts: Int) { self.attempts = attempts }
     }
     @Initial case waiting(Waiting)
-    case trying(Trying)
-    case gaveUp(GaveUp)
+    @Terminal case trying(Trying)
+    @Terminal case gaveUp(GaveUp)
     /// Closed dynamic inputs.
     public enum Input: Sendable { case retry }
     /// Why the router declined to retry.

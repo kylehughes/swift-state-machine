@@ -5,7 +5,7 @@ nonisolated enum Counter: Sendable {
     struct Idle: Sendable { let value: [String: [Int?]] }
     struct Done: Sendable { let value: Int }
     @Initial case idle(Idle)
-    case done(Done)
+    @Terminal case done(Done)
     final class NonSendable { var value = 0 }
     enum Input { case finish(Int); case unsafe(NonSendable) }
     @Transition(on: Input.finish)

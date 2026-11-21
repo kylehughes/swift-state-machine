@@ -7,7 +7,7 @@ nonisolated private enum SequenceFlow: Sendable {
     struct Idle: Sendable {}
     struct Done: Sendable { let value: Int }
     @Initial case idle(Idle)
-    case done(Done)
+    @Terminal case done(Done)
     enum Input: Sendable { case finish(Int) }
     @Transition(on: Input.finish)
     fileprivate static func finish(_ source: Idle, _ value: Int) -> Done { Done(value: value) }
@@ -90,11 +90,11 @@ nonisolated private enum SequenceFlow: Sendable {
             .init(text: "confined"),
             drivers: .init(save: { input in .init(text: input.text) })
         )
-        let snapshots: GeneratedNote.MainActorSnapshots = try owner.snapshots()
+        var snapshots: GeneratedNote.MainActorSnapshots = try owner.snapshots()
         var revisions: [UInt64] = []
         var saved: [String] = []
         var closed = false
-        for await snapshot in snapshots {
+        while let snapshot = await snapshots.next() {
             revisions.append(snapshot.revision)
             closed = snapshot.isClosed
             switch snapshot {

@@ -4,6 +4,27 @@ import Testing
 
 @testable import StateMachineReferenceModel
 
+extension SequentialReference {
+    /// Retains the first outcome for `ticket` and prepares it once, as a manual owner's delivery does.
+    mutating func deliver(_ ticket: ReferenceTicket, outcome: ReferenceOutcome) -> ReferenceDelivery {
+        let retained = retain(ticket, outcome: outcome)
+        guard case .pending(let operation, .awaitingAdmission) = retained else { return retained }
+        return reconcile(operation)
+    }
+}
+
+extension ReferencePendingStatus {
+    init(_ status: PendingStatus) {
+        switch status {
+        case .awaitingAdmission: self = .awaitingAdmission
+        case .preparing: self = .preparing
+        case .waitingForCapacity: self = .waitingForCapacity
+        case .reconciliationRequired: self = .reconciliationRequired
+        case .retryScheduled: self = .retryScheduled
+        }
+    }
+}
+
 @Suite struct ProductionReferenceTests {
     typealias Flow = ReferenceProfile
 
@@ -41,6 +62,18 @@ import Testing
             }
             #expect(mapped == expectedReason)
         default: Issue.record("Production and independent interpreter disagree on acceptance")
+        }
+    }
+
+    private func compare(_ actual: Flow.DeliveryResult, _ expected: ReferenceDelivery) {
+        switch (actual, expected) {
+        case (.committed(let receipt), .committed(let snapshot)):
+            #expect(receipt.revision == snapshot.stamp.revision)
+            #expect(root(receipt.snapshot) == snapshot.root)
+        case (.pending(_, let status), .pending(_, let expectedStatus)):
+            #expect(ReferencePendingStatus(status) == expectedStatus)
+        case (.stale, .discarded(.inactiveAuthority)), (.stale, .discarded(.closed)): break
+        default: Issue.record("Production and independent interpreter disagree on delivery")
         }
     }
 
@@ -92,15 +125,12 @@ import Testing
                     #expect(starts.count == tickets.count)
                     issued.append(contentsOf: zip(starts, tickets).map { ($0, $1) })
                     let cancels = batch.commands.filter { if case .cancel = $0 { true } else { false } }
-                    #expect(cancels.count == reference.revoked.count)
+                    #expect(cancels.count == reference.cancelled.count)
                 }
             case 5:
-                if case .loading(let loading) = flow.snapshot(), let (work, ticket) = issued.last,
-                    case .success(let completion) = work.succeeded(Profile(userID: id, name: "2"))
-                {
-                    let actual = flow.commit(loading.received(completion))
-                    let expected = oracle.commit(try oracle.prepareCompletion(ticket, outcome: .success(2)))
-                    compare(actual, expected)
+                if case .loading = flow.snapshot(), let (work, ticket) = issued.last {
+                    let actual = flow.deliver(.fetch(work.succeeded(Profile(userID: id, name: "2"))))
+                    compare(actual, oracle.deliver(ticket, outcome: .success(2)))
                 }
             case 6:
                 if !issued.isEmpty {

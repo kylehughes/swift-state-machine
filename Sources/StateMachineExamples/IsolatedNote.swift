@@ -145,9 +145,9 @@ nonisolated public enum IsolatedNote {
         fileprivate let authority: RuntimeTicket
     }
     /// Actual physical execution disposition, independent of cancellation.
-    public enum ExecutionDisposition { case terminated, skippedBeforeStart }
+    public typealias ExecutionDisposition = StateMachine.ExecutionDisposition
     /// Exact acknowledgment outcomes.
-    public typealias AcknowledgmentResult = Engine.Acknowledgment
+    public typealias AcknowledgmentResult = StateMachine.AcknowledgmentResult
     /// One ordered inert command.
     public enum Command {
         case save(SaveWork)
@@ -199,7 +199,7 @@ nonisolated public enum IsolatedNote {
             }
         }
         /// Transfers whole batches; the caller releases mutable access before executing their work.
-        public mutating func drainCommands(limit: Int) -> [CommandBatch] {
+        public mutating func drainCommands(limit: Int = .max) -> [CommandBatch] {
             engine.drain(limit: limit).map { project($0) }
         }
         /// Retains the first terminal result and attempts its synchronous admission.
@@ -245,9 +245,13 @@ nonisolated public enum IsolatedNote {
         /// Records actual termination or a skip, never cancellation alone.
         public mutating func acknowledgeExecution(
             _ handle: ExecutionHandle,
-            disposition: ExecutionDisposition
+            disposition: ExecutionDisposition = .terminated
         ) -> AcknowledgmentResult {
-            engine.acknowledge(handle.authority, skippedBeforeStart: disposition == .skippedBeforeStart)
+            switch engine.acknowledge(handle.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
+            case .recorded: .recorded
+            case .duplicate: .duplicate
+            case .foreignOwner: .foreignOwner
+            }
         }
         /// Closes authority while keeping historical model data readable.
         @discardableResult
@@ -340,12 +344,7 @@ nonisolated public enum IsolatedNote {
         public var isQuiescent: Bool { host.isQuiescent }
     }
     /// Whether `flush(through:)` waited for a receipt's batch to be processed.
-    public enum FlushResult: Equatable, Sendable {
-        /// Launch and cancellation decisions through the receipt have been processed.
-        case processed
-        /// The receipt was issued by a different owner.
-        case foreignOwner
-    }
+    public typealias FlushResult = StateMachine.FlushResult
     /// Whether shutdown joined every obligation or stopped waiting at its deadline.
     public enum ShutdownResult: Equatable, Sendable {
         /// Every execution, delivery, and preparation obligation settled.
@@ -429,6 +428,8 @@ nonisolated public enum IsolatedNote {
                 switch $0 {
                 case .start(let work): .save(SaveWork(input: work.descriptor, authority: work.ticket))
                 case .cancel(let authority): .cancel(ExecutionHandle(authority: authority))
+                // The editor's plans carry starts only.
+                case .emit: preconditionFailure("The editor emits nothing.")
                 }
             },
             terminal: batch.terminal

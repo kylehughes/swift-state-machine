@@ -26,7 +26,7 @@ import Testing
         #expect(again == id)
         let retained = machine.pendingCompletions()
         #expect(retained.map(\.id) == [id])
-        guard case .fetch(.success(let value))? = retained.first?.outcome else { throw Unexpected() }
+        guard case .fetch(.success(let value), _)? = retained.first?.outcome else { throw Unexpected() }
         #expect(value == first)
         _ = machine.drainCommands(limit: 1)
         guard case .committed = machine.retryAdmission(id: id), case .loaded(let loaded) = machine.snapshot() else {
@@ -48,7 +48,7 @@ import Testing
         guard case .pending(let id, _) = machine.deliver(work.failed(.unavailable)) else { throw Unexpected() }
         let identities: Set<GeneratedProfile.PendingCompletionID> = [id, id]
         #expect(identities.count == 1)
-        guard case .fetch(.failure(.unavailable))? = machine.pendingCompletions().first?.outcome else {
+        guard case .fetch(.failure(.unavailable), _)? = machine.pendingCompletions().first?.outcome else {
             throw Unexpected()
         }
         // Discarding is an ordinary authority-only commit, so it needs the queue slot the audit batch holds.
@@ -64,7 +64,7 @@ nonisolated private enum RoutedFlow: Sendable {
     struct Idle: Sendable {}
     struct Loaded: Sendable { let value: String }
     @Initial case loaded(Loaded)
-    case idle(Idle)
+    @Terminal case idle(Idle)
     enum Problem: Error, Sendable { case offline }
     enum Input: Sendable { case tick(Bool) }
     @Transition(on: Input.tick)
@@ -83,7 +83,7 @@ nonisolated private enum PickFlow {
     struct Start {}
     struct Done { let value: Int }
     @Initial case start(Start)
-    case done(Done)
+    @Terminal case done(Done)
     enum Problem: Error { case refused }
     enum Rejected: Error { case negative }
     enum Input {

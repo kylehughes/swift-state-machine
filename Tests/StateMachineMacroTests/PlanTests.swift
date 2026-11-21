@@ -5,18 +5,21 @@ import Testing
 nonisolated enum PlanFlow: Sendable {
     struct Idle: Sendable { let value: Int }
     @Initial case idle(Idle)
-    enum Scope { case work }
+    enum Scope {
+        @Active(in: [Idle.self])
+        case work
+    }
     enum Input: Sendable {
         case run(Int)
     }
     enum Rejection: Error { case negative }
-    @Operation(scope: Scope.work, activeIn: [Idle.self], admission: .latest)
+    @Operation(scope: Scope.work, admission: .latest)
     enum A {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(scope: Scope.work, activeIn: [Idle.self], admission: .parallel(limit: 2))
+    @Operation(scope: Scope.work, admission: .parallel(limit: 2))
     enum B {
         typealias Input = String
         typealias Output = String

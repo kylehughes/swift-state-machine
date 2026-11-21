@@ -11,16 +11,21 @@ nonisolated private enum ChainFlow: Sendable {
     @Initial case idle(Idle)
     case first(First)
     case second(Second)
-    case done(Done)
-    enum Scope { case first, second }
+    @Terminal case done(Done)
+    enum Scope {
+        @Active(in: [First.self])
+        case first
+        @Active(in: [Second.self])
+        case second
+    }
     enum Input: Sendable { case begin }
-    @Operation(scope: Scope.first, activeIn: [First.self], admission: .latest)
+    @Operation(scope: Scope.first, admission: .latest)
     enum FirstOperation {
         typealias Input = Int
         typealias Output = Int
         typealias Failure = Never
     }
-    @Operation(scope: Scope.second, activeIn: [Second.self], admission: .latest)
+    @Operation(scope: Scope.second, admission: .latest)
     enum SecondOperation {
         typealias Input = Int
         typealias Output = Int

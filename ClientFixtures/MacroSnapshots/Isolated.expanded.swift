@@ -1,36 +1,134 @@
-fileprivate struct _TransitionSourceIsPhasePayload<Value: ~Copyable> {
+fileprivate struct _TransitionSourceIsPhasePayload<Value: ~Swift::Copyable> {
 }
 
-fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Copyable> {
+fileprivate struct _TransitionReturnsDeclaredResult<Value: ~Swift::Copyable> {
 }
 
-fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Copyable> {
+fileprivate struct _TriggerPayloadMatchesDeclaration<Value: ~Swift::Copyable> {
 }
 
-fileprivate struct _RouterSourceIsPhasePayload<Value: ~Copyable> {
+fileprivate struct _RouterSourceIsPhasePayload<Value: ~Swift::Copyable> {
 }
 
-fileprivate struct _SharedModeRequiresSendable<Value: Sendable> {
+fileprivate struct _SharedModeRequiresSendable<Value: Swift::Sendable & ~Swift::Copyable> {
 }
 
-fileprivate struct _OperationFailureIsError<Value: Error> {
+fileprivate struct _OperationFailureIsError<Value: Swift::Error> {
+}
+
+fileprivate struct _OperationKeyIsHashable<Value: Swift::Hashable & Swift::Sendable> {
 }
 
 fileprivate struct _EffectIsCopyable<Value> {
 }
 
+/// The schema, for generated code that names it where a value of its name could take the name.
+internal typealias _StateMachineSchema = Note
+
+fileprivate typealias _StateMachineScopeID = StateMachine::RuntimeScopeID
+
+fileprivate typealias _StateMachineOperation = StateMachine::RuntimeOperation
+
+fileprivate typealias _StateMachineKey = StateMachine::RuntimeKey
+
+fileprivate static func _stateMachineNamesSchema(_ type: Self.Type) {
+}
+
+@available(*, unavailable, message: "'Note' names another type inside the schema, where an extension declares a member of that name; rename that member, because generated code names the schema 'Note'.")
+fileprivate static func _stateMachineNamesSchema<Value: ~Swift::Copyable>(_ type: Value.Type) {
+}
+
+fileprivate static func _stateMachineInputPayload<Value: ~Swift::Copyable>(_ value: borrowing Value) -> _TriggerPayloadMatchesDeclaration<Value> {
+    _TriggerPayloadMatchesDeclaration<Value>()
+}
+
+fileprivate static func _stateMachineTakesOutput<Value: ~Swift::Copyable>(_ declared: _TriggerPayloadMatchesDeclaration<Value>, _ authored: _TriggerPayloadMatchesDeclaration<Value>) {
+}
+
+@available(*, unavailable, message: "A success edge or router takes its operation's output in the unlabeled parameter after its source, so that parameter's type must be exactly the operation's Output; take the request with the argument label request:, or declare the Output this parameter takes.")
+fileprivate static func _stateMachineTakesOutput<Declared: ~Swift::Copyable, Authored: ~Swift::Copyable>(_ declared: _TriggerPayloadMatchesDeclaration<Declared>, _ authored: _TriggerPayloadMatchesDeclaration<Authored>) {
+}
+
+fileprivate static func _stateMachineIsSwiftVoid(_ type: Swift::Void.Type) {
+}
+
+@available(*, unavailable, message: "Operation 'Autosave' succeeds without output, as its onSuccess: edges and routers take none, but its Output resolves to a type other than Void; take the output after the source, or declare its Output as Void.")
+fileprivate static func _stateMachineIsSwiftVoid<Value: ~Swift::Copyable>(_ type: Value.Type) {
+}
+
+fileprivate enum _StateMachineReadsNever {
+}
+
+fileprivate static func _stateMachineNeverProbe<Value: ~Swift::Copyable>(_ type: Value.Type) -> Swift::Bool {
+    true
+}
+
+fileprivate static func _stateMachineNeverProbe(_ type: Swift::Never.Type) -> _StateMachineReadsNever.Type {
+    _StateMachineReadsNever.self
+}
+
+fileprivate static func _stateMachineIsNotSwiftNever(_ probe: Swift::Bool) {
+}
+
+@available(*, unavailable, message: "Operation 'Save' takes Never as its input, so no transition can start it; declare an input type that has values, or remove the operation.")
+fileprivate static func _stateMachineIsNotSwiftNever(_ probe: _StateMachineReadsNever.Type) {
+}
+
+fileprivate static func _stateMachineIsNotSwiftNever2(_ probe: Swift::Bool) {
+}
+
+@available(*, unavailable, message: "Operation 'Save' never succeeds: its Output is Never, so its onSuccess: edges and routers can never run; remove them, or declare the Output the operation produces.")
+fileprivate static func _stateMachineIsNotSwiftNever2(_ probe: _StateMachineReadsNever.Type) {
+}
+
+fileprivate static func _stateMachineIsNotSwiftNever3(_ probe: Swift::Bool) {
+}
+
+@available(*, unavailable, message: "Operation 'Autosave' takes Never as its input, so no transition can start it; declare an input type that has values, or remove the operation.")
+fileprivate static func _stateMachineIsNotSwiftNever3(_ probe: _StateMachineReadsNever.Type) {
+}
+
 fileprivate static func _stateMachineWitnesses() {
+    _stateMachineNamesSchema(_StateMachineSchema.self)
+    do {
+        typealias _StateMachineChecked = Save.Input;
+        let probe = _stateMachineNeverProbe(_StateMachineChecked.self);
+        _stateMachineIsNotSwiftNever(probe)
+    }
+    do {
+        typealias _StateMachineChecked = Save.Output;
+        let probe = _stateMachineNeverProbe(_StateMachineChecked.self);
+        _stateMachineIsNotSwiftNever2(probe)
+    }
+    do {
+        typealias _StateMachineChecked = Autosave.Input;
+        let probe = _stateMachineNeverProbe(_StateMachineChecked.self);
+        _stateMachineIsNotSwiftNever3(probe)
+    }
+    do {
+        typealias _StateMachineChecked = Autosave.Output;
+        _stateMachineIsSwiftVoid(_StateMachineChecked.self)
+    }
     let _: _TransitionSourceIsPhasePayload<Draft> = _TransitionSourceIsPhasePayload<Draft>()
-    let _: _TransitionReturnsDeclaredResult<Change<Saving, Effect.Save>> = _TransitionReturnsDeclaredResult<Change<Saving, Effect.Save>>()
+    let _: _TransitionReturnsDeclaredResult<StateMachine::Change<Saving, Effect.Save>> = _TransitionReturnsDeclaredResult<Change<Saving, Effect.Save>>()
     let _: _TransitionSourceIsPhasePayload<Draft> = _TransitionSourceIsPhasePayload<Draft>()
-    let _: _TransitionReturnsDeclaredResult<Change<Draft, Effect.Edit>> = _TransitionReturnsDeclaredResult<Change<Draft, Effect.Edit>>()
-    let _: _TriggerPayloadMatchesDeclaration<String> = _TriggerPayloadMatchesDeclaration<String>()
+    let _: _TransitionReturnsDeclaredResult<StateMachine::Change<Draft, Effect.Edit>> = _TransitionReturnsDeclaredResult<Change<Draft, Effect.Edit>>()
+    do {
+        func witness(_ input: consuming Input) {
+            switch consume input {
+            case .edit(let bound):
+                let payload = _stateMachineInputPayload(bound);
+                let _: _TriggerPayloadMatchesDeclaration<String> = payload;
+            case _:
+                break
+            }
+        }
+    }
     let _: _TransitionSourceIsPhasePayload<Saving> = _TransitionSourceIsPhasePayload<Saving>()
     let _: _TransitionReturnsDeclaredResult<Draft> = _TransitionReturnsDeclaredResult<Draft>()
-    let _: _TriggerPayloadMatchesDeclaration<Save.Output> = _TriggerPayloadMatchesDeclaration<Save.Output>()
+    _stateMachineTakesOutput(_TriggerPayloadMatchesDeclaration<Save.Output>(), _TriggerPayloadMatchesDeclaration<Save.Output>())
     let _: _TransitionSourceIsPhasePayload<Draft> = _TransitionSourceIsPhasePayload<Draft>()
     let _: _TransitionReturnsDeclaredResult<Draft> = _TransitionReturnsDeclaredResult<Draft>()
-    let _: _TriggerPayloadMatchesDeclaration<Autosave.Output> = _TriggerPayloadMatchesDeclaration<Autosave.Output>()
 
 
     let _ = _EffectIsCopyable<Effect>()
@@ -38,11 +136,11 @@ fileprivate static func _stateMachineWitnesses() {
 }
 
 /// Inert descriptions of the operations this workflow can start.
-internal enum Effect: ~Sendable {
+internal enum Effect: ~Swift::Sendable {
     case save(Note.Save.Input)
     case autosave(Note.Autosave.Input)
     /// The operations `save` may start.
-internal enum Save: ~Sendable {
+internal enum Save: ~Swift::Sendable {
     case save(Note.Save.Input)
     /// The schema-wide effect this value describes.
     internal var effect: Note.Effect {
@@ -53,7 +151,7 @@ internal enum Save: ~Sendable {
     }
     }
     /// The operations `edit` may start.
-    internal enum Edit: ~Sendable {
+    internal enum Edit: ~Swift::Sendable {
         case autosave(Note.Autosave.Input)
         /// The schema-wide effect this value describes.
         internal var effect: Note.Effect {
@@ -63,16 +161,27 @@ internal enum Save: ~Sendable {
         }
     }
     }
+    /// The effect vocabularies of the edges from `Draft`.
+    internal enum Draft {
+        internal typealias Save = Note.Effect.Save
+    internal typealias Edit = Note.Effect.Edit
+    }
 }
 
+/// What one `Save` execution was started with, as admission accepted it.
+internal typealias SaveRequest = StateMachine::OperationRequest<Save, Save.Input>
+
+/// What one `Autosave` execution was started with, as admission accepted it.
+internal typealias AutosaveRequest = StateMachine::OperationRequest<Autosave, Autosave.Input>
+
 /// Unique authority over one declared workflow phase.
-internal struct Owned<Phase: ~Copyable>: ~Copyable {
+internal struct Owned<Phase: ~Swift::Copyable>: ~Swift::Copyable {
     fileprivate let phase: Phase
     fileprivate init(_ phase: consuming Phase) {
         self.phase = phase
     }
     /// Borrows the payload without copying a unique resource, returning what `body` returns or throws.
-    internal borrowing func withValue<Result: ~Copyable, Failure: Error>(
+    internal borrowing func withValue<Result: ~Swift::Copyable, Failure: Swift::Error>(
         _ body: (borrowing Phase) throws(Failure) -> Result
     ) throws(Failure) -> Result {
         try body(phase)
@@ -82,22 +191,22 @@ internal struct Owned<Phase: ~Copyable>: ~Copyable {
         phase
     }
     /// Advances through the authored edge, preserving effect order.
-internal consuming func save() -> Change<Owned<Saving>, Effect.Save> where Phase == Draft {
-    let change = Note.save(phase)
-    return Change(Owned<Saving>(change.next), effects: change.effects)
+internal consuming func save() -> StateMachine::Change<Owned<Saving>, Effect.Save> where Phase == Draft {
+    let change = _StateMachineSchema.save(phase)
+    return .init(Owned<Saving>(change.next), effects: change.effects)
     }
     /// Advances through the authored edge, preserving effect order.
-    internal consuming func edit(_ input: String) -> Change<Owned<Draft>, Effect.Edit> where Phase == Draft {
-        let change = Note.edit(phase, input)
-        return Change(Owned<Draft>(change.next), effects: change.effects)
+    internal consuming func edit(_ input: String) -> StateMachine::Change<Owned<Draft>, Effect.Edit> where Phase == Draft {
+        let change = _StateMachineSchema.edit(phase, input)
+        return .init(Owned<Draft>(change.next), effects: change.effects)
     }
     /// Advances through the authored edge, which starts no operation.
     internal consuming func saved(_ input: Save.Output) -> Owned<Draft> where Phase == Saving {
-        Owned<Draft>(Note.saved(phase, input))
+        Owned<Draft>(_StateMachineSchema.saved(phase, input))
     }
     /// Advances through the authored edge, which starts no operation.
-    internal consuming func autosaved(_ input: Autosave.Output) -> Owned<Draft> where Phase == Draft {
-        Owned<Draft>(Note.autosaved(phase, input))
+    internal consuming func autosaved() -> Owned<Draft> where Phase == Draft {
+        Owned<Draft>(_StateMachineSchema.autosaved(phase))
     }
 
 }
@@ -107,85 +216,88 @@ internal static func owned(_ initial: consuming Draft) -> Owned<Draft> {
     Owned(initial)
 }
 
-fileprivate typealias _StateMachineEngine = RuntimeState<Note, Effect>
+fileprivate typealias _StateMachineEngine = StateMachine::RuntimeState<Note, Effect>
 
 /// Validated bounds for managed admission and serial subscriptions.
-internal typealias Configuration = StateMachine.ManagedConfiguration
+internal typealias Configuration = StateMachine::ManagedConfiguration
 
 /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
-internal typealias LocalConfiguration = StateMachine.Limits
+internal typealias LocalConfiguration = StateMachine::Limits
 
-/// A live observation registration; cancelling or releasing it stops delivery.
-internal typealias Subscription = StateMachine.SnapshotSubscription
+/// A live observation registration with an owner confined to the actor `Owner`; only that actor can cancel it, which removes it, and dropping it stops delivery.
+internal typealias IsolatedSubscription<Owner: Swift::Actor> = StateMachine::IsolatedSnapshotSubscription<Owner>
 
 /// A live MainActor observation registration; cancelling or releasing it stops delivery.
-internal typealias MainActorSubscription = StateMachine.MainActorSnapshotSubscription
+internal typealias MainActorSubscription = StateMachine::MainActorSnapshotSubscription
 
 /// Failure to register another live observer.
-internal typealias SubscriptionFailure = StateMachine.SubscriptionFailure
+internal typealias SubscriptionFailure = StateMachine::SubscriptionFailure
 
-/// A single-pass latest-value sequence of a MainActor owner's snapshots.
-internal typealias MainActorSnapshots = StateMachine.MainActorSnapshotSequence<Snapshot>
+/// A single-consumer latest-value stream of a MainActor owner's snapshots.
+internal typealias MainActorSnapshots = StateMachine::MainActorSnapshotSequence<Snapshot>
+
+/// A single-consumer latest-value stream of the snapshots of an owner confined to one actor.
+internal typealias IsolatedSnapshots = StateMachine::IsolatedSnapshotSequence<Snapshot>
 
 /// The disposition of a retained completion.
-internal typealias PendingStatus = StateMachine.PendingStatus
+internal typealias PendingStatus = StateMachine::PendingStatus
 
 /// Why an owner refused a prepared candidate, in precedence order.
-internal typealias CommitRejection = StateMachine.CommitRejection
+internal typealias CommitRejection = StateMachine::CommitRejection
 
 /// An immutable historical payload with sealed complete-root provenance.
-internal struct Observed<Phase>: CustomStringConvertible {
+internal struct Observed<Phase>: Swift::CustomStringConvertible {
     fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
-    fileprivate let claim: RuntimeDeliveryClaim?
+    fileprivate let claim: StateMachine::RuntimeDeliveryClaim?
     /// The copied historical payload.
     internal var value: Phase {
         payload
     }
     /// The owner-lifetime accepted revision.
-    internal var revision: UInt64 {
+    internal var revision: Swift::UInt64 {
         record.revision
     }
     /// The phase, revision, and closure of this observation, without its payload.
-    internal var description: String {
+    internal var description: Swift::String {
         "\(Phase.self), revision \(record.revision)\(record.isClosed ? ", closed" : "")"
     }
     /// Prepares the declared edge with phase authority preserved.
 internal func save() -> Prepared where Phase == Draft {
-    let change: Change<Saving, Effect.Save> = Note.save(payload)
+    let change: StateMachine::Change<Saving, Effect.Save> = _StateMachineSchema.save(payload)
     return _stateMachinePrepare(on: record, next: .saving(change.next),
         effects: change.effects.map(\.effect),
         from: 0, to: 1, invalidates: [],
-        requiring: nil, claim: claim)
+        requiring: nil, claim: claim, edge: "draft.save")
     }
     /// Prepares the declared edge with phase authority preserved.
     internal func edit(_ input: String) -> Prepared where Phase == Draft {
-        let change: Change<Draft, Effect.Edit> = Note.edit(payload, input)
+        let change: StateMachine::Change<Draft, Effect.Edit> = _StateMachineSchema.edit(payload, input)
         return _stateMachinePrepare(on: record, next: .draft(change.next),
             effects: change.effects.map(\.effect),
             from: 0, to: 0, invalidates: [],
-            requiring: nil, claim: claim)
+            requiring: nil, claim: claim, edge: "draft.edit")
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
-    fileprivate func saved(_ value: Save.Output, authority: RuntimeTicket) -> Prepared where Phase == Saving {
-        let next: Draft = Note.saved(payload, value)
+    fileprivate func saved(_ value: Save.Output, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Saving {
+        let next: Draft = _StateMachineSchema.saved(payload, value)
         return _stateMachinePrepare(on: record, next: .draft(next),
             effects: [],
             from: 1, to: 0, invalidates: [],
-            requiring: authority, claim: claim)
+            requiring: authority, claim: claim, edge: "saving.saved")
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
-    fileprivate func autosaved(_ value: Autosave.Output, authority: RuntimeTicket) -> Prepared where Phase == Draft {
-        let next: Draft = Note.autosaved(payload, value)
+    fileprivate func autosaved(_ value: Autosave.Output, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Draft {
+        let next: Draft = _StateMachineSchema.autosaved(payload)
         return _stateMachinePrepare(on: record, next: .draft(next),
             effects: [],
             from: 0, to: 0, invalidates: [],
-            requiring: authority, claim: claim)
+            requiring: authority, claim: claim, edge: "draft.autosaved")
     }
 }
 
 /// A complete historical root observation with sealed provenance.
-internal enum Snapshot: StateMachineSnapshot, CustomStringConvertible {
+internal enum Snapshot: StateMachine::StateMachineSnapshot, Swift::CustomStringConvertible {
     case draft(Observed<Draft>)
     case saving(Observed<Saving>)
     fileprivate var record: _StateMachineEngine.Snapshot {
@@ -197,11 +309,11 @@ internal enum Snapshot: StateMachineSnapshot, CustomStringConvertible {
         }
     }
     /// The accepted revision of this observation.
-    internal var revision: UInt64 {
+    internal var revision: Swift::UInt64 {
         record.revision
     }
     /// Whether this historical root records closure.
-    internal var isClosed: Bool {
+    internal var isClosed: Swift::Bool {
         record.isClosed
     }
     /// Ordinary model data; constructing it confers no installation authority.
@@ -209,7 +321,7 @@ internal enum Snapshot: StateMachineSnapshot, CustomStringConvertible {
         record.model
     }
     /// The phase, revision, and closure of this observation, without its payload.
-    internal var description: String {
+    internal var description: Swift::String {
         switch self {
         case .draft(let value):
             return "draft, revision \(value.record.revision)\(value.record.isClosed ? ", closed" : "")"
@@ -219,7 +331,7 @@ internal enum Snapshot: StateMachineSnapshot, CustomStringConvertible {
     }
 }
 
-fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: RuntimeDeliveryClaim? = nil) -> Snapshot {
+fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: StateMachine::RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
     case .draft(let payload):
         return .draft(Observed(payload: payload, record: record, claim: claim))
@@ -233,7 +345,7 @@ fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snap
 /// A plan defect found while preparing travels inside it with the snapshot it was prepared on,
 /// so admission installs nothing and reports `CommitRejection.plan` unless the snapshot is
 /// another owner's or the owner is closed, which it reports first.
-internal struct Prepared: ~Copyable {
+internal struct Prepared: ~Swift::Copyable {
     fileprivate let candidate: _StateMachineEngine.Proposal
     fileprivate init(_ candidate: _StateMachineEngine.Proposal) {
         self.candidate = candidate
@@ -241,31 +353,36 @@ internal struct Prepared: ~Copyable {
 }
 
 /// A closed typed dynamic routing rejection.
-internal enum PreparationRejection: Error {
+internal enum PreparationRejection: Swift::Error {
     /// The input or outcome has no edge from the observed phase.
     case invalidPhase
 
 }
 
 /// A historical receipt for an atomic acceptance.
-internal struct Receipt: StateMachineReceipt, CustomStringConvertible {
+internal struct Receipt: StateMachine::StateMachineReceipt, Swift::CustomStringConvertible {
     /// The accepted historical observation.
     internal let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
         snapshot = _stateMachineSnapshot(record)
+        edgeID = record.edge
     }
+    /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
+    /// change that takes no edge: a reset, closure, or the authority-only commit of
+    /// `discardPending(id:)`.
+    internal let edgeID: Swift::String?
     /// The owner-lifetime accepted revision.
-    internal var revision: UInt64 {
+    internal var revision: Swift::UInt64 {
         snapshot.revision
     }
     /// The accepted phase, revision, and closure, without the payload.
-    internal var description: String {
+    internal var description: Swift::String {
         snapshot.description
     }
 }
 
 /// Why `send` did not admit an input.
-internal enum SendRejection: Error {
+internal enum SendRejection: Swift::Error {
     /// Routing or the authored transition declined the input before a candidate existed.
     case preparation(PreparationRejection)
     /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`);
@@ -289,17 +406,25 @@ fileprivate static func _stateMachineAdmission(_ result: _StateMachineEngine.Adm
 }
 
 /// Work issued exclusively from an accepted command batch.
-internal struct SaveWork {
+internal typealias SaveWork = _SaveWork<Save.Output>
+
+/// The work of `Save`, generic over its output so that it seals an output of any type.
+internal struct _SaveWork<_StateMachineOutput> {
+    /// What admission started this work with.
+internal let request: SaveRequest
+
     /// The immutable declared input.
-    internal let input: Save.Input
-    fileprivate let authority: RuntimeTicket
+internal var input: Save.Input {
+        request.input
+    }
+    fileprivate let authority: StateMachine::RuntimeTicket
     /// The sealed identity for acknowledging physical execution termination.
     internal var execution: ExecutionHandle {
         ExecutionHandle(authority: authority)
     }
     /// Seals a successful terminal result for this exact work.
-    internal func succeeded(_ value: Save.Output) -> SaveCompletion {
-        SaveCompletion(value: value, authority: authority)
+    internal func succeeded(_ value: _StateMachineOutput) -> SaveCompletion where _StateMachineOutput == Save.Output {
+        SaveCompletion(value: value, request: request, authority: authority)
     }
 
 
@@ -309,24 +434,34 @@ internal struct SaveWork {
 internal struct SaveCompletion {
     /// The value the operation produced; it cannot fail.
     internal let value: Save.Output
-    fileprivate let authority: RuntimeTicket
+    /// What admission started the work with.
+internal let request: SaveRequest
+    fileprivate let authority: StateMachine::RuntimeTicket
 }
 
 /// Work issued exclusively from an accepted command batch.
-internal struct AutosaveWork {
+internal typealias AutosaveWork = _AutosaveWork<Autosave.Output>
+
+/// The work of `Autosave`, generic over its output so that it seals an output of any type.
+internal struct _AutosaveWork<_StateMachineOutput> {
+    /// What admission started this work with.
+internal let request: AutosaveRequest
+
     /// The immutable declared input.
-    internal let input: Autosave.Input
-    fileprivate let authority: RuntimeTicket
+internal var input: Autosave.Input {
+        request.input
+    }
+    fileprivate let authority: StateMachine::RuntimeTicket
     /// The sealed identity for acknowledging physical execution termination.
     internal var execution: ExecutionHandle {
         ExecutionHandle(authority: authority)
     }
     /// Seals a successful terminal result for this exact work.
-    internal func succeeded(_ value: Autosave.Output) -> AutosaveCompletion {
-        AutosaveCompletion(value: value, authority: authority)
+    internal func succeeded(_ value: _StateMachineOutput) -> AutosaveCompletion where _StateMachineOutput == Autosave.Output {
+        AutosaveCompletion(value: value, request: request, authority: authority)
     }
     /// Seals a successful terminal result that carries no value.
-internal func succeeded() -> AutosaveCompletion {
+internal func succeeded() -> AutosaveCompletion where _StateMachineOutput == Autosave.Output {
         succeeded(())
     }
 
@@ -336,14 +471,16 @@ internal func succeeded() -> AutosaveCompletion {
 internal struct AutosaveCompletion {
     /// The value the operation produced; it cannot fail.
     internal let value: Autosave.Output
-    fileprivate let authority: RuntimeTicket
+    /// What admission started the work with.
+internal let request: AutosaveRequest
+    fileprivate let authority: StateMachine::RuntimeTicket
 }
 
 /// Closed typed terminal outcomes for this domain.
 internal enum Completion {
     case save(SaveCompletion)
     case autosave(AutosaveCompletion)
-    fileprivate var authority: RuntimeTicket {
+    fileprivate var authority: StateMachine::RuntimeTicket {
         switch self {
         case .save(let value):
             return value.authority
@@ -354,21 +491,15 @@ internal enum Completion {
 }
 
 /// A sealed handle to actual execution bookkeeping.
-internal struct ExecutionHandle: Equatable, Sendable {
-    fileprivate let authority: RuntimeTicket
+internal struct ExecutionHandle: Swift::Equatable, Swift::Sendable {
+    fileprivate let authority: StateMachine::RuntimeTicket
 }
 
-/// Physical termination is independent of cancellation or completion delivery.
-internal enum ExecutionDisposition: Equatable, Sendable {
-    case terminated, skippedBeforeStart
-}
+/// How an execution ended, independently of cancellation or completion delivery.
+internal typealias ExecutionDisposition = StateMachine::ExecutionDisposition
 
 /// Whether a physical execution acknowledgment was recorded.
-internal enum AcknowledgmentResult: Equatable, Sendable {
-    case recorded
-    case duplicate
-    case foreignOwner
-}
+internal typealias AcknowledgmentResult = StateMachine::AcknowledgmentResult
 
 /// A closed accepted start or cancellation command.
 internal enum Command {
@@ -378,14 +509,14 @@ internal enum Command {
 }
 
 /// One whole FIFO batch with its historical receipt.
-internal struct CommandBatch {
+internal struct CommandBatch: StateMachine::LocalCommandBatch {
     /// The atomic acceptance represented by this batch.
     internal let receipt: Receipt
     /// Cancellation commands followed by starts in authored effect order.
     internal let commands: [Command]
     /// Whether this is the separately reserved close batch.
-    internal let terminal: Bool
-    fileprivate init(receipt: Receipt, commands: [Command], terminal: Bool) {
+    internal let terminal: Swift::Bool
+    fileprivate init(receipt: Receipt, commands: [Command], terminal: Swift::Bool) {
         self.receipt = receipt
         self.commands = commands
         self.terminal = terminal
@@ -400,37 +531,39 @@ fileprivate static func _stateMachineBatch(_ batch: _StateMachineEngine.Batch) -
         case .start(let work):
             switch work.descriptor {
             case .save(let input):
-                return .save(SaveWork(input: input, authority: work.ticket))
+                return .save(SaveWork(request: SaveRequest(input: input), authority: work.ticket))
             case .autosave(let input):
-                return .autosave(AutosaveWork(input: input, authority: work.ticket))
+                return .autosave(AutosaveWork(request: AutosaveRequest(input: input), authority: work.ticket))
             }
+        case .emit:
+            Swift::preconditionFailure("A schema without events emits nothing.")
         }
     }
     return CommandBatch(receipt: Receipt(batch.snapshot), commands: commands, terminal: batch.terminal)
 }
 
-fileprivate static var _stateMachineEligibility: [[Int]] {
+fileprivate static var _stateMachineEligibility: [[Swift::Int]] {
     [[1], [0]]
 }
 
 fileprivate static func _stateMachinePrepare(
-    on record: _StateMachineEngine.Snapshot, next: Note, effects: [Effect], from: Int, to: Int,
-    invalidates: [Int], requiring ticket: RuntimeTicket?, claim: RuntimeDeliveryClaim?
+    on record: _StateMachineEngine.Snapshot, next: Note, effects: [Effect], from: Swift::Int, to: Swift::Int,
+    invalidates: [Swift::Int], requiring ticket: StateMachine::RuntimeTicket?, claim: StateMachine::RuntimeDeliveryClaim?, edge: Swift::String
 ) -> Prepared {
-    do throws(PlanRejection) {
+    do throws(StateMachine::PlanRejection) {
         var edits: [_StateMachineEngine.ScopeEdit] = []
         for (scope, phases) in _stateMachineEligibility.enumerated() {
             let before = phases.contains(from)
             let after = phases.contains(to)
             if after && (!before || invalidates.contains(scope)) {
-                edits.append(.activate(RuntimeScopeID(kind: UInt32(scope))))
+                edits.append(.activate(_StateMachineScopeID(kind: Swift::UInt32(scope))))
             }
             else if before && !after {
-                edits.append(.remove(RuntimeScopeID(kind: UInt32(scope))))
+                edits.append(.remove(_StateMachineScopeID(kind: Swift::UInt32(scope))))
             }
         }
         var starts: [_StateMachineEngine.Start] = []
-        var counts = Array(repeating: 0, count: 2)
+        var counts = Swift::Array(repeating: 0, count: 2)
         for effect in effects {
             switch effect {
             case .save(let input):
@@ -439,7 +572,7 @@ fileprivate static func _stateMachinePrepare(
                 guard counts[0] <= 1 else {
                     throw .invalidPlan
                 }
-                starts.append(.init(RuntimeOperation(kind: 0, scope: RuntimeScopeID(kind: 0),
+                starts.append(.init(_StateMachineOperation(kind: 0, scope: _StateMachineScopeID(kind: 0),
                     dependencies: [], policy: .rejectWhenActive), descriptor: effect))
             case .autosave(let input):
                 let _: Autosave.Input = input
@@ -447,7 +580,7 @@ fileprivate static func _stateMachinePrepare(
                 guard counts[1] <= 1 else {
                     throw .invalidPlan
                 }
-                starts.append(.init(RuntimeOperation(kind: 1, scope: RuntimeScopeID(kind: 1),
+                starts.append(.init(_StateMachineOperation(kind: 1, scope: _StateMachineScopeID(kind: 1),
                     dependencies: [], policy: .latest), descriptor: effect))
             }
         }
@@ -459,7 +592,7 @@ fileprivate static func _stateMachinePrepare(
                         } ?? [], starts: starts,
                 controlCount: invalidates.count, finishingClaims: claim.map {
                             [$0]
-                        } ?? []))))
+                        } ?? [], edge: edge))))
     } catch {
         return Prepared(.defective(.init(error, preparedOn: record)))
     }
@@ -469,47 +602,69 @@ fileprivate static func _stateMachinePrepare(
 ///
 /// A plan defect is not a routing rejection: it travels inside the result, and admission reports it.
 internal static func prepare(_ input: Input, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
-    switch (input, snapshot) {
-    case (.save, .draft(let source)):
-        return source.save()
-    case (.edit(let input), .draft(let source)):
-        return source.edit(input)
-    default:
-        throw .invalidPhase
+    switch input {
+    case .save:
+        switch snapshot {
+        case .draft(let source):
+            return source.save()
+        default:
+            throw .invalidPhase
+        }
+    case .edit(let input):
+        switch snapshot {
+        case .draft(let source):
+            return source.edit(input)
+        default:
+            throw .invalidPhase
+        }
     }
 }
 
 fileprivate static func _stateMachineCompletion(_ completion: Completion, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
-    switch (completion, snapshot) {
-    case (.save(let completion), .saving(let source)):
-        let value: Save.Output = completion.value
-        return source.saved(value, authority: completion.authority)
-    case (.autosave(let completion), .draft(let source)):
-        let value: Autosave.Output = completion.value
-        return source.autosaved(value, authority: completion.authority)
-    default:
-        throw .invalidPhase
+    switch completion {
+    case .save(let completion):
+        switch snapshot {
+        case .saving(let source):
+            let value: Save.Output = completion.value
+            return source.saved(value, authority: completion.authority)
+        default:
+            throw .invalidPhase
+        }
+    case .autosave(let completion):
+        switch snapshot {
+        case .draft(let source):
+            let value: Autosave.Output = completion.value
+            return source.autosaved(value, authority: completion.authority)
+        default:
+            throw .invalidPhase
+        }
     }
 }
 
-/// A phase saved data can restore: one in which no operation is active, or one the
-/// `@Restoration` function lists in `allows:`. A restored owner has no outstanding work.
+/// A phase saved data can restore: one in which no operation is active, or one listed in
+/// `@Restoration(allows:)`. A restored owner has no outstanding work.
 internal enum Restoration {
     case draft(Draft)
 }
 
-fileprivate static func _stateMachineRestored(_ saved: Box) -> (model: Note, scopes: [RuntimeScopeID]) {
-    switch Note.restore(saved) {
+fileprivate static func _stateMachineRestored(_ saved: Box) -> (model: Note, scopes: [StateMachine::RuntimeScopeID]) {
+    switch _StateMachineSchema.restore(saved) {
     case .draft(let payload):
-        return (.draft(payload), [RuntimeScopeID(kind: 1)])
+        return (.draft(payload), [_StateMachineScopeID(kind: 1)])
     }
 }
 
-fileprivate typealias _StateMachineLedger = RuntimeDeliveryLedger<Note, Effect, Completion, PreparationRejection>
+fileprivate typealias _StateMachineLedger = StateMachine::RuntimeDeliveryLedger<Note, Effect, Completion, PreparationRejection>
+
+/// A single-consumer latest-value stream of a MainActor owner's retained completions.
+internal typealias PendingCompletionUpdates = StateMachine::MainActorSnapshotSequence<[PendingCompletion]>
+
+/// A single-consumer latest-value stream of the retained completions of an owner confined to one actor.
+internal typealias IsolatedPendingCompletionUpdates = StateMachine::IsolatedSnapshotSequence<[PendingCompletion]>
 
 /// The opaque identity of one retained terminal outcome of this schema's owners.
-internal struct PendingCompletionID: Hashable, Sendable {
-    fileprivate let raw: RuntimePendingID
+internal struct PendingCompletionID: Swift::Hashable, Swift::Sendable {
+    fileprivate let raw: StateMachine::RuntimePendingID
 }
 
 /// A retained terminal outcome and its delivery diagnostics.
@@ -517,10 +672,10 @@ internal struct PendingCompletionID: Hashable, Sendable {
 /// The outcome is an inert value: only `reconcile(id:)`, `retryAdmission(id:)`, or
 /// `discardPending(id:)` can settle the retained completion it describes.
 internal struct PendingCompletion {
-    /// The retained terminal value of one operation.
+    /// The retained terminal value of one operation, with the request its work was started with.
     internal enum Outcome {
-        case save(Save.Output)
-        case autosave(Autosave.Output)
+        case save(Note.Save.Output, request: Note.SaveRequest)
+        case autosave(Note.Autosave.Output, request: Note.AutosaveRequest)
     }
     /// Why the last preparation or admission of a retained outcome did not commit.
     internal enum Rejection {
@@ -538,18 +693,18 @@ internal struct PendingCompletion {
     /// The last failed preparation or admission, when present.
     internal let lastRejection: Rejection?
     /// The saturating count of claimed preparations; capacity retries do not increment it.
-    internal let attempts: UInt64
+    internal let attempts: Swift::UInt64
     /// Whether the preparation count has reached its representable limit.
-    internal var attemptsSaturated: Bool {
-        attempts == UInt64.max
+    internal var attemptsSaturated: Swift::Bool {
+        attempts == Swift::UInt64.max
     }
     fileprivate init(_ pending: _StateMachineLedger.Pending) {
         id = PendingCompletionID(raw: pending.id)
         switch pending.outcome {
         case .save(let completion):
-            outcome = .save(completion.value)
+            outcome = .save(completion.value, request: completion.request)
         case .autosave(let completion):
-            outcome = .autosave(completion.value)
+            outcome = .autosave(completion.value, request: completion.request)
         }
         status = pending.status
         lastRejection = pending.lastRejection.map { reason in
@@ -628,24 +783,24 @@ fileprivate static func _stateMachineDeliveryPreparation(_ attempt: _StateMachin
 ///
 /// It is captured in the same observation that found the deadline expired, so it always names
 /// at least one unsettled obligation. It holds no model data and no authority over the owner.
-internal struct ShutdownDiagnostics: Equatable, Sendable {
+internal struct ShutdownDiagnostics: Swift::Equatable, Swift::Sendable {
     /// An execution and delivery obligation that remained tracked.
-internal typealias OutstandingExecution = StateMachine.ShutdownDiagnostics.OutstandingExecution
+internal typealias OutstandingExecution = StateMachine::ShutdownDiagnostics.OutstandingExecution
     /// The owner's last accepted revision at the observation.
-    internal let acceptedRevision: UInt64
+    internal let acceptedRevision: Swift::UInt64
     /// The revision of the last fully processed FIFO batch.
-    internal let processedThrough: UInt64
+    internal let processedThrough: Swift::UInt64
     /// Whether accepted ordinary or terminal batches still await processing.
-    internal let hasQueuedBatches: Bool
+    internal let hasQueuedBatches: Swift::Bool
     /// Whether a FIFO processing turn still owns responsibility.
-    internal let isDraining: Bool
+    internal let isDraining: Swift::Bool
     /// Whether an automatic retry of a retained completion is still scheduled.
-internal let isRetrying: Bool
+internal let isRetrying: Swift::Bool
     /// The identities of the retained terminal outcomes.
     internal let pendingCompletions: [PendingCompletionID]
     /// The executions, deliveries, and preparations that remain tracked.
     internal let outstandingExecutions: [OutstandingExecution]
-    fileprivate init(_ raw: StateMachine.ShutdownDiagnostics) {
+    fileprivate init(_ raw: StateMachine::ShutdownDiagnostics) {
         acceptedRevision = raw.acceptedRevision
         processedThrough = raw.processedThrough
         hasQueuedBatches = raw.hasQueuedBatches
@@ -661,12 +816,12 @@ internal let isRetrying: Bool
 /// Whether shutdown joined every obligation or stopped waiting at its deadline.
 ///
 /// A timeout leaves the owner closed and its outstanding work tracked.
-internal enum ShutdownResult: Equatable, Sendable {
+internal enum ShutdownResult: Swift::Equatable, Swift::Sendable {
     /// Every execution, delivery, and preparation obligation settled.
     case quiescent
     /// The deadline passed first; the diagnostics describe what was still outstanding.
     case timedOut(ShutdownDiagnostics)
-    fileprivate init(_ raw: StateMachine.ShutdownDiagnostics?) {
+    fileprivate init(_ raw: StateMachine::ShutdownDiagnostics?) {
         self = raw.map {
             .timedOut(ShutdownDiagnostics($0))
         } ?? .quiescent
@@ -674,20 +829,97 @@ internal enum ShutdownResult: Equatable, Sendable {
 }
 
 /// Whether `flush(through:)` waited for a receipt's batch to be processed.
-internal enum FlushResult: Equatable, Sendable {
-    /// Cancellation and launch decisions through the receipt have been processed.
-    case processed
-    /// The receipt was issued by a different owner, so there was nothing to wait for.
-    case foreignOwner
-}
+internal typealias FlushResult = StateMachine::FlushResult
 
 /// A noncopyable manually driven owner with an embedded value engine.
-internal struct Local: ~Copyable {
+internal struct Local: ~Swift::Copyable, StateMachine::DeliveringLocalStateMachine, StateMachine::RestoringLocalStateMachine {
+    /// A type of this owner's `LocalStateMachine` conformance.
+internal typealias Input = Note.Input
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias Snapshot = Note.Snapshot
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias Receipt = Note.Receipt
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias SendRejection = Note.SendRejection
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias Prepared = Note.Prepared
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias CommitResult = Note.CommitResult
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias InitialPhase = Draft
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias Command = Note.Command
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias CommandBatch = Note.CommandBatch
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias Completion = Note.Completion
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias ExecutionHandle = Note.ExecutionHandle
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias PendingCompletionID = Note.PendingCompletionID
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias PendingCompletion = Note.PendingCompletion
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias DeliveryResult = Note.DeliveryResult
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias ReconcileResult = Note.ReconcileResult
+    /// A type of this owner's `LocalStateMachine` conformance.
+    internal typealias DiscardResult = Note.DiscardResult
+    /// The declared structure of this owner's graph.
+    internal static var graph: StateMachine::StateMachineGraph {
+        _StateMachineSchema.graph
+    }
+    /// The identifier of the phase a snapshot holds, as the graph names it.
+    internal static func phase(of snapshot: Snapshot) -> Swift::String {
+        switch snapshot {
+    case .draft:
+        return "draft"
+    case .saving:
+        return "saving"
+    }
+    }
+    /// The receipt of an admitted proposal, or `nil` when admission rejected it.
+    internal static func receipt(of result: CommitResult) -> Receipt? {
+        if case .committed(let receipt) = result {
+        receipt
+    } else {
+        nil
+    }
+    }
+    /// The identifier of the router or edge, as the graph names it, whose authored function refused an
+    /// input that `send` rejected from a snapshot in `phase`, or `nil` when no authored function refused it.
+    internal static func rejectingRoute(of rejection: SendRejection, in phase: Swift::String) -> Swift::String? {
+        nil
+    }
+    /// The receipt of a delivery that committed, or `nil` when the outcome was retained or not taken.
+    internal static func receipt(of result: DeliveryResult) -> Receipt? {
+        if case .committed(let receipt) = result {
+        receipt
+    } else {
+        nil
+    }
+    }
+    /// The receipt of a retained outcome's admission, or `nil` when it did not commit.
+    internal static func receipt(of result: ReconcileResult) -> Receipt? {
+        if case .committed(let receipt) = result {
+        receipt
+    } else {
+        nil
+    }
+    }
+    /// The receipt of a discard's authority-only commit, or `nil` when nothing was discarded.
+    internal static func receipt(of result: DiscardResult) -> Receipt? {
+        if case .discarded(let receipt) = result {
+        receipt
+    } else {
+        nil
+    }
+    }
     fileprivate var engine: _StateMachineEngine
     fileprivate var ledger = _StateMachineLedger()
     /// Creates fresh authority only in the declared initial phase.
     internal init(_ initial: Draft, configuration: LocalConfiguration = .default) {
-        engine = _StateMachineEngine(.draft(initial), scopes: [RuntimeScopeID(kind: 1)], limits: configuration, recording: .commands)
+        engine = _StateMachineEngine(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)], limits: configuration, recording: .commands)
     }
     /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
     internal init(restoring saved: Box, configuration: LocalConfiguration = .default) {
@@ -697,6 +929,13 @@ internal struct Local: ~Copyable {
     /// Returns an immutable historical observation.
     internal borrowing func snapshot() -> Snapshot {
         _stateMachineSnapshot(engine.snapshot)
+    }
+    /// Whether `snapshot` was taken from this owner, in any incarnation.
+    ///
+    /// A reset keeps the owner, and another owner never matches, even one that holds an equal
+    /// model at the same revision. The answer grants no authority.
+    internal borrowing func owns(_ snapshot: Snapshot) -> Swift::Bool {
+        engine.owns(snapshot.record)
     }
     /// Consumes and atomically accepts or rejects a complete candidate.
     internal mutating func commit(_ prepared: consuming Prepared) -> CommitResult {
@@ -714,7 +953,7 @@ internal struct Local: ~Copyable {
     internal mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
         let prepared: Prepared
         do {
-            prepared = try Note.prepare(input, on: snapshot())
+            prepared = try _StateMachineSchema.prepare(input, on: snapshot())
         } catch {
             throw .preparation(error)
         }
@@ -725,14 +964,21 @@ internal struct Local: ~Copyable {
             throw .commit(reason)
         }
     }
-    /// Transfers whole FIFO batches; physical execution occurs after mutating access ends.
-internal mutating func drainCommands(limit: Int) -> [CommandBatch] {
+    /// Transfers whole FIFO batches, at most `limit` of them; physical execution occurs after mutating access ends.
+internal mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
     engine.drain(limit: limit).map {
         _stateMachineBatch($0)
     }
     }
+    /// How many whole batches a drain would transfer, including the terminal batch, without
+    /// transferring any.
+    internal var queuedBatchCount: Swift::Int {
+        engine.queuedBatchCount
+    }
     /// Records actual termination independently of cancellation and completion delivery.
-    internal mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition) -> AcknowledgmentResult {
+    ///
+    /// Pass `.skippedBeforeStart` for work the caller never began.
+    internal mutating func acknowledgeExecution(_ execution: ExecutionHandle, disposition: ExecutionDisposition = .terminated) -> AcknowledgmentResult {
         switch engine.acknowledge(execution.authority, skippedBeforeStart: disposition == .skippedBeforeStart) {
         case .recorded:
         return .recorded
@@ -804,6 +1050,9 @@ internal mutating func drainCommands(limit: Int) -> [CommandBatch] {
         ledger.pending.map(PendingCompletion.init)
     }
     /// Revokes one retained operation using an atomic authority-only commit.
+    ///
+    /// The operation's work already returned the outcome it settles, so the commit issues no
+    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
     internal mutating func discardPending(id: PendingCompletionID) -> DiscardResult {
         guard let result = ledger.discard(id.raw, in: &engine) else {
         return .notPending
@@ -822,43 +1071,122 @@ internal mutating func drainCommands(limit: Int) -> [CommandBatch] {
         ledger.prune(in: engine)
         return Receipt(result)
     }
+        /// Replaces the model with `initial` in a fresh incarnation, as a fresh owner starts.
+    ///
+    /// Every outstanding operation is revoked, with its cancellation published in the reset's
+    /// batch, and every retained completion is disposed of, so a late result is stale. The owner
+    /// keeps its identity and subscribers, and its revision advances. Work that is still running
+    /// keeps its execution reservation until it terminates.
+    ///
+    /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
+    /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
+    /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
+    /// full, and then changes nothing; it queues a batch only to cancel the work it revokes, so it needs a slot only then.
+    @discardableResult
+    internal mutating func reset(to initial: Draft) throws(CommitRejection) -> Receipt {
+        let result = engine.reset(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)])
+    ledger.prune(in: engine)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with `initial` exactly as `reset(to:)` does, but only while the owner
+    /// still holds the root `expected` observed, so a decision made on that snapshot cannot
+    /// discard a change accepted since.
+    ///
+    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
+    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
+    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    @discardableResult
+    internal mutating func reset(to initial: Draft, expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
+        let result = engine.reset(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record)
+    ledger.prune(in: engine)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
+    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    @discardableResult
+    internal mutating func reset(restoring saved: Box) throws(CommitRejection) -> Receipt {
+        let restored = _stateMachineRestored(saved)
+        let result = engine.reset(restored.model, scopes: restored.scopes)
+    ledger.prune(in: engine)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with the phase `restore` validates from saved data exactly as
+    /// `reset(restoring:)` does, but only while the owner still holds the root `expected`
+    /// observed, refusing otherwise as `reset(to:expecting:)` does.
+    @discardableResult
+    internal mutating func reset(restoring saved: Box, expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
+        let restored = _stateMachineRestored(saved)
+        let result = engine.reset(restored.model, scopes: restored.scopes, expecting: expected.record)
+    ledger.prune(in: engine)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
     /// Closure, FIFO transfer, and all actual execution and delivery obligations have settled.
-internal var isQuiescent: Bool {
+internal var isQuiescent: Swift::Bool {
         engine.isQuiescent
     }
 }
 
 /// Immutable operation selections whose non-Sendable values stay within MainActor.
-@MainActor internal struct MainActorDrivers {
+@Swift::MainActor internal struct MainActorDrivers {
     /// Executes this operation within the selected isolation.
-internal let save: @MainActor (Save.Input) async -> Save.Output
+internal let save: @Swift::MainActor (Save.Input) async -> Save.Output
     /// Executes this operation within the selected isolation.
-    internal let autosave: @MainActor (Autosave.Input) async -> Autosave.Output
+    internal let autosave: @Swift::MainActor (Autosave.Input) async -> Autosave.Output
     /// Selects every driver for this owner's lifetime.
-    internal init(save: @escaping @MainActor (Save.Input) async -> Save.Output, autosave: @escaping @MainActor (Autosave.Input) async -> Autosave.Output) {
+    internal init(save: @escaping @Swift::MainActor (Save.Input) async -> Save.Output, autosave: @escaping @Swift::MainActor (Autosave.Input) async -> Autosave.Output) {
         self.save = save
         self.autosave = autosave
     }
 }
 
 /// A sealed sole-writer MainActor owner with managed execution.
-@MainActor internal final class MainActorHost: MainActorStateMachineHost {
-    private typealias Host = RuntimeMainActorHost<Note, Effect, Completion, PreparationRejection>
+///
+/// On iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, and Mac Catalyst 17 and later it is
+/// `Observable`, so a SwiftUI view can read it directly. Each tracked member registers a read of
+/// its own value only: `currentSnapshot` and `snapshot()`, `runningCount`, `subscriberCount`,
+/// and `pendingCompletions()`.
+@Swift::MainActor internal final class MainActorHost: StateMachine::ObservableMainActorHost, StateMachine::MainActorStateMachineHost {
+    private typealias Host = StateMachine::RuntimeMainActorHost<Note, Effect, Completion, PreparationRejection>
     private let host: Host
-    /// How this owner settles a retained completion that cannot commit when it is delivered.
+    /// How this owner settles a retained completion that does not commit when it is delivered.
     ///
-    /// The default, `.retryPure`, evaluates a completion's router and edge again after another
-    /// commit wins the race, so it assumes those functions are pure. Choose
-    /// `.manual(onReconciliationRequired:)` when they are not.
+    /// `.retry` prepares a completion again against the newer state when another commit wins the
+    /// race. That is the same as the result arriving a moment later, when its edge would run
+    /// against the newer phase anyway; work that must not survive a change is revoked by the
+    /// edge's `invalidates:` instead. `.manual` never prepares a completion again on its own.
+    /// Either form can pass each completion that needs reconciliation to a handler.
     ///
-    /// A handler, when given, runs outside the owner's critical section each time a retained
-    /// completion's status becomes `reconciliationRequired`: its completion edge or router threw,
-    /// its effect plan is defective, the owner refused its admission, or an explicit
-    /// `reconcile(id:)` did not commit. Settle it with `reconcile(id:)` or `discardPending(id:)`.
+    /// Initializers default to `.retry`.
+    ///
+    /// A handler runs outside the owner's critical section each time a retained completion's
+    /// status becomes `reconciliationRequired`: its completion edge or router threw, its effect
+    /// plan is defective, the owner refused its admission, an explicit `reconcile(id:)` did not
+    /// commit, or, under `.manual`, its preparation lost a race. Settle it with
+    /// `reconcile(id:)` or `discardPending(id:)`.
     internal struct CompletionPolicy {
-        fileprivate let runtime: RuntimeCompletionPolicy
-        fileprivate let reconciliationRequired: @MainActor (_StateMachineLedger.Pending) -> Void
-        private init(_ runtime: RuntimeCompletionPolicy, handler: @escaping @MainActor (PendingCompletion) -> Void) {
+        fileprivate let runtime: StateMachine::RuntimeCompletionPolicy
+        fileprivate let reconciliationRequired: @Swift::MainActor (_StateMachineLedger.Pending) -> Swift::Void
+        private init(_ runtime: StateMachine::RuntimeCompletionPolicy, handler: @escaping @Swift::MainActor (PendingCompletion) -> Swift::Void) {
             self.runtime = runtime
             reconciliationRequired = {
             handler(PendingCompletion($0))
@@ -867,35 +1195,48 @@ internal let save: @MainActor (Save.Input) async -> Save.Output
         /// Prepares a completion again against the current state when another commit wins the race,
         /// at most four times per turn before yielding to other work, and notifies no one.
         ///
-        /// Choose it only when every completion edge and router is deterministic and free of side
+        /// Choose it when every completion edge and router is deterministic and free of side
         /// effects; the compiler does not check that. A completion retained for any other reason
-        /// stays visible only through `pendingCompletions()`.
-        internal static var retryPure: CompletionPolicy {
-        CompletionPolicy(.retryPure, handler: { _ in
+        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        internal static var retry: CompletionPolicy {
+        CompletionPolicy(.retry, handler: { _ in
             })
     }
-        /// Retries lost races as `retryPure` does, and passes every completion that still needs
+        /// Retries lost races as `retry` does, and passes every completion that still needs
         /// reconciliation to `handler`.
-        internal static func retryPure(onReconciliationRequired handler: @escaping @MainActor (PendingCompletion) -> Void) -> CompletionPolicy {
-            CompletionPolicy(.retryPure, handler: handler)
+        internal static func retry(onReconciliationRequired handler: @escaping @Swift::MainActor (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
+            CompletionPolicy(.retry, handler: handler)
         }
+        /// Never prepares a completion again on its own, and notifies no one: every completion that
+        /// needs reconciliation, including one whose preparation lost a race with another commit,
+        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        internal static var manual: CompletionPolicy {
+        CompletionPolicy(.manual, handler: { _ in
+            })
+    }
         /// Never prepares a completion again on its own: every completion that needs reconciliation,
         /// including one whose preparation lost a race with another commit, goes to `handler`.
-        internal static func manual(onReconciliationRequired handler: @escaping @MainActor (PendingCompletion) -> Void) -> CompletionPolicy {
-            CompletionPolicy(.manualOnConflict, handler: handler)
+        internal static func manual(onReconciliationRequired handler: @escaping @Swift::MainActor (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
+            CompletionPolicy(.manual, handler: handler)
         }
     }
     /// Creates fresh authority and immutable execution selections.
-    internal init(_ initial: Draft, drivers: MainActorDrivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) {
-        host = Host(.draft(initial), scopes: [RuntimeScopeID(kind: 1)], configuration: configuration,
+    internal init(_ initial: Draft, drivers: MainActorDrivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retry) {
+        host = Host(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)], configuration: configuration,
             policy: completionPolicy.runtime, driver: { raw in
+    let execution: @Swift::MainActor () async -> Completion
     switch raw.descriptor {
                 case .save(let input):
-                    return .save(SaveCompletion(value: await drivers.save(input), authority: raw.ticket))
-                case .autosave(let input):
-                    return .autosave(AutosaveCompletion(value: await drivers.autosave(input), authority: raw.ticket))
+                    execution = {
+                    .save(SaveCompletion(value: await drivers.save(input), request: SaveRequest(input: input), authority: raw.ticket))
                 }
-            }, ticket: { (outcome: Completion) -> RuntimeTicket in
+                case .autosave(let input):
+                    execution = {
+                    .autosave(AutosaveCompletion(value: await drivers.autosave(input), request: AutosaveRequest(input: input), authority: raw.ticket))
+                }
+                }
+    return await execution()
+            }, ticket: { (outcome: Completion) -> StateMachine::RuntimeTicket in
                 outcome.authority
             },
             prepare: {
@@ -904,17 +1245,23 @@ internal let save: @MainActor (Save.Input) async -> Save.Output
             reconciliationRequired: completionPolicy.reconciliationRequired)
     }
     /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
-    internal init(restoring saved: Box, drivers: MainActorDrivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retryPure) {
+    internal init(restoring saved: Box, drivers: MainActorDrivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retry) {
         let restored = _stateMachineRestored(saved)
         host = Host(restored.model, scopes: restored.scopes, configuration: configuration,
             policy: completionPolicy.runtime, driver: { raw in
+    let execution: @Swift::MainActor () async -> Completion
     switch raw.descriptor {
                 case .save(let input):
-                    return .save(SaveCompletion(value: await drivers.save(input), authority: raw.ticket))
-                case .autosave(let input):
-                    return .autosave(AutosaveCompletion(value: await drivers.autosave(input), authority: raw.ticket))
+                    execution = {
+                    .save(SaveCompletion(value: await drivers.save(input), request: SaveRequest(input: input), authority: raw.ticket))
                 }
-            }, ticket: { (outcome: Completion) -> RuntimeTicket in
+                case .autosave(let input):
+                    execution = {
+                    .autosave(AutosaveCompletion(value: await drivers.autosave(input), request: AutosaveRequest(input: input), authority: raw.ticket))
+                }
+                }
+    return await execution()
+            }, ticket: { (outcome: Completion) -> StateMachine::RuntimeTicket in
                 outcome.authority
             },
             prepare: {
@@ -924,33 +1271,37 @@ internal let save: @MainActor (Save.Input) async -> Save.Output
     }
     /// Creates fresh initial authority, selecting one driver closure per operation.
     internal convenience init(_ initial: Draft,
-        saveDriver: @escaping @MainActor (Save.Input) async -> Save.Output,
-        autosaveDriver: @escaping @MainActor (Autosave.Input) async -> Autosave.Output,
+        saveDriver: @escaping @Swift::MainActor (Save.Input) async -> Save.Output,
+        autosaveDriver: @escaping @Swift::MainActor (Autosave.Input) async -> Autosave.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .retryPure) {
+        completionPolicy: CompletionPolicy = .retry) {
         self.init(initial, drivers: MainActorDrivers(save: saveDriver, autosave: autosaveDriver),
             configuration: configuration, completionPolicy: completionPolicy)
     }
     /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
     internal convenience init(restoring saved: Box,
-        saveDriver: @escaping @MainActor (Save.Input) async -> Save.Output,
-        autosaveDriver: @escaping @MainActor (Autosave.Input) async -> Autosave.Output,
+        saveDriver: @escaping @Swift::MainActor (Save.Input) async -> Save.Output,
+        autosaveDriver: @escaping @Swift::MainActor (Autosave.Input) async -> Autosave.Output,
         configuration: Configuration = .default,
-        completionPolicy: CompletionPolicy = .retryPure) {
+        completionPolicy: CompletionPolicy = .retry) {
         self.init(restoring: saved, drivers: MainActorDrivers(save: saveDriver, autosave: autosaveDriver),
             configuration: configuration, completionPolicy: completionPolicy)
     }
-    /// Captures a complete historical observation.
+    /// Captures a complete historical observation; reading it registers a read of the snapshot with Observation.
     internal func snapshot() -> Snapshot {
+        _stateMachineSnapshot(host.snapshot())
+    }
+    /// The current complete snapshot; reading it registers a read of the snapshot with Observation.
+internal var currentSnapshot: Snapshot {
         _stateMachineSnapshot(host.snapshot())
     }
     /// Routes, prepares and admits one input in a single isolated turn without suspension.
     @discardableResult
     internal func send(_ input: Input) throws(SendRejection) -> Receipt {
-        let result = host.prepareAndCommit { raw -> Result<_StateMachineEngine.Candidate, SendRejection> in
+        let result = host.prepareAndCommit { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
             let prepared: Prepared
             do throws(PreparationRejection) {
-                prepared = try Note.prepare(input, on: _stateMachineSnapshot(raw))
+                prepared = try _StateMachineSchema.prepare(input, on: _stateMachineSnapshot(raw))
             } catch {
                 return .failure(.preparation(error))
             }
@@ -979,47 +1330,113 @@ internal let save: @MainActor (Save.Input) async -> Save.Output
             return _stateMachineAdmission(host.reject(defect))
         }
     }
-    /// Subscribes to initial, accepted and terminal complete snapshots.
-    internal func subscribe(_ receive: @escaping @MainActor (Snapshot) -> Void,
-        onFinish: @escaping @MainActor () -> Void = {
+    /// Subscribes to initial, accepted and terminal complete snapshots, taking a subscriber slot when called.
+    internal func subscribe(_ receive: @escaping @Swift::MainActor (Snapshot) -> Swift::Void,
+        onFinish: @escaping @Swift::MainActor () -> Swift::Void = {
         }) throws(SubscriptionFailure) -> MainActorSubscription {
         try host.subscribe({
                 receive(_stateMachineSnapshot($0))
             }, onFinish: onFinish)
     }
-    /// Registers a single-pass sequence of the latest complete snapshots.
+    /// Registers a single-consumer stream of the latest complete snapshots, taking a subscriber slot when called.
     ///
-    /// The sequence ends after the closed snapshot, when its task is cancelled, or when this owner is released.
+    /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
+    /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel()` on the main actor, which removes its registration before it
+    /// returns.
     internal func snapshots() throws(SubscriptionFailure) -> MainActorSnapshots {
         try host.snapshots {
             _stateMachineSnapshot($0)
         }
     }
-        /// Registers a single-pass sequence of the latest `Sendable` projections of complete snapshots.
+        /// Registers a single-pass sequence of the latest `Sendable` projections of complete snapshots, taking a subscriber slot when called.
     ///
-    /// `transform` runs on the main actor when a snapshot is delivered. The sequence supports every
-    /// `AsyncSequence` operator on every supported OS version.
-    internal func snapshots<Projection: Sendable>(
-        _ transform: @escaping @MainActor (Snapshot) -> Projection
-    ) throws(SubscriptionFailure) -> StateMachine.SnapshotSequence<Projection> {
+    /// `transform` runs on the main actor when a snapshot is delivered, and the sequence offers each
+    /// projection, equal to the one before it or not. It supports every `AsyncSequence` operator on
+    /// every supported OS version. `distinctSnapshots(_:)` omits repeated values instead.
+    internal func snapshots<Projection: Swift::Sendable>(
+        _ transform: @escaping @Swift::MainActor (Snapshot) -> Projection
+    ) throws(SubscriptionFailure) -> StateMachine::SnapshotSequence<Projection> {
         try host.sendableSnapshots {
         transform(_stateMachineSnapshot($0))
     }
     }
+    /// Registers a single-pass sequence of the latest `Equatable` projections of complete snapshots,
+    /// omitting each projection equal to the one before it, taking a subscriber slot when called.
+    ///
+    /// `transform` and the comparison run on the main actor, outside every lock. A closed snapshot
+    /// whose projection is unchanged is omitted too, and the sequence then ends.
+    internal func distinctSnapshots<Projection: Swift::Sendable & Swift::Equatable>(
+        _ transform: @escaping @Swift::MainActor (Snapshot) -> Projection
+    ) throws(SubscriptionFailure) -> StateMachine::SnapshotSequence<Projection> {
+        try host.distinctSendableSnapshots {
+        transform(_stateMachineSnapshot($0))
+    }
+    }
+    #if canImport(Combine)
+
+    /// Registers a Combine publisher of `Sendable` projections of complete snapshots, delivered on
+    /// the main actor, taking a subscriber slot when called, before anything subscribes.
+    ///
+    /// `transform` runs on the main actor when a snapshot is delivered.
+    /// The publisher takes a subscriber slot when it is created and frees it before its subscription's
+    /// cancellation returns, from any thread, or when an unsubscribed publisher is released. It keeps
+    /// the latest value until demand allows and finishes after the closed snapshot. A unit of demand
+    /// reaches the newest value this owner had handed over when the publisher claimed it, or a newer
+    /// one. When this owner is released without closing, it finishes at once and discards every
+    /// ordinary value it has not yet delivered, so demand made after the release receives only the
+    /// completion.
+    @Swift::MainActor internal func snapshotPublisher<Projection: Swift::Sendable>(
+        _ transform: @escaping @Swift::MainActor (Snapshot) -> Projection
+    ) throws(SubscriptionFailure) -> StateMachine::SnapshotPublisher<Projection> {
+        try host.snapshotPublisher {
+        transform(_stateMachineSnapshot($0))
+    }
+    }
+    #endif
     /// Reads immutable retained first-outcome diagnostics.
 internal func pendingCompletions() -> [PendingCompletion] {
         host.pendingCompletions().map(PendingCompletion.init)
+    }
+    /// Registers a single-consumer stream of the retained completions, each element the whole collection, taking a subscriber slot when called.
+    ///
+    /// The first element is the collection current at registration, and each later one the
+    /// collection after a change to it, in the order of those changes; a newer collection
+    /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
+    /// It also ends when this owner is released, when its `cancel()` is called, or when a
+    /// read finds its task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel()` on the main actor, which removes its registration before it
+    /// returns.
+    internal func pendingCompletionUpdates() throws(SubscriptionFailure) -> PendingCompletionUpdates {
+        try host.pendingCompletionUpdates {
+        $0.map(PendingCompletion.init)
+    }
+    }
+    /// Registers a single-pass sequence of `Sendable` projections of the retained completions, taking a subscriber slot when called.
+    ///
+    /// `transform` runs on the main actor with the whole collection after each change, starting with
+    /// the collection current at registration. The sequence supports every `AsyncSequence` operator
+    /// on every supported OS version, and ends after the projection of the final, empty collection.
+    internal func pendingCompletionUpdates<Projection: Swift::Sendable>(
+        _ transform: @escaping @Swift::MainActor ([PendingCompletion]) -> Projection
+    ) throws(SubscriptionFailure) -> StateMachine::SnapshotSequence<Projection> {
+        try host.sendablePendingCompletionUpdates {
+        transform($0.map(PendingCompletion.init))
+    }
     }
     /// Explicitly claims a fresh preparation attempt for a retained outcome.
     internal func reconcile(id: PendingCompletionID) -> ReconcileResult {
         Self.reconciled(host.reconcile(id: id.raw))
     }
     /// Revokes retained delivery with an authority-only admission.
+    ///
+    /// The operation's work already returned the outcome it settles, so the commit issues no
+    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
     internal func discardPending(id: PendingCompletionID) -> DiscardResult {
         Self.discarded(host.discardPending(id: id.raw))
     }
     // The raw host reports only the cases each operation can produce; the rest cannot occur.
-    private static func reconciled(_ result: RuntimeHostDelivery<Note, Effect>) -> ReconcileResult {
+    private static func reconciled(_ result: StateMachine::RuntimeHostDelivery<Note, Effect>) -> ReconcileResult {
         switch result {
         case .committed(let record):
         return .committed(Receipt(record))
@@ -1031,7 +1448,7 @@ internal func pendingCompletions() -> [PendingCompletion] {
         return .notPending
         }
     }
-    private static func discarded(_ result: RuntimeHostDelivery<Note, Effect>) -> DiscardResult {
+    private static func discarded(_ result: StateMachine::RuntimeHostDelivery<Note, Effect>) -> DiscardResult {
         switch result {
         case .discarded(let record):
         return .discarded(Receipt(record))
@@ -1046,6 +1463,71 @@ internal func pendingCompletions() -> [PendingCompletion] {
     internal func close() -> Receipt {
         Receipt(host.close())
     }
+        /// Replaces the model with `initial` in a fresh incarnation, as a fresh owner starts.
+    ///
+    /// Every outstanding operation is revoked, with its cancellation published in the reset's
+    /// batch, and every retained completion is disposed of, so a late result is stale. The owner
+    /// keeps its identity and subscribers, and its revision advances. Work that is still running
+    /// keeps its execution reservation until it terminates.
+    ///
+    /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
+    /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
+    /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
+    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    @discardableResult
+    internal func reset(to initial: Draft) throws(CommitRejection) -> Receipt {
+        let result = host.reset(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)])
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with `initial` exactly as `reset(to:)` does, but only while the owner
+    /// still holds the root `expected` observed, so a decision made on that snapshot cannot
+    /// discard a change accepted since.
+    ///
+    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
+    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
+    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    @discardableResult
+    internal func reset(to initial: Draft, expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
+        let result = host.reset(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
+    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    @discardableResult
+    internal func reset(restoring saved: Box) throws(CommitRejection) -> Receipt {
+        let restored = _stateMachineRestored(saved)
+        let result = host.reset(restored.model, scopes: restored.scopes)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with the phase `restore` validates from saved data exactly as
+    /// `reset(restoring:)` does, but only while the owner still holds the root `expected`
+    /// observed, refusing otherwise as `reset(to:expecting:)` does.
+    @discardableResult
+    internal func reset(restoring saved: Box, expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
+        let restored = _stateMachineRestored(saved)
+        let result = host.reset(restored.model, scopes: restored.scopes, expecting: expected.record)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
     /// Waits until cancellation and launch decisions through this owner's receipt have been processed.
 internal func flush(through receipt: Receipt) async -> FlushResult {
     await host.flush(through: receipt.snapshot.record) ? .processed : .foreignOwner
@@ -1056,19 +1538,487 @@ internal func flush(through receipt: Receipt) async -> FlushResult {
     /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
     /// it always returns `.quiescent`.
     @discardableResult
-    internal func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
+    internal func shutdown(deadline: Swift::ContinuousClock.Instant? = nil) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline))
     }
     /// Actual workers whose joined termination has not yet been processed.
-    internal var runningCount: Int {
+    internal var runningCount: Swift::Int {
         host.runningCount
     }
-    /// Live observer registrations.
-    internal var subscriberCount: Int {
+    /// Live observer registrations; reading it registers a read of the count with Observation.
+    internal var subscriberCount: Swift::Int {
         host.subscriberCount
     }
     /// Whether closure and all managed obligations have settled.
-    internal var isQuiescent: Bool {
+    internal var isQuiescent: Swift::Bool {
         host.isQuiescent
     }
+}
+
+/// A sealed sole-writer owner confined to one actor instance, with managed execution.
+///
+/// Create it on the actor that owns it, as `IsolatedHost(isolation: self, …)`, and keep it there.
+/// It is not `Sendable`, so the compiler keeps it in that actor's region, and every method takes
+/// the actor as a defaulted `isolated` parameter: inside the actor a call reads `host.send(input)`,
+/// and a call from another actor or a nonisolated context does not compile. A method that receives
+/// a different instance of the actor's type stops the program.
+///
+/// Drivers run on the owning actor and receive it isolated, so they can read and
+/// change its state without capturing the actor.
+/// Its observation callbacks and the completion policy's handler run there too.
+///
+/// The host holds its actor weakly, so an idle actor that stores it is released with it. A running
+/// driver retains the actor, because it runs on it; `close()` or `shutdown()` requests the drivers'
+/// cancellation, and the actor is released after each driver returns. A closure that captures the
+/// actor keeps it alive while the host or registration holding the closure lasts, so a driver or
+/// handler, which the host holds for its lifetime, should use the actor it receives instead.
+internal final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStateMachineHost {
+    private typealias Host = StateMachine::RuntimeIsolatedHost<Owner, Note, Effect, Completion, PreparationRejection>
+    private let host: Host
+        /// Immutable operation selections, each run on the owning actor, which it receives isolated.
+    ///
+    /// A driver reaches the actor's state through that parameter, so it captures nothing confined.
+    internal struct Drivers: Swift::Sendable {
+        /// Executes this operation on the owning actor, which it receives isolated.
+    internal let save: @Sendable (isolated Owner, Save.Input) async -> Save.Output
+    /// Executes this operation on the owning actor, which it receives isolated.
+    internal let autosave: @Sendable (isolated Owner, Autosave.Input) async -> Autosave.Output
+        /// Selects every driver for this owner's lifetime.
+        internal init(save: @escaping @Sendable (isolated Owner, Save.Input) async -> Save.Output, autosave: @escaping @Sendable (isolated Owner, Autosave.Input) async -> Autosave.Output) {
+        self.save = save
+        self.autosave = autosave
+    }
+    }
+    /// How this owner settles a retained completion that does not commit when it is delivered.
+    ///
+    /// `.retry` prepares a completion again against the newer state when another commit wins the
+    /// race. That is the same as the result arriving a moment later, when its edge would run
+    /// against the newer phase anyway; work that must not survive a change is revoked by the
+    /// edge's `invalidates:` instead. `.manual` never prepares a completion again on its own.
+    /// Either form can pass each completion that needs reconciliation to a handler.
+    ///
+    /// Initializers default to `.retry`.
+    ///
+    /// A handler runs outside the owner's critical section each time a retained completion's
+    /// status becomes `reconciliationRequired`: its completion edge or router threw, its effect
+    /// plan is defective, the owner refused its admission, an explicit `reconcile(id:)` did not
+    /// commit, or, under `.manual`, its preparation lost a race. Settle it with
+    /// `reconcile(id:)` or `discardPending(id:)`.
+    internal struct CompletionPolicy {
+        fileprivate let runtime: StateMachine::RuntimeCompletionPolicy
+        fileprivate let reconciliationRequired: (_StateMachineLedger.Pending) -> Swift::Void
+        private init(_ runtime: StateMachine::RuntimeCompletionPolicy, handler: @escaping (PendingCompletion) -> Swift::Void) {
+            self.runtime = runtime
+            reconciliationRequired = {
+            handler(PendingCompletion($0))
+        }
+        }
+        /// Prepares a completion again against the current state when another commit wins the race,
+        /// at most four times per turn before yielding to other work, and notifies no one.
+        ///
+        /// Choose it when every completion edge and router is deterministic and free of side
+        /// effects; the compiler does not check that. A completion retained for any other reason
+        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        internal static var retry: CompletionPolicy {
+        CompletionPolicy(.retry, handler: { _ in
+            })
+    }
+        /// Retries lost races as `retry` does, and passes every completion that still needs
+        /// reconciliation to `handler`.
+        internal static func retry(onReconciliationRequired handler: @escaping (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
+            CompletionPolicy(.retry, handler: handler)
+        }
+        /// Never prepares a completion again on its own, and notifies no one: every completion that
+        /// needs reconciliation, including one whose preparation lost a race with another commit,
+        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        internal static var manual: CompletionPolicy {
+        CompletionPolicy(.manual, handler: { _ in
+            })
+    }
+        /// Never prepares a completion again on its own: every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        internal static func manual(onReconciliationRequired handler: @escaping (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
+            CompletionPolicy(.manual, handler: handler)
+        }
+    }
+    /// Creates fresh authority confined to `isolation`, with immutable execution selections.
+    internal init(_ initial: Draft, isolation: isolated Owner, drivers: Drivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retry) {
+        host = Host(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)], isolation: isolation, configuration: configuration,
+            policy: completionPolicy.runtime, driver: { owner, raw in
+    let execution: () async -> Completion
+    switch raw.descriptor {
+                case .save(let input):
+                    execution = {
+                    .save(SaveCompletion(value: await drivers.save(owner, input), request: SaveRequest(input: input), authority: raw.ticket))
+                }
+                case .autosave(let input):
+                    execution = {
+                    .autosave(AutosaveCompletion(value: await drivers.autosave(owner, input), request: AutosaveRequest(input: input), authority: raw.ticket))
+                }
+                }
+    return await execution()
+            }, ticket: { (outcome: Completion) -> StateMachine::RuntimeTicket in
+                outcome.authority
+            },
+            prepare: {
+                _stateMachineDeliveryPreparation($0)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
+    }
+    /// Creates fresh authority at revision zero in the phase `restore` validates from saved data.
+    internal init(restoring saved: Box, isolation: isolated Owner, drivers: Drivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retry) {
+        let restored = _stateMachineRestored(saved)
+        host = Host(restored.model, scopes: restored.scopes, isolation: isolation, configuration: configuration,
+            policy: completionPolicy.runtime, driver: { owner, raw in
+    let execution: () async -> Completion
+    switch raw.descriptor {
+                case .save(let input):
+                    execution = {
+                    .save(SaveCompletion(value: await drivers.save(owner, input), request: SaveRequest(input: input), authority: raw.ticket))
+                }
+                case .autosave(let input):
+                    execution = {
+                    .autosave(AutosaveCompletion(value: await drivers.autosave(owner, input), request: AutosaveRequest(input: input), authority: raw.ticket))
+                }
+                }
+    return await execution()
+            }, ticket: { (outcome: Completion) -> StateMachine::RuntimeTicket in
+                outcome.authority
+            },
+            prepare: {
+                _stateMachineDeliveryPreparation($0)
+            },
+            reconciliationRequired: completionPolicy.reconciliationRequired)
+    }
+    /// Creates fresh initial authority, selecting one driver closure per operation.
+    internal convenience init(_ initial: Draft,
+        isolation: isolated Owner,
+        saveDriver: @escaping @Sendable (isolated Owner, Save.Input) async -> Save.Output,
+        autosaveDriver: @escaping @Sendable (isolated Owner, Autosave.Input) async -> Autosave.Output,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .retry) {
+        self.init(initial, isolation: isolation, drivers: Drivers(save: saveDriver, autosave: autosaveDriver),
+            configuration: configuration, completionPolicy: completionPolicy)
+    }
+    /// Creates fresh authority in the phase `restore` validates from saved data, selecting one driver closure per operation.
+    internal convenience init(restoring saved: Box,
+        isolation: isolated Owner,
+        saveDriver: @escaping @Sendable (isolated Owner, Save.Input) async -> Save.Output,
+        autosaveDriver: @escaping @Sendable (isolated Owner, Autosave.Input) async -> Autosave.Output,
+        configuration: Configuration = .default,
+        completionPolicy: CompletionPolicy = .retry) {
+        self.init(restoring: saved, isolation: isolation, drivers: Drivers(save: saveDriver, autosave: autosaveDriver),
+            configuration: configuration, completionPolicy: completionPolicy)
+    }
+    /// Captures a complete historical observation.
+    internal func snapshot(isolation: isolated Owner = #isolation) -> Snapshot {
+        _stateMachineSnapshot(host.snapshot(isolation: isolation))
+    }
+    /// Routes, prepares and admits one input in a single turn of the owning actor, without suspension.
+    @discardableResult
+    internal func send(_ input: Input, isolation: isolated Owner = #isolation) throws(SendRejection) -> Receipt {
+        let result = host.prepareAndCommit(isolation: isolation) { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
+            let prepared: Prepared
+            do throws(PreparationRejection) {
+                prepared = try _StateMachineSchema.prepare(input, on: _stateMachineSnapshot(raw))
+            } catch {
+                return .failure(.preparation(error))
+            }
+            switch prepared.candidate {
+            case .candidate(let candidate):
+                return .success(candidate)
+            case .defective(let defect):
+                return .failure(.commit(defect.rejection(against: raw)))
+            }
+        }
+        switch result {
+        case .success(.committed(let record)):
+            return Receipt(record)
+        case .success(.rejected(let reason, _)):
+            throw .commit(reason)
+        case .failure(let reason):
+            throw reason
+        }
+    }
+    /// Consumes an explicitly prepared historical candidate, rechecking freshness.
+    internal func commit(_ prepared: consuming Prepared, isolation: isolated Owner = #isolation) -> CommitResult {
+        switch prepared.candidate {
+        case .candidate(let candidate):
+            return _stateMachineAdmission(host.commit(candidate, isolation: isolation))
+        case .defective(let defect):
+            return _stateMachineAdmission(host.reject(defect, isolation: isolation))
+        }
+    }
+    /// Subscribes to initial, accepted and terminal complete snapshots, delivered on the owning actor, taking a subscriber slot when called.
+    ///
+    /// The registration stays in the owning actor's region, and only that actor can cancel it, which
+    /// removes the registration before returning, so none of its callbacks begins afterward. Cancelling
+    /// releases the callbacks before it returns, except while this owner is delivering a change, as when
+    /// another observer's callback cancels: that delivery keeps the callbacks it selected until it has
+    /// delivered the change to its other observers, and releases them then. Dropping the registration
+    /// stops delivery and frees its slot at once; this owner releases its callbacks when it next sweeps
+    /// its registrations or is destroyed.
+    internal func subscribe(_ receive: @escaping (Snapshot) -> Swift::Void,
+        onFinish: @escaping () -> Swift::Void = {
+        }, isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> IsolatedSubscription<Owner> {
+        try host.subscribe({
+                receive(_stateMachineSnapshot($0))
+            }, onFinish: onFinish, isolation: isolation)
+    }
+    /// Registers a single-consumer stream, read with `next()` on the owning actor, of the latest complete snapshots, taking a subscriber slot when called.
+    ///
+    /// It ends after the closed snapshot, when this owner is released, when its `cancel(isolation:)` is
+    /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel(isolation:)` on the owning actor, which removes its registration
+    /// before it returns.
+    internal func snapshots(isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> IsolatedSnapshots {
+        try host.snapshots({
+                _stateMachineSnapshot($0)
+            }, isolation: isolation)
+    }
+    /// Registers a single-pass sequence of the latest `Sendable` projections of complete snapshots, taking a subscriber slot when called.
+    ///
+    /// `transform` runs on the owning actor when a snapshot is delivered, and the sequence offers
+    /// each projection, equal to the one before it or not. It supports every `AsyncSequence`
+    /// operator and may be consumed anywhere. `distinctSnapshots(_:)` omits repeated values instead.
+    /// Ending it on another actor stops delivery and frees its slot at once; this owner releases
+    /// `transform` when it next sweeps its registrations or is destroyed.
+    internal func snapshots<Projection: Swift::Sendable>(
+        _ transform: @escaping (Snapshot) -> Projection, isolation: isolated Owner = #isolation
+    ) throws(SubscriptionFailure) -> StateMachine::SnapshotSequence<Projection> {
+        try host.sendableSnapshots({
+                transform(_stateMachineSnapshot($0))
+            }, isolation: isolation)
+    }
+    /// Registers a single-pass sequence of the latest `Equatable` projections of complete snapshots,
+    /// omitting each projection equal to the one before it, taking a subscriber slot when called.
+    ///
+    /// `transform` and the comparison run on the owning actor. A closed snapshot whose projection
+    /// is unchanged is omitted too, and the sequence then ends.
+    internal func distinctSnapshots<Projection: Swift::Sendable & Swift::Equatable>(
+        _ transform: @escaping (Snapshot) -> Projection, isolation: isolated Owner = #isolation
+    ) throws(SubscriptionFailure) -> StateMachine::SnapshotSequence<Projection> {
+        try host.distinctSendableSnapshots({
+                transform(_stateMachineSnapshot($0))
+            }, isolation: isolation)
+    }
+    /// Reads immutable retained first-outcome diagnostics.
+internal func pendingCompletions(isolation: isolated Owner = #isolation) -> [PendingCompletion] {
+    host.pendingCompletions(isolation: isolation).map(PendingCompletion.init)
+    }
+    /// Registers a single-consumer stream, read with `next()` on the owning actor, of the retained completions, each element the whole collection, taking a subscriber slot when called.
+    ///
+    /// The first element is the collection current at registration, and each later one the
+    /// collection after a change to it, in the order of those changes; a newer collection
+    /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
+    /// It also ends when this owner is released, when its `cancel(isolation:)` is called, or when a
+    /// read finds its task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel(isolation:)` on the owning actor, which removes its registration
+    /// before it returns.
+    internal func pendingCompletionUpdates(isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> IsolatedPendingCompletionUpdates {
+        try host.pendingCompletionUpdates({
+            $0.map(PendingCompletion.init)
+        }, isolation: isolation)
+    }
+    /// Registers a single-pass sequence of `Sendable` projections of the retained completions, taking a subscriber slot when called.
+    ///
+    /// `transform` runs on the owning actor with the whole collection after each change, starting
+    /// with the collection current at registration. The sequence supports every `AsyncSequence`
+    /// operator, may be consumed anywhere, and ends after the projection of the final, empty collection.
+    internal func pendingCompletionUpdates<Projection: Swift::Sendable>(
+        _ transform: @escaping ([PendingCompletion]) -> Projection, isolation: isolated Owner = #isolation
+    ) throws(SubscriptionFailure) -> StateMachine::SnapshotSequence<Projection> {
+        try host.sendablePendingCompletionUpdates({
+            transform($0.map(PendingCompletion.init))
+        }, isolation: isolation)
+    }
+    /// Explicitly claims a fresh preparation attempt for a retained outcome.
+    internal func reconcile(id: PendingCompletionID, isolation: isolated Owner = #isolation) -> ReconcileResult {
+        Self.reconciled(host.reconcile(id: id.raw, isolation: isolation))
+    }
+    /// Revokes retained delivery with an authority-only admission.
+    ///
+    /// The operation's work already returned the outcome it settles, so the commit issues no
+    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+    internal func discardPending(id: PendingCompletionID, isolation: isolated Owner = #isolation) -> DiscardResult {
+        Self.discarded(host.discardPending(id: id.raw, isolation: isolation))
+    }
+    // The raw host reports only the cases each operation can produce; the rest cannot occur.
+    private static func reconciled(_ result: StateMachine::RuntimeHostDelivery<Note, Effect>) -> ReconcileResult {
+        switch result {
+        case .committed(let record):
+        return .committed(Receipt(record))
+        case .pending(let id, let status):
+        return .pending(PendingCompletionID(raw: id), status)
+        case .inProgress:
+        return .inProgress
+        default:
+        return .notPending
+        }
+    }
+    private static func discarded(_ result: StateMachine::RuntimeHostDelivery<Note, Effect>) -> DiscardResult {
+        switch result {
+        case .discarded(let record):
+        return .discarded(Receipt(record))
+        case .rejected(let reason):
+        return .rejected(reason)
+        default:
+        return .notPending
+        }
+    }
+    /// Closes admission while preserving historical model data.
+    @discardableResult
+    internal func close(isolation: isolated Owner = #isolation) -> Receipt {
+        Receipt(host.close(isolation: isolation))
+    }
+        /// Replaces the model with `initial` in a fresh incarnation, as a fresh owner starts.
+    ///
+    /// Every outstanding operation is revoked, with its cancellation published in the reset's
+    /// batch, and every retained completion is disposed of, so a late result is stale. The owner
+    /// keeps its identity and subscribers, and its revision advances. Work that is still running
+    /// keeps its execution reservation until it terminates.
+    ///
+    /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
+    /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
+    /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
+    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    @discardableResult
+    internal func reset(to initial: Draft, isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
+        let result = host.reset(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)], isolation: isolation)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with `initial` exactly as `reset(to:)` does, but only while the owner
+    /// still holds the root `expected` observed, so a decision made on that snapshot cannot
+    /// discard a change accepted since.
+    ///
+    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
+    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
+    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    @discardableResult
+    internal func reset(to initial: Draft, expecting expected: Snapshot, isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
+        let result = host.reset(.draft(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record, isolation: isolation)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
+    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    @discardableResult
+    internal func reset(restoring saved: Box, isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
+        let restored = _stateMachineRestored(saved)
+        let result = host.reset(restored.model, scopes: restored.scopes, isolation: isolation)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Replaces the model with the phase `restore` validates from saved data exactly as
+    /// `reset(restoring:)` does, but only while the owner still holds the root `expected`
+    /// observed, refusing otherwise as `reset(to:expecting:)` does.
+    @discardableResult
+    internal func reset(restoring saved: Box, expecting expected: Snapshot, isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
+        let restored = _stateMachineRestored(saved)
+        let result = host.reset(restored.model, scopes: restored.scopes, expecting: expected.record, isolation: isolation)
+        switch result {
+        case .committed(let record):
+        return Receipt(record)
+        case .rejected(let reason, _):
+        throw reason
+        }
+    }
+    /// Waits until cancellation and launch decisions through this owner's receipt have been processed.
+internal func flush(through receipt: Receipt, isolation: isolated Owner = #isolation) async -> FlushResult {
+    await host.flush(through: receipt.snapshot.record, isolation: isolation) ? .processed : .foreignOwner
+    }
+    /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
+    ///
+    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
+    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
+    /// it always returns `.quiescent`.
+    @discardableResult
+    internal func shutdown(deadline: Swift::ContinuousClock.Instant? = nil, isolation: isolated Owner = #isolation) async -> ShutdownResult {
+        ShutdownResult(await host.shutdown(deadline: deadline, isolation: isolation))
+    }
+    /// Actual workers whose joined termination has not yet been processed, read on the owning actor.
+    internal func runningCount(isolation: isolated Owner = #isolation) -> Swift::Int {
+        host.runningCount(isolation: isolation)
+    }
+    /// Live observer registrations, read on the owning actor.
+    internal func subscriberCount(isolation: isolated Owner = #isolation) -> Swift::Int {
+        host.subscriberCount(isolation: isolation)
+    }
+    /// Whether closure and all managed obligations have settled, read on the owning actor.
+    internal func isQuiescent(isolation: isolated Owner = #isolation) -> Swift::Bool {
+        host.isQuiescent(isolation: isolation)
+    }
+}
+
+fileprivate typealias _StateMachineGraph = StateMachine::StateMachineGraph
+
+/// The declared phases, inputs, scopes, operations, events, edges, and routers of this graph,
+/// without payloads or authority.
+internal nonisolated static let graph: StateMachine::StateMachineGraph = _stateMachineGraph()
+
+nonisolated private static func _stateMachineGraph() -> StateMachine::StateMachineGraph {
+    var phases: [_StateMachineGraph.Phase] = []
+    phases.append(_StateMachineGraph.Phase(id: "draft", payload: "Draft"))
+    phases.append(_StateMachineGraph.Phase(id: "saving", payload: "Saving"))
+    var inputs: [_StateMachineGraph.Input] = []
+    inputs.append(_StateMachineGraph.Input(id: "save", payload: nil))
+    inputs.append(_StateMachineGraph.Input(id: "edit", payload: "String"))
+    var operations: [_StateMachineGraph.Operation] = []
+    operations.append(_StateMachineGraph.Operation(id: "Save", effect: "save", scope: nil,
+        requires: [], activeIn: ["saving"], admission: .rejectWhenActive,
+        key: nil, input: "Box", output: "Box",
+        failure: "Swift::Never", canFail: false, canSucceed: true))
+    operations.append(_StateMachineGraph.Operation(id: "Autosave", effect: "autosave", scope: nil,
+        requires: [], activeIn: ["draft"], admission: .latest,
+        key: nil, input: "String", output: "Void",
+        failure: "Swift::Never", canFail: false, canSucceed: true))
+    var edges: [_StateMachineGraph.Edge] = []
+    edges.append(_StateMachineGraph.Edge(id: "draft.save", name: "save",
+        source: "draft", destination: "saving", trigger: .input("save"),
+        router: nil, starts: ["Save"],
+        cancels: [],
+        emits: [], invalidates: []))
+    edges.append(_StateMachineGraph.Edge(id: "draft.edit", name: "edit",
+        source: "draft", destination: "draft", trigger: .input("edit"),
+        router: nil, starts: ["Autosave"],
+        cancels: [],
+        emits: [], invalidates: []))
+    edges.append(_StateMachineGraph.Edge(id: "saving.saved", name: "saved",
+        source: "saving", destination: "draft", trigger: .success("Save"),
+        router: nil, starts: [],
+        cancels: [],
+        emits: [], invalidates: []))
+    edges.append(_StateMachineGraph.Edge(id: "draft.autosaved", name: "autosaved",
+        source: "draft", destination: "draft", trigger: .success("Autosave"),
+        router: nil, starts: [],
+        cancels: [],
+        emits: [], invalidates: []))
+    return .init(
+        name: "Note",
+        mode: .isolated,
+        owners: [.owned, .local, .mainActorHost, .isolatedHost],
+        initial: "draft",
+        terminal: [],
+        restorable: ["draft"],
+        phases: phases,
+        inputs: inputs,
+        scopes: [],
+        operations: operations,
+        events: [],
+        edges: edges,
+        routers: []
+    )
 }

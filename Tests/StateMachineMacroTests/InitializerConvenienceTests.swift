@@ -10,7 +10,7 @@ nonisolated private enum PlainDefault: Sendable {
     struct Idle: Sendable { var label = "default" }
     struct Done: Sendable {}
     @Initial case idle(Idle = .init())
-    case done(Done)
+    @Terminal case done(Done)
     enum Input: Sendable { case finish }
     @Transition(on: Input.finish)
     fileprivate static func finish(_ source: Idle) -> Done { Done() }
@@ -21,7 +21,7 @@ nonisolated private enum CountedDefault: Sendable {
     struct Idle: Sendable { let serial: Int }
     struct Done: Sendable {}
     @Initial case idle(Idle = CountedDefault.makeIdle())
-    case done(Done)
+    @Terminal case done(Done)
     enum Input: Sendable { case finish }
     static func makeIdle() -> Idle {
         Idle(
@@ -44,16 +44,23 @@ nonisolated private enum ClosureLookup: Sendable {
     }
     @Initial case idle(Idle = makeIdle())
     case loading(Loading)
-    enum Scope { case fetch, audit, hook }
+    enum Scope {
+        @Active(in: [Loading.self])
+        case fetch
+        @Active(in: [Loading.self])
+        case audit
+        @Active(in: [Loading.self])
+        case hook
+    }
     enum Input: Sendable { case search(String) }
     enum Rejection: Error, Sendable { case negative }
-    @Operation(scope: Scope.fetch, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.fetch, admission: .latest)
     enum Fetch {
         typealias Input = String
         typealias Output = String
         typealias Failure = Never
     }
-    @Operation(scope: Scope.audit, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.audit, admission: .latest)
     enum Audit {
         typealias Input = String
         typealias Output = String
@@ -61,7 +68,7 @@ nonisolated private enum ClosureLookup: Sendable {
     }
     /// Its effect case is spelled like a callback parameter; the `Driver` suffix keeps its label distinct from
     /// every parameter a managed owner takes.
-    @Operation(scope: Scope.hook, activeIn: [Loading.self], admission: .latest)
+    @Operation(scope: Scope.hook, admission: .latest)
     enum OnReconciliationRequired {
         typealias Input = String
         typealias Output = String

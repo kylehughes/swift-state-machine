@@ -9,7 +9,7 @@ nonisolated public enum Lookup: Sendable {
         public init() {}
     }
     @Initial case idle(Idle = Idle())
-    case done(Done)
+    @Terminal case done(Done)
     public enum Input: Sendable { case finish }
     @Transition(on: Input.finish)
     fileprivate static func finish(_ source: Idle) -> Done {

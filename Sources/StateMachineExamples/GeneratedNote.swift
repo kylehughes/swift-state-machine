@@ -28,7 +28,7 @@ nonisolated public enum GeneratedNote {
     }
     @Initial case draft(Draft = Draft())
     case saving(Saving)
-    case saved(Saved)
+    @Terminal case saved(Saved)
     /// Dynamic editor inputs.
     public enum Input: ~Sendable {
         case save
@@ -55,8 +55,9 @@ nonisolated public enum GeneratedNote {
     fileprivate static func edit(_ source: Draft, _ text: String) -> Draft {
         Draft(text: text)
     }
+    /// Editing while saving abandons the save: leaving `Saving` revokes its work.
     @Transition(on: Input.edit)
-    fileprivate static func replace(_ source: Saving, _ text: String) -> Draft {
+    fileprivate static func edit(_ source: Saving, _ text: String) -> Draft {
         Draft(text: text)
     }
     @Transition(on: Input.cancel)
