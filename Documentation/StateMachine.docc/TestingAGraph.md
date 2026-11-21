@@ -219,7 +219,7 @@ queued in the owner. A
 completion is sealed by the work the owner issued and wrapped in the schema's
 `Completion` enum, so `.fetch(fetch.succeeded("Swift.org"))` is the only way to
 deliver a fetch result. `deliver` returns a `DeliveryResult`: `.committed`,
-`.pending`, `.stale`, or `.foreignOwner`. Delivery and acknowledgment are
+`.pending`, `.refused`, `.stale`, or `.foreignOwner`. Delivery and acknowledgment are
 separate obligations, so the test reports both, and acknowledging the same
 execution twice reports `.duplicate`.
 
@@ -371,15 +371,19 @@ extension LookupLocalTests {
 harness run of that owner; a run of another schema does not compile as an
 argument, however alike their graphs are. It reports the declared edges no run
 took, the phases no run held, and the routers with candidates none of which ran.
-A router without candidates exists only to decline an input, so no step can
-exercise it; `unexercisedRejectingRoutes` lists each one that no run saw the
-real owner decline through, from `rejection(of:)` or a failed `send`.
+A router without candidates exists only to decline an input or a completion, so
+no step can exercise it; `unexercisedRejectingRouters` lists each one that no
+run saw the real owner decline through, from `rejection(of:)`, a failed `send`,
+or a `deliver` or `reconcile(id:)` whose result reports that its own preparation
+was refused there. A second delivery of a retained completion prepares nothing,
+so it counts nothing.
 `requireCoverage()` requires every phase, every edge, and every router with at
 least one candidate, and fails for any of them that no run reached, for any
 invariant a run violated, for any change made inside `withOwner` that the
-harness never observed, and for any owner a `withOwner` closure replaced. It
-requires nothing of rejections, so read `unexercisedRejectingRoutes` for a graph
-that exists to refuse an input.
+harness never observed, and for any owner a `withOwner` closure replaced. By
+default it requires nothing of rejections;
+`requireCoverage(includingRejectingRouters: true)` also requires every router
+without candidates to have declined.
 `requireCoverage(excluding:)` waives the edges and routers it names by their
 `"<phase>.<name>"` identifiers. Every step comes from a real owner admitting a
 real change and names the edge from that change's receipt, so an exercised edge

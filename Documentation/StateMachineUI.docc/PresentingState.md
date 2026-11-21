@@ -276,7 +276,10 @@ the subscription's cancellation; what `send(_:)`, `commit(_:)`, and `close()`
 return is still shown. Stopping discards an observation value whose
 publication has not been announced: a snapshot the registration delivered while
 another snapshot was being assigned, which was waiting for that assignment, is
-not shown. A change admitted through the presentation still publishes its
+not shown, and neither is one whose own `revision` stops the presentation when it
+is read. Each waiting value belongs to the registration that delivered it, so a
+registration resumed from a callback of the stop keeps the snapshot it delivers,
+and the presentation becomes live showing it or a newer one. A change admitted through the presentation still publishes its
 receipt, even when it waited the same way. One rule covers every end a driving presentation makes,
 by `stopObserving()`, `close()`, the owner's finish, or the presentation's
 release: a snapshot delivered through a registration that is no longer the

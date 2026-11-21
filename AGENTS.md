@@ -117,33 +117,37 @@ against Swift's own reading of a schema. It rewrites valid seeds (the guide's
 schemas, chosen client fixtures, and schemas of its own) in ways Swift reads as
 the same program, such as parentheses, backticks (nested argument labels
 included), aliases, qualified names, sugar, comments and decoy literals, `#if`,
-nesting, moving a schema to another file, and reordered members; as two
-distinct names that collide in a normal form the macro might use or with a
-generated name; as an invalid graph, a duplicate marker, a restricted
-parameter, or a numeric value past its bound; as a form the guide calls
+nesting, moving a schema to another file, reordered members, and a universal
+deprecation's options in another order; as two distinct names that collide in a
+normal form the macro might use or with a generated name; as an invalid graph, a
+duplicate marker, a restricted parameter, a numeric value past its bound, or a
+`renamed:` target that is not a bare edge name; as a form the guide calls
 unsupported, which needs a macro diagnostic; or as a valid variation, such as
 another access level, attribute, binding of an unchanged spelling, default
 isolation, or optimization. It compiles each case alone through the native
 build's plugin, as a module that a separate harness module imports. An
 equivalent case must compile with the seed's canonical generated signatures,
 graph, and output; under a reordering, the documented declaration-ordered graph
-lists must follow the case's own source order. A renamed case must behave as
-the seed with that name changed, and a valid variation of a domain seed must
-print the seed's pinned report. An invalid case must be rejected with its
-documented diagnostic, matched as a whole message, at the token the rewrite
-changed or the message names, by line and column, with nothing beside it but
-what the refused expansion leaves undeclared or the entry lists as a
-consequence.
+lists must follow the case's own source order. A renamed case must behave as the
+seed with that name changed, and a valid variation of a domain seed must print
+the seed's pinned report. An invalid case must be rejected with its documented
+diagnostic, matched as a whole message, at the token the rewrite changed or the
+message names, by line and column, with nothing beside it but what the refused
+expansion leaves undeclared or the entry lists as a consequence.
 
 Every compiled case must also link and run to completion, print a graph for
 every schema the module declares holding every phase, input, operation, and
-event the source declares, export each type spelling as the author's own text
-on one line without comments and naming the authored type where the guide says
-it is meant, render Mermaid and DOT text that a strict reader reads back as its
-graph (state declarations, labels, and edge styles included), and give each
-managed owner an initializer with its driver and handler labels in its own
-declaration order. Every seed must pass all of this on its own, a domain seed
-must print the report the script pins, and a module generated from each seed's
+event the source declares, export each type spelling as the author's own text on
+one line without comments and naming the authored type where the guide says it
+is meant, render Mermaid and DOT text that a strict reader reads back as its
+graph (state declarations, labels, and edge styles included), including the
+graph decoded under names no identifier spells, whose DOT header the reader
+takes by the grammar's quoted-identifier rule and never by the label rule, and
+give each managed owner an initializer with its driver and handler labels in its
+own declaration order. A client section that calls a deprecated generated member
+must still compile once every fix-it the compiler offers for the deprecation is
+applied to it. Every seed must pass all of this on its own, a domain seed must
+print the report the script pins, and a module generated from each seed's
 attributes, compiled apart, must use every selected owner, find no unselected
 one, and reach a public schema's owners from another package. A crash, a
 timeout, a failed run, or a compilation whose processes pass `--memory-cap-mb`
@@ -170,12 +174,16 @@ python3 Scripts/fuzz-macro.py --scaling --output /tmp/state-machine-fuzz-scaling
 `--self-test` plants a defect for each oracle, such as a swapped trigger,
 exported text that dropped `Self.`, a graph that left a declared phase out, a
 refusal at the wrong token, a crash behind a documented limit, an alphabetized
-declaration-ordered list, a Mermaid rendering without its state declarations,
-or a size refusal naming the wrong count, and fails unless each is reported and
-its clean control passes; run it after changing an oracle, and add a planted
-defect for every new check. `--smoke` is deterministic and leaves out sites
-whose shape earlier seeds already covered; `--smoke --full` runs every seed
-with every rewrite. `--random` composes two to four rewrites, requires the
+declaration-ordered list, a Mermaid rendering without its state declarations, or
+a size refusal naming the wrong count, and fails unless each is reported and its
+clean control passes; run it after changing an oracle, and add a planted defect
+for every new check. `--smoke` is deterministic and leaves out sites whose shape
+earlier seeds already covered; `--smoke --full` runs every seed with every
+rewrite. A smoke run over every seed writes each rewrite's sites and cases to
+`operators.json` and fails when a selected rewrite raised an error or made no
+case, since its check then gave no evidence. The harness links the testing
+product, so a seed's pinned report can drive a generated owner through
+`StateMachineTesting`. `--random` composes two to four rewrites, requires the
 equivalences before a final rewrite of another kind to pass on their own, and
 removes the rewrites a failure does not need while it fails the same way.
 `--spelling-scope schema` reads exported spellings at the schema's scope, the
@@ -183,13 +191,13 @@ contract of macros older than the current one, for calibrating against them.
 `--cost` compares scaled schemas spelled two equivalent ways, by outcome and by
 the plugin's own time; `--scaling` checks that the plugin's time for each
 list-like construct grows at most `--growth-bound` times from n to 4n, as the
-median of `--repeats` runs, and a crash or cap in any repeat fails;
-`--ceilings` doubles each construct from 8 up to `--ceiling-limit`, records the
-largest size that compiles, fails a construct that first stops on a timeout,
-the memory cap, a crash, or any error but Swift's own limits, and those at 256
-or below, and checks each size limit the guide documents, one of them crossed by
-a mix of operations, cancellations, and events: at the limit, in every owner the
-mode supports, the expansion compiles within the caps, and one past it the macro
+median of `--repeats` runs, and a crash or cap in any repeat fails; `--ceilings`
+doubles each construct from 8 up to `--ceiling-limit`, records the largest size
+that compiles, fails a construct that first stops on a timeout, the memory cap,
+a crash, or any error but Swift's own limits, and those at 256 or below, and
+checks each size limit the guide documents, one of them crossed by a mix of
+operations, cancellations, and events: at the limit, in every owner the mode
+supports, the expansion compiles within the caps, and one past it the macro
 refuses it with exactly its size-limit diagnostic, naming the construct, the
 count, and the bound, at the schema's name. Those three compile one schema at a
 time. Smoke and random jobs default to half the cores; `--plugin`, `--modules`,

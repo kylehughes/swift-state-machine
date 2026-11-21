@@ -283,7 +283,7 @@ so a change accepted inside it is recorded as an
 closure makes several changes the harness sees only the last. The others count
 toward ``ManualMachineTest/unobservedChanges``, the history is no longer
 complete, and ``ManualMachineTest/requireInvariants(fileID:filePath:line:column:)``
-and ``GraphCoverage/requireCoverage(excluding:fileID:filePath:line:column:)``
+and ``GraphCoverage/requireCoverage(excluding:includingRejectingRouters:fileID:filePath:line:column:)``
 fail rather than vouch for snapshots no invariant checked. The harness also
 compares the owner the closure leaves with the one it lent, so a closure that
 assigns another owner, even a fresh one with an equal model at the same
@@ -331,7 +331,7 @@ run of another schema, even one with the same declared structure, does not
 compile as an argument. Record the history of each run with
 ``GraphCoverage/record(_:)``, and then read ``GraphCoverage/unexercisedEdges``,
 ``GraphCoverage/unvisitedPhases``, ``GraphCoverage/unexercisedRouters``, and
-``GraphCoverage/unexercisedRejectingRoutes``.
+``GraphCoverage/unexercisedRejectingRouters``.
 Every step comes from a real owner admitting a real change and names the edge
 from that change's receipt, so an exercised edge is one that a test actually
 took, even when a router chooses between edges with the same destination:
@@ -364,7 +364,7 @@ took, even when a router chooses between edges with the same destination:
 }
 ```
 
-``GraphCoverage/requireCoverage(excluding:fileID:filePath:line:column:)``
+``GraphCoverage/requireCoverage(excluding:includingRejectingRouters:fileID:filePath:line:column:)``
 throws a failure that lists each unexercised edge and router, each unvisited
 phase, each invariant violation that a recorded run reported, and the number of
 changes made inside `withOwner` that the harness never observed. Pass the
@@ -372,15 +372,18 @@ identifiers of the edges and routers that no test is meant to reach in
 `excluding:`; both are spelled `"<phase>.<name>"`. A router counts as exercised
 once a step takes one of its candidates. A router without candidates exists
 only to decline an input or a completion, so no step can exercise it: coverage
-never requires it, and ``GraphCoverage/unexercisedRejectingRoutes`` lists each
-one that no recorded run saw decline. A rejection counts only when it comes from
+requires it only with `includingRejectingRouters: true`, and
+``GraphCoverage/unexercisedRejectingRouters`` lists each one that no recorded
+run saw decline. A rejection counts only when it comes from
 the real owner, and only for the route the owner names: an input router's
 through `rejection(of:)` or a `send` that failed, which
 ``ManualMachineTest/rejections`` records with the owner's typed
 ``ManualMachineTest/Rejection/reason``, and a completion router's or completion
-edge's through a `deliver` or `reconcile(id:)` whose preparation it refused,
-which ``ManualMachineTest/completionRejections`` records. A completion that a
+edge's through a `deliver` or `reconcile(id:)` whose own preparation it refused,
+as that call's result reports, which ``ManualMachineTest/completionRejections``
+records. A second delivery of a completion the owner already retains prepares
+nothing, so its result reports no refusal and it counts nothing. A completion that a
 router refuses while `Loading` and that `reconcile(id:)` admits in `Paused`
-therefore counts the router as declining. Coverage requires nothing of rejections: neither that a router
-that chooses an edge has also declined, nor that a function that can throw has
-thrown.
+therefore counts the router as declining. Beyond routers without candidates,
+coverage requires nothing of rejections: neither that a router that chooses an
+edge has also declined, nor that a function that can throw has thrown.

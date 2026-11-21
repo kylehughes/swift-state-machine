@@ -1154,8 +1154,9 @@ check, and how to satisfy it:
 | `Move this '#if' outside the schema or into a function body` | Move the condition around the whole schema, into the body of a function, or into an extension of the schema, as [Know what the macro supports](<doc:DeclaringAGraph#Know-what-the-macro-supports>) shows: the macro reads every member of the schema, `Input`, `Scope`, and its namespaces without knowing which clause is active. |
 | `Move this '#if' out of the declaration's attributes` | Write the attributes without a condition, or declare the member once per platform in separate schemas. |
 | `Remove '@MainActor'` | Remove the attribute from the edge, router, or restoration function, which takes only `@discardableResult`, `@inlinable`, `@inline`, `@usableFromInline`, and `@available(*, deprecated)`. To confine an owner to the main actor, generate `.mainActorHost`. |
-| `Remove '@available' and give the schema this availability instead` | Put the `@available` on the schema, and on the types it declares that need it, rather than on the function. A deprecation on every platform, `@available(*, deprecated)` with at most one `message:` and one `renamed:`, is the one form a function keeps. |
+| `Remove '@available' and give the schema this availability instead` | Put the `@available` on the schema, and on the types it declares that need it, rather than on the function. A deprecation on every platform, `@available(*, deprecated)` with at most one `message:` and one `renamed:` in any order, is the one form a function keeps. |
 | `Remove 'renamed:': the restoring initializers and resets this deprecation marks keep their names` | Describe the replacement in `message:`; a restoration function's deprecation marks `init(restoring:)` and `reset(restoring:)`, which no rename applies to. |
+| `Write the bare name of the replacement edge in 'renamed:'` | Name the replacement edge, or router, by its function's name alone, such as `"submit"`, not `"Flow.submit(_:)"`. It must be another edge, or router, whose generated method exists wherever the deprecated one's does: an edge that no router chooses, and an input edge when the deprecated one is an input edge of an observing owner. |
 | `Remove 'mutating'` | An authored function is `static`, with an access modifier and `nonisolated` as its only other modifiers. |
 | `Use .parallel(limit: N) with a positive integer literal` | Write the limit as an integer literal of at least 1, in any base Swift accepts, such as `8`, `1_000`, or `0x10`. |
 | `Declare 'Draft' public` | Give the named type or alias the schema's access. |
@@ -1338,8 +1339,8 @@ authored function's only modifiers are its access and `nonisolated`.
 
 An edge, router, or restoration function can be deprecated on every platform
 with `@available(*, deprecated)`, which may add one `message:` and one
-`renamed:`. The generated public members named for the function repeat the
-attribute as written: an edge's `Owned` method and, for an input edge, its
+`renamed:`, in any order after `*`. The generated public members named for the
+function repeat the attribute as written: an edge's `Owned` method and, for an input edge, its
 `Observed` method; a router's `Owned` and `Observed` methods; and every
 `init(restoring:)` and `reset(restoring:)` for a restoration function. A caller
 of one of those members gets Swift's deprecation warning, with the rename as its
@@ -1347,7 +1348,12 @@ fix-it, while sending an input, delivering a completion, and creating an owner
 name nothing deprecated, and the schema's own generated code calls the function
 without a warning, so a module that treats warnings as errors still builds. An
 edge that a router chooses has no public method of its own, so its deprecation
-marks no generated member. The restoring initializers and resets keep their
+marks no generated member. Swift's fix-it replaces the name of the deprecated
+generated method with the rename, so `renamed:` takes only the bare name of
+another edge, or of another router for a router, that has a generated method
+wherever the deprecated one has; a qualified or labelled name, such as
+`"Flow.submit(_:)"`, would name the file-private authored function, and is
+refused at its string. The restoring initializers and resets keep their
 names, so a restoration function's deprecation takes `message:` but not
 `renamed:`. A deprecation on the schema itself deprecates everything it
 generates.
@@ -1370,10 +1376,13 @@ and the types that its payloads, outputs, keys, requests, saved data, and
 failures spell. Each declaration of the schema that one of those spellings
 names, as Swift resolves the spelling where it is written, needs that access
 too, such as `Notes` and `Notes.Detail` for an edge that takes a `Notes.Detail`,
-and `Notes.Detail` again for `N.Detail` written through `typealias N = Notes`. A
-helper that none of them names may keep less, even when it shares a name with
-one that does, and so may a helper named like a built-in attribute: `Sendable`
-in `@Sendable () -> Int` names Swift's attribute, not a type.
+and `Notes.Detail` again for `N.Detail` written through `typealias N = Notes`.
+A generic type's arguments do not change which declaration its member is, so
+`Box<Int>.Detail`, and `N.Detail` through `typealias N = Box<Int>`, need
+`Box`'s `Detail` to have that access. A helper that none of them names may
+keep less, even when it shares a name with one that does, and so may a helper
+named like a built-in attribute: `Sendable` in `@Sendable () -> Int` names
+Swift's attribute, not a type.
 The macro cannot see the access of a type declared outside the
 schema; Swift reports one that is less visible at the generated declaration that
 names it. A limit such as `.parallel(limit: 8)` is an integer literal, read as

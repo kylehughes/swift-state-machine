@@ -529,7 +529,9 @@ effect plan is defective, the owner refused its admission, it used its last
 retry, or an explicit `reconcile(id:)` did not commit. Until it is settled, the
 owner retains the first terminal outcome, and a duplicate delivery never
 replaces it. `pendingCompletions()` lists the retained completions, and
-`pendingCompletionUpdates()` delivers the whole collection each time it changes:
+`pendingCompletionUpdates()` follows them. Each element is the whole pending
+collection. A slow reader can skip intermediate collections. Closing delivers a
+final empty collection:
 
 ```swift
 func discardUnsettled(in library: Library.Shared) async throws {
@@ -542,8 +544,8 @@ func discardUnsettled(in library: Library.Shared) async throws {
 ```
 
 The sequence keeps one pending value, so a newer collection replaces one not yet
-read. Closing the owner delivers a final, empty collection, and the sequence
-then ends. `pendingCompletionUpdates(_:)` projects each collection to a
+read, and it ends after the final, empty one. `pendingCompletionUpdates(_:)`
+projects each collection to a
 `Sendable` value, as `snapshots(_:)` does for snapshots; it is how an
 `isolated` schema's retained completions reach `for await` and sequence
 operators. Settle a completion with `reconcile(id:)`, which authorizes one fresh
@@ -632,7 +634,11 @@ reservations of the current state.
 such as `.fetch(work)`; pass `limit:` to take fewer. Finish the mutating access
 before running the work. `work.succeeded(value)` builds a sealed completion.
 Pass it to `deliver(_:)` to get a `DeliveryResult`: `.committed`, `.pending`,
-`.stale`, or `.foreignOwner`. Call `acknowledgeExecution(work.execution)`
+`.refused`, `.stale`, or `.foreignOwner`. `.refused(id, reason, routeID:)`
+means this call prepared the outcome and its router or completion edge threw
+`reason`; `routeID` names that router or edge, and the outcome stays retained.
+A second delivery of a retained outcome prepares nothing and reports
+`.pending`. Call `acknowledgeExecution(work.execution)`
 separately to record that execution ended, or pass
 `disposition: .skippedBeforeStart` for work you never began.
 `AcknowledgmentResult` is `.recorded`, `.duplicate`, or `.foreignOwner`. A
@@ -648,7 +654,8 @@ otherwise admissible completion, `Local` retains its candidate as
 `.pending(id, .waitingForCapacity)`. After freeing capacity, call
 `retryAdmission(id:)` to recheck that candidate without preparing it again. An
 intervening revision requires `reconcile(id:)` if the operation is still
-active. Both return a `ReconcileResult`, and `discardPending(id:)` returns a
+active. Both return a `ReconcileResult`, which reports a refusal of its own
+preparation as `.refused` too, and `discardPending(id:)` returns a
 `DiscardResult`.
 
 `Owned<Phase>` carries no runtime at all. If the authored edge returns the
@@ -1227,9 +1234,11 @@ reports the edges, routers, and phases that no test exercised.
 `requireCoverage(excluding:)` requires every phase, every nonexcluded edge, and
 every nonexcluded router with at least one candidate, and fails for an
 invariant a run violated. A router without candidates always declines, so no
-step can exercise it and coverage never requires it; `unexercisedRejectingRoutes`
-lists each one that no run saw the real owner decline through, an input router
-in a `send` and a completion router in a `deliver` or `reconcile(id:)`. A test that ends a lifetime acknowledges
+step can exercise it; `unexercisedRejectingRouters` lists each one that no run
+saw the real owner decline through, an input router in a `send` and a
+completion router in a `deliver` or `reconcile(id:)` whose own preparation it
+refused, and `requireCoverage(includingRejectingRouters: true)` requires them
+too. A test that ends a lifetime acknowledges
 each execution the owner issued, closes the owner, and drains the closing
 batch:
 

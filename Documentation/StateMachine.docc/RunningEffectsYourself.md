@@ -183,7 +183,10 @@ successful terminal admission retires the operation at most once.
 
 Returning a completion and acknowledging termination are separate obligations.
 `deliver(_:)` returns a `DeliveryResult`: `.committed(receipt)`,
-`.pending(id, status)` when the outcome is retained, `.stale` when the operation
+`.pending(id, status)` when the outcome is retained, `.refused(id, reason,
+routeID:)` when this call prepared the outcome and its router or completion
+edge threw `reason`, which retains it for reconciliation and names that router
+or edge, `.stale` when the operation
 has lost its authority or its outcome already settled, and `.foreignOwner` when
 a different owner issued the completion. `acknowledgeExecution(_:disposition:)`
 records that the execution ended, `.terminated` by default or
@@ -198,7 +201,9 @@ completion. For a completion pending on capacity, `retryAdmission(id:)` rechecks
 the prepared candidate. It commits if capacity is available and the candidate
 is still current. An intervening revision requires `reconcile(id:)` while the
 operation remains active. Both return a `ReconcileResult`: `.committed`,
-`.pending`, `.inProgress`, or `.notPending`. `discardPending(id:)` returns a
+`.pending`, `.refused` when the call's own preparation was refused,
+`.inProgress`, or `.notPending`; `retryAdmission(id:)` prepares nothing, so it
+never reports `.refused`. `discardPending(id:)` returns a
 `DiscardResult`: `.discarded`, `.rejected`, or `.notPending`, and
 `pendingCompletions()` reads the retained completions. A `Local` never prepares
 a completion again on its own.
