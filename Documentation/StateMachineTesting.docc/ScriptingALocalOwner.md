@@ -371,10 +371,16 @@ changes made inside `withOwner` that the harness never observed. Pass the
 identifiers of the edges and routers that no test is meant to reach in
 `excluding:`; both are spelled `"<phase>.<name>"`. A router counts as exercised
 once a step takes one of its candidates. A router without candidates exists
-only to decline an input, so no step can exercise it: coverage never requires
-it, and ``GraphCoverage/unexercisedRejectingRoutes`` lists each one that no
-recorded run saw decline. A rejection counts only when it comes from the real
-owner, through `rejection(of:)` or a `send` that failed, and only for the route
-the owner names. Coverage requires nothing of rejections: neither that a router
+only to decline an input or a completion, so no step can exercise it: coverage
+never requires it, and ``GraphCoverage/unexercisedRejectingRoutes`` lists each
+one that no recorded run saw decline. A rejection counts only when it comes from
+the real owner, and only for the route the owner names: an input router's
+through `rejection(of:)` or a `send` that failed, which
+``ManualMachineTest/rejections`` records with the owner's typed
+``ManualMachineTest/Rejection/reason``, and a completion router's or completion
+edge's through a `deliver` or `reconcile(id:)` whose preparation it refused,
+which ``ManualMachineTest/completionRejections`` records. A completion that a
+router refuses while `Loading` and that `reconcile(id:)` admits in `Paused`
+therefore counts the router as declining. Coverage requires nothing of rejections: neither that a router
 that chooses an edge has also declined, nor that a function that can throw has
 thrown.

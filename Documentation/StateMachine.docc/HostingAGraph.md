@@ -407,6 +407,14 @@ lost a race. The handler runs outside the owner's critical section, in the
 owner's isolation, each time a retained completion's status becomes
 `.reconciliationRequired`.
 
+The handler receives reports one at a time, in the order the owner made the
+decisions. A handler that reconciles a completion synchronously sees that
+attempt reported after every report decided before it, including the rest of
+the batch its own report came from. A call that would report while the handler
+runs, from inside it or, on `Shared`, from another thread, leaves its report to
+that delivery and returns. A call that finds no delivery in progress delivers
+the reports itself, so it has reported its own attempt before it returns.
+
 Retrying is the same as the result arriving a moment later, when its edge would
 run against the newer phase anyway. Every completion edge and router must be
 deterministic and free of side effects under either policy, because an explicit

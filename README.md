@@ -46,8 +46,8 @@ own tests; it is not a product.
 
 ### Requirements
 
-Build with Swift 6.4 in Swift 6 language mode. The selected Apple toolchain is
-Xcode 27.1. The package declares these deployment targets:
+Requires Swift 6.4 in Swift 6 language mode. The package declares these
+deployment targets:
 
 | Platform | Deployment target |
 | --- | --- |
@@ -1228,7 +1228,8 @@ reports the edges, routers, and phases that no test exercised.
 every nonexcluded router with at least one candidate, and fails for an
 invariant a run violated. A router without candidates always declines, so no
 step can exercise it and coverage never requires it; `unexercisedRejectingRoutes`
-lists each one that no run saw the real owner decline through. A test that ends a lifetime acknowledges
+lists each one that no run saw the real owner decline through, an input router
+in a `send` and a completion router in a `deliver` or `reconcile(id:)`. A test that ends a lifetime acknowledges
 each execution the owner issued, closes the owner, and drains the closing
 batch:
 

@@ -145,6 +145,9 @@ presentation after another observer frees the slot, or after `stopObserving()`.
 The presentation keeps the snapshot it shows, then shows the host's current
 snapshot if it is newer, `isObserving` becomes `true`, `observationFailure`
 becomes `nil`, and subscribers of `presentedSnapshots` stay attached throughout.
+`isObserving` first reports `true` only once that snapshot, or a newer one, is
+shown: a call made from a callback of a change the presentation is still
+assigning reports it once that assignment has completed.
 A refusal throws `SubscriptionFailure` at once and changes nothing: the
 snapshot, `isObserving`, and `observationFailure` keep their values. While a
 registration is live or still being made, the call returns without registering.
@@ -262,18 +265,26 @@ it.
 ## Separate observation from running work
 
 ``StateMachinePresentation/stopObserving()`` removes only the registration and
-leaves the owner open. ``StateMachinePresentation/close()`` stops observing,
-closes the owner's work authority, and publishes its terminal snapshot. Closed
+leaves the owner open. ``StateMachinePresentation/close()`` closes the owner's
+work authority, stops observing, and publishes its terminal snapshot; because
+the owner is closed first, a callback of that end that resumes observing finds
+it closed, and no registration is live once `close()` returns. Closed
 historical loading data cannot authorize another request. Once either has begun
 to end the registration, the presentation shows nothing the owner delivers
 through it, including a snapshot that a host of your own delivers from inside
 the subscription's cancellation; what `send(_:)`, `commit(_:)`, and `close()`
-return is still shown. One rule covers every end a driving presentation makes,
+return is still shown. Stopping discards an observation value whose
+publication has not been announced: a snapshot the registration delivered while
+another snapshot was being assigned, which was waiting for that assignment, is
+not shown. A change admitted through the presentation still publishes its
+receipt, even when it waited the same way. One rule covers every end a driving presentation makes,
 by `stopObserving()`, `close()`, the owner's finish, or the presentation's
 release: a snapshot delivered through a registration that is no longer the
 presentation's is kept in the presentation's storage and released on the main
 actor only once every cancellation the presentation started has returned, so
-its destructor finds the slot free. The same holds for a registration that the
+its destructor finds the slot free. Once no cancellation is running, a
+snapshot that a host of your own delivers through a callback whose
+cancellation has already returned is released at once, on the main actor. The same holds for a registration that the
 presentation lets go while the owner is still making it, as when a host of your
 own stops the presentation from inside its `subscribe`: the presentation
 cancels the registration as soon as the owner returns it, and what the owner

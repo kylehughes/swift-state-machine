@@ -71,31 +71,35 @@ phase from `[*]` with the label `restored`, labels each edge with its function's
 name, and leaves each terminal phase to `[*]`. `GeneratedProfile` has no
 terminal phase, because `loaded` and `failed` each have an edge out.
 
-`dot()` returns the same structure for Graphviz. A point node named `*` enters
-the initial phase, and with a dashed edge each other restorable phase. Terminal
-phases have a double outline. Every name is a quoted string, with a quotation
-mark, a backslash, a line break, and `&` escaped, so each renders as itself:
+`dot()` returns the same structure for Graphviz. Each phase is a node named
+`p0`, `p1`, and so on in declaration order and labeled with the phase's name, so
+no name is read as DOT syntax or meets the entry point, a point node named
+`entry`, which enters the initial phase, and with a dashed edge labeled
+`restored` each other restorable phase. Terminal phases have a double outline,
+and each edge is labeled with its function's name. A label escapes a quotation
+mark, a backslash, and `&`, one Unicode scalar at a time, and writes every line
+ending as a line break, so each renders as itself:
 
 ```text
 digraph "GeneratedProfile" {
-    "*" [shape=point];
-    "idle";
-    "loading";
-    "loaded";
-    "failed";
-    "*" -> "idle";
-    "*" -> "loaded" [label="restored", style=dashed];
-    "*" -> "failed" [label="restored", style=dashed];
-    "idle" -> "loading" [label="begin"];
-    "loading" -> "idle" [label="cancel"];
-    "loading" -> "loaded" [label="received"];
-    "loading" -> "failed" [label="failed"];
-    "loading" -> "loading" [label="authenticationChanged"];
-    "loaded" -> "loading" [label="refresh"];
-    "failed" -> "loading" [label="retry"];
-    "loading" -> "loading" [label="audit"];
-    "loading" -> "loading" [label="audited"];
-    "loading" -> "loading" [label="auditFailed"];
+    entry [shape=point];
+    p0 [label="idle"];
+    p1 [label="loading"];
+    p2 [label="loaded"];
+    p3 [label="failed"];
+    entry -> p0;
+    entry -> p2 [label="restored", style=dashed];
+    entry -> p3 [label="restored", style=dashed];
+    p0 -> p1 [label="begin"];
+    p1 -> p0 [label="cancel"];
+    p1 -> p2 [label="received"];
+    p1 -> p3 [label="failed"];
+    p1 -> p1 [label="authenticationChanged"];
+    p2 -> p1 [label="refresh"];
+    p3 -> p1 [label="retry"];
+    p1 -> p1 [label="audit"];
+    p1 -> p1 [label="audited"];
+    p1 -> p1 [label="auditFailed"];
 }
 ```
 
@@ -120,10 +124,13 @@ type spellings, so an alias keeps its own name.
 happen, as the macro reads the `Failure` and `Output` through the schema's own
 declarations; read them rather than interpreting a spelling.
 
-Each type spelling is the author's own text, on one line without comments, and
-means what it means where it was written: a phase's payload inside the schema,
-an input case's payload inside `Input`, and an operation's or event's types
-inside its namespace. A type the namespace omits is spelled through the standard
+Each type spelling is the author's text: the tokens of the type as written, in
+order, with one space wherever whitespace, a line break, or a comment separated
+two of them, and nothing else. `@Initial case draft(Self.Draft)` exports
+`Self.Draft`, and `case run((@Sendable () -> Int))` exports
+`(@Sendable () -> Int)`. A spelling means what it means where it was written: a
+phase's payload inside the schema, an input case's payload inside `Input`, and
+an operation's or event's types inside its namespace. A type the namespace omits is spelled through the standard
 library's module, `Swift::Void` or `Swift::Never`, which no declaration shadows.
 
 ```swift

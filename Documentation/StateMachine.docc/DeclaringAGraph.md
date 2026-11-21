@@ -104,9 +104,10 @@ Swift reads it, so `(_: A, B)` is `(A, B)` and `(_: ())` is `()`, while an
 underscore written in backticks is a label of its own. `()`,
 `Swift::Void`, and `Swift::Never` always name the standard library's types.
 
-In the schema's `graph`, each type spelling is the author's own text, on one
-line without comments, and means what it means where it was written: a phase's
-payload inside the schema, an input case's payload inside `Input`, and an
+In the schema's `graph`, each type spelling is the author's text: the type's
+tokens as written, with one space wherever whitespace, a line break, or a
+comment separated two of them, so `Self.Draft` stays `Self.Draft`. It means
+what it means where it was written: a phase's payload inside the schema, an input case's payload inside `Input`, and an
 operation's or event's types inside its namespace. A type the namespace omits is
 spelled through the standard library's module, `Swift::Void` or `Swift::Never`,
 which no declaration shadows. With `typealias Detail = String` in the
@@ -206,7 +207,9 @@ selector such as `Swift::Int` change under nothing the macro cannot see. So
 does the schema's own name at the schema's scope: generated code names the
 schema by it, so every expansion checks that it names the schema, and fails to
 compile with a message when an extension of the schema declares a type of that
-name. A static property of that name changes nothing. A module selector names
+name. A type or type alias of that name declared directly inside the schema is
+refused; a property or method of that name changes nothing, because generated
+code names the schema only where Swift looks up a type. A module selector names
 one declaration, but it confirms that declaration's kind only for the standard
 library's own types, protocols, and aliases whose kind the macro knows:
 `Swift::Int` and `Swift::Array<Swift::Int>` have values, and
@@ -1011,7 +1014,10 @@ When edges of one name throw different failure types, their
 `PreparationRejection` cases are prefixed with the source phase, as in
 `draftEdit` and `savingEdit`. An edge or router whose generated type would have
 the schema's own name is rejected, because generated code inside `Effect` and
-`Route` names the schema's types through that name.
+`Route` names the schema's types through that name. An edge named `effect`, `type`,
+or `protocol` that starts, cancels, or emits is rejected too: its type would be
+`Effect.Effect`, which would hide `Effect` inside it, or `Effect.Type` or
+`Effect.Protocol`, which name its metatypes.
 
 ## Declare a graph of unique resources
 
@@ -1147,8 +1153,9 @@ check, and how to satisfy it:
 | `Type alias 'Item' names itself` | Give the alias a type that does not depend on it, directly or through other aliases. |
 | `Move this '#if' outside the schema or into a function body` | Move the condition around the whole schema, into the body of a function, or into an extension of the schema, as [Know what the macro supports](<doc:DeclaringAGraph#Know-what-the-macro-supports>) shows: the macro reads every member of the schema, `Input`, `Scope`, and its namespaces without knowing which clause is active. |
 | `Move this '#if' out of the declaration's attributes` | Write the attributes without a condition, or declare the member once per platform in separate schemas. |
-| `Remove '@MainActor'` | Remove the attribute from the edge, router, or restoration function, which takes only `@discardableResult`, `@inlinable`, `@inline`, and `@usableFromInline`. To confine an owner to the main actor, generate `.mainActorHost`. |
-| `Remove '@available' and give the schema this availability instead` | Put the `@available` on the schema, and on the types it declares that need it, rather than on the function. |
+| `Remove '@MainActor'` | Remove the attribute from the edge, router, or restoration function, which takes only `@discardableResult`, `@inlinable`, `@inline`, `@usableFromInline`, and `@available(*, deprecated)`. To confine an owner to the main actor, generate `.mainActorHost`. |
+| `Remove '@available' and give the schema this availability instead` | Put the `@available` on the schema, and on the types it declares that need it, rather than on the function. A deprecation on every platform, `@available(*, deprecated)` with at most one `message:` and one `renamed:`, is the one form a function keeps. |
+| `Remove 'renamed:': the restoring initializers and resets this deprecation marks keep their names` | Describe the replacement in `message:`; a restoration function's deprecation marks `init(restoring:)` and `reset(restoring:)`, which no rename applies to. |
 | `Remove 'mutating'` | An authored function is `static`, with an access modifier and `nonisolated` as its only other modifiers. |
 | `Use .parallel(limit: N) with a positive integer literal` | Write the limit as an integer literal of at least 1, in any base Swift accepts, such as `8`, `1_000`, or `0x10`. |
 | `Declare 'Draft' public` | Give the named type or alias the schema's access. |
@@ -1316,22 +1323,57 @@ nonisolated enum Export: Sendable {
 Generated members call edges, routers, and restoration functions from
 nonisolated code and from every owner, and they have the schema's own
 availability and no other. An authored function therefore takes only the
-macro's markers and Swift's `@discardableResult`, `@inlinable`, `@inline`, and
-`@usableFromInline`; any other attribute, which could isolate it to a global
-actor such as `@MainActor`, whatever its capitalization, or change how a call to
-it is checked, is refused. Availability belongs on the schema: the macro cannot
-compare an `@available` on a function, or a deprecation, with the client's
+macro's markers, Swift's `@discardableResult`, `@inlinable`, `@inline`, and
+`@usableFromInline`, and a deprecation on every platform; any other attribute,
+which could isolate it to a global actor such as `@MainActor`, whatever its
+capitalization, or change how a call to it is checked, is refused. Availability
+belongs on the schema. Apart from a deprecation on every platform, described
+below, the macro cannot compare an `@available` on a function with the client's
 deployment target, so it refuses `@available` and `@backDeployed` on the
 function and asks for them on the schema, whose generated members then share
-them, as do payload types that carry the same annotation. Beside `static`, an
-authored function's only modifiers are its access and `nonisolated`. A `public`
-or `package` schema generates members of its access that name its phase
-payloads, `Input`, its operation and event namespaces with their aliases, and
-the types that its payloads, outputs, keys, requests, saved data, and failures
-spell. Each declaration of the schema that one of those spellings names, as
-Swift resolves the spelling where it is written, needs that access too, such as
-`Notes` and `Notes.Detail` for an edge that takes a `Notes.Detail`; a helper that
-none of them names may keep less, even when it shares a name with one that does.
+them, as do payload types that carry the same annotation. That includes
+`@available(macOS 14, *)`, `unavailable`, `obsoleted:`, and a platform's
+`deprecated:`, such as `@available(macOS, deprecated: 14)`. Beside `static`, an
+authored function's only modifiers are its access and `nonisolated`.
+
+An edge, router, or restoration function can be deprecated on every platform
+with `@available(*, deprecated)`, which may add one `message:` and one
+`renamed:`. The generated public members named for the function repeat the
+attribute as written: an edge's `Owned` method and, for an input edge, its
+`Observed` method; a router's `Owned` and `Observed` methods; and every
+`init(restoring:)` and `reset(restoring:)` for a restoration function. A caller
+of one of those members gets Swift's deprecation warning, with the rename as its
+fix-it, while sending an input, delivering a completion, and creating an owner
+name nothing deprecated, and the schema's own generated code calls the function
+without a warning, so a module that treats warnings as errors still builds. An
+edge that a router chooses has no public method of its own, so its deprecation
+marks no generated member. The restoring initializers and resets keep their
+names, so a restoration function's deprecation takes `message:` but not
+`renamed:`. A deprecation on the schema itself deprecates everything it
+generates.
+
+```swift
+@available(*, deprecated, renamed: "submit")
+@Transition(on: Input.post)
+static func post(_ source: Draft) -> Sent { Sent() }
+
+@Transition(on: Input.submit)
+static func submit(_ source: Draft) -> Sent { Sent() }
+```
+
+Here `owned.post()` warns that `post` is renamed to `submit`, and offers to
+call `owned.submit()`, while `try flow.send(.post)` builds without a warning.
+
+A `public` or `package` schema generates members of its access that name its
+phase payloads, `Input`, its operation and event namespaces with their aliases,
+and the types that its payloads, outputs, keys, requests, saved data, and
+failures spell. Each declaration of the schema that one of those spellings
+names, as Swift resolves the spelling where it is written, needs that access
+too, such as `Notes` and `Notes.Detail` for an edge that takes a `Notes.Detail`,
+and `Notes.Detail` again for `N.Detail` written through `typealias N = Notes`. A
+helper that none of them names may keep less, even when it shares a name with
+one that does, and so may a helper named like a built-in attribute: `Sendable`
+in `@Sendable () -> Int` names Swift's attribute, not a type.
 The macro cannot see the access of a type declared outside the
 schema; Swift reports one that is less visible at the generated declaration that
 names it. A limit such as `.parallel(limit: 8)` is an integer literal, read as
@@ -1340,7 +1382,11 @@ Schema, case, operation, and edge
 names are Swift identifiers that need no backticks; redundant backticks are
 allowed and change no name, but a keyword such as `default`, which needs them,
 cannot name a declaration the macro reads, because generated code spells each
-name bare.
+name bare. Redundant backticks change no attribute name or argument label
+either, so `discardableResult` and `escaping` written in backticks after `@`,
+and the label `limit` of `.parallel(limit:)` written in backticks, mean what
+they mean without them; only `@available` is read with its name bare, because
+Swift's parser reads the arguments of an escaped one as ordinary expressions.
 
 Write every name the macro reads in Unicode Normalization Form C, as most
 editors and keyboards do: an accented letter such as `é` is one character, not

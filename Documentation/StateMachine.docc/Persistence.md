@@ -83,7 +83,7 @@ nonisolated enum Download: Sendable {
 ## Restore a schema's owner
 
 A function marked `@Restoration` takes the saved data as its one unlabeled
-parameter, which can be any type the application defines. It returns the
+parameter: one application-defined `Copyable` archive value. It returns the
 generated `Restoration` enum, and it may use typed `throws` to reject the data.
 Declaring it gives `Local`, `Shared`, `ActorHost`, `MainActorHost`, and
 `IsolatedHost` an `init(restoring:)` that mirrors the ordinary initializer,
