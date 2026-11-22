@@ -1,4 +1,4 @@
-"""Regression controls for task-construction coverage; no package or Swift build."""
+"""Regression controls for task-construction coverage without a package or Swift build."""
 import unittest
 from instrument_resources import task_constructions, track
 

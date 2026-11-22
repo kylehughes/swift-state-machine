@@ -5,19 +5,19 @@ import Testing
 // over a small alphabet, runs each against the real presentation classes from a fresh state with
 // fake one-slot hosts whose cancellations the harness parks and releases, and checks the
 // presentations' written invariants after every step and at quiescence. Every step is forced by an
-// explicit happens-before edge: a synchronous call, a semaphore a worker signals, or a main-actor job
-// enqueued behind the jobs it waits for. Timeouts only fail a stuck run.
+// explicit happens-before edge, whether a synchronous call, a semaphore signaled by a worker, or a
+// main-actor job enqueued behind the jobs it waits for. Timeouts only fail a stuck run.
 //
-// Environment:
-// - `EXPLORER_FULL=1` runs the exhaustive tier, every slice at its full depth; `EXPLORER_TIER=standard`
+// Environment variables:
+// - `EXPLORER_FULL=1` runs the exhaustive tier (every slice at its full depth). `EXPLORER_TIER=standard`
 //   runs the same slices one step shallower. `EXPLORER_DEPTH` overrides the slices' depths,
-//   `EXPLORER_RUNTIME_DEPTH` the raw owner's, and `EXPLORER_HASH=1` enables state hashing.
+//   `EXPLORER_RUNTIME_DEPTH` overrides the raw owner's depth, and `EXPLORER_HASH=1` enables state hashing.
 // - `EXPLORER_COVERAGE=path` writes the interruption matrix's reached cells (`Tests/ScheduleExplorer.md`).
 // - `EXPLORER_REPLAY="SnapshotObservableObject: observe(A); hostCancel(A); dropMain"` replays one
-//   script with a trace; `EXPLORER_FAMILIES` (core,second,async,combine,reentrant) selects its alphabet.
+//   script with a trace. `EXPLORER_FAMILIES` (`core,second,async,combine,reentrant`) selects its alphabet.
 // - `EXPLORER_FAILURES=path` appends every violation found to that file.
-// - `EXPLORER_SLICES="core,second:5;core,async:4"` replaces the slices and their full depths;
-//   `EXPLORER_KIND` limits a run to one class or owner; `EXPLORER_TEARDOWN_DEPTH` sets the owner depth.
+// - `EXPLORER_SLICES="core,second:5;core,async:4"` replaces the slices and their full depths.
+//   `EXPLORER_KIND` limits a run to one class or owner, and `EXPLORER_TEARDOWN_DEPTH` sets the owner depth.
 // - `EXPLORER_SMOKE=0` skips the smoke configuration.
 
 private let environment = ProcessInfo.processInfo.environment
@@ -58,12 +58,12 @@ private func families(_ text: String?) -> ExplorerFamilies {
     return result
 }
 
-/// Whether the standard tier runs: every slice of the exhaustive one, the full-mode-only ones included,
-/// one step shallower, never below its smoke depth.
+/// Whether the standard tier runs, executing every slice of the exhaustive tier (including
+/// full-mode-only slices) one step shallower without dropping below its smoke depth.
 private let standardTier = environment["EXPLORER_TIER"] == "standard"
 private func tiered(_ deep: Int, smoke: Int) -> Int { standardTier ? max(deep - 1, smoke) : deep }
 
-/// The configurations of a run: each class against slices of the alphabet whose product stays tractable.
+/// Builds the configurations for a run, pairing each class with tractable slices of the alphabet.
 private func configurations(full: Bool) -> [ExplorerConfiguration] {
     let override = environment["EXPLORER_DEPTH"].flatMap(Int.init)
     let hashing = environment["EXPLORER_HASH"] == "1"
@@ -185,7 +185,7 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
 }
 
 // A sequence can park a cooperative-pool thread. `explore` takes turns at the process-wide exclusion of
-// such tests between sequences; the replays, which run their scripts directly, hold it throughout.
+// such tests between sequences, while replays run their scripts directly and hold it throughout.
 @MainActor @Suite(.serialized) struct ExplorerTests {
     // Bounded enough for every debug run. `EXPLORER_SMOKE=0` skips it. The opt-in configurations below
     // return at once without their variable, so a plain run reports no skipped test.
@@ -259,14 +259,14 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
     }
 
     // `EXPLORER_REPLAY_FILE=path` replays every `id|Class: script` line of that file in one process and
-    // prints one result line per script; violations are expected there, so none fails the test.
+    // prints one result line per script. Violations are expected there, so none fails the test.
     @Test(.parksCooperativeThread) func replayFile() async throws {
         guard let path = environment["EXPLORER_REPLAY_FILE"] else { return }
         let lines = try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n")
         for line in lines where line.contains("|") {
             let fields = line.split(separator: "|", maxSplits: 1)
             let parts = fields[1].split(separator: ":", maxSplits: 1)
-            // `Class[family,family]: script` selects the families; plain `Class: script` takes the default.
+            // `Class[family,family]: script` selects the families, while plain `Class: script` takes the default.
             let head = String(parts[0]).trimmingCharacters(in: .whitespaces)
             let named = head.split(separator: "[", maxSplits: 1)
             let chosen = named.count == 2 ? families(String(named[1].dropLast())) : families(nil)

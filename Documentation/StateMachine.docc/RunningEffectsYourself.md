@@ -10,7 +10,7 @@ starts a task, so a test or a custom runner decides exactly when each step
 happens.
 
 This article uses one search graph. Its inheritance clause lists `Equatable`,
-which makes its effects comparable:
+which makes its effects comparable.
 
 ```swift
 import StateMachine
@@ -60,7 +60,7 @@ uses typed throws or returns `Advance` produces
 The `effect` property on each value widens it to the schema-wide `Effect`.
 `takeValue()` consumes an owner and returns its payload, whereas `withValue`
 borrows it for a closure, which can return a noncopyable value or throw a typed
-error that `withValue` rethrows:
+error that `withValue` rethrows.
 
 ```swift
 func ownedSearch() {
@@ -97,9 +97,8 @@ the whole workflow, and its effects never become hosted work.
 subscription. Its methods are `mutating` and synchronous. An acceptance that
 starts or cancels work, or emits an event, queues a batch of commands, and so
 does closure. Any other acceptance returns its receipt from `send` or `commit`
-and queues nothing, so a run of plain edits never waits for a drain. The caller
-drains whole batches, releases mutating access, executes the commands, and
-then reports back:
+and queues nothing, so a run of plain edits never waits for a drain. The caller drains whole batches, releases mutating access, executes the
+commands, and then reports back.
 
 ```swift
 @StateMachine(mode: .shared)
@@ -159,14 +158,14 @@ func publishLocally() throws {
 ```
 
 `drainCommands(limit:)` transfers whole batches in commit order, all of them by
-default. A batch holds its acceptance's receipt, its `terminal` flag, and its
-commands: cancellations first, then starts and events in the order the edge
-wrote them. A start carries the operation's work, with its `input`, its `key`
-for a keyed operation, its `request`, and its `execution` handle. Cancelling a
-key and revoking a scope each produce `.cancel(execution)` for the work they
-end. Admitting a completion, or discarding a retained one with
+default. Each batch holds its acceptance's receipt, its `terminal` flag, and its
+commands, ordered with cancellations first and then starts and events in the
+order the edge wrote them. A start carries the operation's work, with its
+`input`, its `key` for a keyed operation, its `request`, and its `execution`
+handle. Cancelling a key and revoking a scope each produce `.cancel(execution)`
+for the work they end. Admitting a completion, or discarding a retained one with
 `discardPending(id:)`, retires the work that returned it without a
-cancellation, because that work has already finished producing its result; a
+cancellation, because that work has already finished producing its result. A
 completion edge still cancels any other work it revokes. The caller
 acknowledges the retired work's execution as usual.
 
@@ -182,40 +181,44 @@ authority. Copying a valid completion permits repeated delivery attempts, while
 successful terminal admission retires the operation at most once.
 
 Returning a completion and acknowledging termination are separate obligations.
-`deliver(_:)` returns a `DeliveryResult`: `.committed(receipt)`,
-`.pending(id, status)` when the outcome is retained, `.refused(id, reason,
-routeID:)` when this call prepared the outcome and its router or completion
-edge threw `reason`, which retains it for reconciliation and names that router
-or edge, `.stale` when the operation
-has lost its authority or its outcome already settled, and `.foreignOwner` when
-a different owner issued the completion. `acknowledgeExecution(_:disposition:)`
-records that the execution ended, `.terminated` by default or
-`.skippedBeforeStart` for work the caller never began, and returns
-`AcknowledgmentResult`: `.recorded`, `.duplicate`, or `.foreignOwner`. An
-asynchronous runner must retain its execution handles until the tasks
-terminate, and a cancellation request alone does not acknowledge termination.
+`deliver(_:)` returns a `DeliveryResult` with five outcomes.
+
+- `.committed(receipt)` when the completion was admitted.
+- `.pending(id, status)` when the outcome is retained.
+- `.refused(id, reason, routeID:)` when this call prepared the outcome and its
+  router or completion edge threw `reason`, retaining the outcome for
+  reconciliation and naming that router or edge.
+- `.stale` when the operation has lost its authority or its outcome already
+  settled.
+- `.foreignOwner` when a different owner issued the completion.
+
+`acknowledgeExecution(_:disposition:)` records that the execution ended, using
+`.terminated` by default or `.skippedBeforeStart` for work the caller never
+began, and returns an `AcknowledgmentResult` of `.recorded`, `.duplicate`, or
+`.foreignOwner`. An asynchronous runner must retain its execution handles until
+the tasks terminate, and a cancellation request alone does not acknowledge
+termination.
 
 A retained delivery may still need admission or explicit reconciliation after
 execution has ended. Draining and acknowledging never admit a retained
 completion. For a completion pending on capacity, `retryAdmission(id:)` rechecks
-the prepared candidate. It commits if capacity is available and the candidate
-is still current. An intervening revision requires `reconcile(id:)` while the
-operation remains active. Both return a `ReconcileResult`: `.committed`,
-`.pending`, `.refused` when the call's own preparation was refused,
-`.inProgress`, or `.notPending`; `retryAdmission(id:)` prepares nothing, so it
-never reports `.refused`. `discardPending(id:)` returns a
-`DiscardResult`: `.discarded`, `.rejected`, or `.notPending`, and
-`pendingCompletions()` reads the retained completions. A `Local` never prepares
-a completion again on its own.
+the prepared candidate and commits if capacity is available and the candidate is
+still current. An intervening revision requires `reconcile(id:)` while the
+operation remains active. Both return a `ReconcileResult` of `.committed`,
+`.pending`, `.refused` (when the call's own preparation was refused),
+`.inProgress`, or `.notPending`. Because `retryAdmission(id:)` prepares nothing,
+it never reports `.refused`. `discardPending(id:)` returns a `DiscardResult` of
+`.discarded`, `.rejected`, or `.notPending`, and `pendingCompletions()` reads
+the retained completions. A `Local` never prepares a completion again on its
+own.
 
 `isQuiescent` is `true` once the owner is closed, its terminal batch is drained,
 and every execution and delivery obligation has settled. `Local` also has
 `reset(to:)`, which revokes all work and queues its cancellations,
 `reset(to:expecting:)`, which does so only while the owner holds a given
-snapshot's root, and
-`LocalConfiguration`, the schema's name for ``Limits``, bounds its queue, plan
-size, and execution reservations. A graph with no operations or events has no
-commands at all, so its `Local` needs no draining.
+snapshot's root, and `LocalConfiguration`, the schema's name for ``Limits``,
+which bounds its queue, plan size, and execution reservations. A graph with no
+operations or events has no commands at all, so its `Local` needs no draining.
 
 Every generated `Local` conforms to ``LocalStateMachine``, to
 ``DrainingLocalStateMachine`` and ``DeliveringLocalStateMachine`` when it has
@@ -223,5 +226,5 @@ commands and operations, to ``DefaultingLocalStateMachine`` when its `@Initial`
 case declares a default payload, and to ``RestoringLocalStateMachine`` when its
 schema declares a `@Restoration` function. These protocols let a harness such as
 `ManualMachineTest` in `StateMachineTesting` drive any graph's `Local`, and
-conforming confers no authority: besides the owner's own verbs, they read graph
-metadata and the receipt a result already holds.
+conforming confers no authority. Besides the owner's own verbs, they read only
+graph metadata and the receipt a result already holds.

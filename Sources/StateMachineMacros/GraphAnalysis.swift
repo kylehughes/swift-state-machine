@@ -1,15 +1,16 @@
 /// The structural checks of a schema's graph, computed from its declarations alone.
 ///
-/// The analysis over-approximates what can happen: an edge can fire as soon as its source is
+/// The analysis over-approximates what can happen. An edge can fire as soon as its source is
 /// reachable and, for a completion, its operation may be active there, because the macro cannot know
 /// whether an authored function throws, which edge a router chooses, or which effects an edge
 /// returns. A finding therefore means that no declared path exists, never that one is unlikely.
 ///
-/// A path is followed through configurations: a phase together with the outstanding executions of
-/// every operation at once, so work that one path starts is never combined with work that only
-/// another path holds. A graph whose configurations take more than ``jointAnalysisBudget`` to explore
-/// is checked per operation instead, which combines paths and so can only accept more graphs. A schema that
-/// generates only `Owned` holds no work authority, so its completion edges need only their source.
+/// A path is followed through configurations consisting of a phase together with the outstanding
+/// executions of every operation at once, so work that one path starts is never combined with work
+/// that only another path holds. A graph whose configurations take more than ``jointAnalysisBudget``
+/// to explore is checked per operation instead, which combines paths and can only accept more graphs.
+/// A schema that generates only `Owned` holds no work authority, so its completion edges need only
+/// their source.
 extension Schema {
     /// A structural defect, named by the declaration at fault.
     enum GraphFinding: Equatable {
@@ -58,12 +59,13 @@ extension Schema {
     /// The phases that restoration may enter, each with no outstanding work.
     var restorationEntrances: [String] { restoration == nil ? [] : restorablePhases.map(\.caseName) }
 
-    /// The largest parallel limit whose outstanding executions the analysis counts one by one; a larger
-    /// limit is treated as unbounded, which can only accept more graphs.
+    /// The largest parallel limit whose outstanding executions the analysis counts one by one.
+    ///
+    /// A larger limit is treated as unbounded, which can only accept more graphs.
     static let countedParallelLimit = 32
 
     /// The most executions of an operation that can be outstanding at once, or `nil` when the
-    /// declarations bound none: a keyed operation runs independent work for any number of keys.
+    /// declarations bound none because a keyed operation runs independent work for any number of keys.
     func outstandingLimit(_ operation: Operation) -> Int? {
         guard !operation.isKeyed else { return nil }
         switch operation.admission {
@@ -75,14 +77,16 @@ extension Schema {
     /// The most work the joint analysis does before it falls back to checking each operation on its
     /// own, counted as the operation counts it reads or writes.
     ///
-    /// It bounds the macro's time on a graph whose operations combine into many configurations; the
+    /// It bounds the macro's time on a graph whose operations combine into many configurations. The
     /// stress graphs and every example fit well within it.
     static let jointAnalysisBudget = 1 << 21
 
     /// The most phases, `Input` cases, operations, and effect cases (each operation, two cancellations of each
-    /// cancelled operation, and each event) a schema may declare: Swift checks a switch over at most 628 cases
-    /// that carry values in reasonable time, a routed input or an operation costs it more than a phase, and
-    /// type-checking 512 operations for every owner takes it more than a minute where 256 take seconds.
+    /// cancelled operation, and each event) a schema may declare.
+    ///
+    /// Swift checks a switch over at most 628 cases that carry values in reasonable time, a routed input or
+    /// an operation costs more than a phase, and type-checking 512 operations for every owner takes more
+    /// than a minute where 256 take seconds.
     static let phaseLimit = 600
     static let inputLimit = 512
     static let operationLimit = 256
@@ -108,9 +112,9 @@ extension Schema {
 
     /// Computes reachability and operation liveness.
     ///
-    /// A schema that generates only `Owned` has no tickets: each completion edge is a consuming method
+    /// A schema that generates only `Owned` has no tickets. Each completion edge is a consuming method
     /// that needs only its source phase, so every edge from a reached phase fires. Any other schema is
-    /// explored by configuration, within ``jointAnalysisBudget``, and otherwise per operation.
+    /// explored by configuration within ``jointAnalysisBudget``, and otherwise per operation.
     func reach() -> GraphReach {
         if !generatesObservingOwner { return ownedReach() }
         return jointReach() ?? operationReach()
@@ -138,9 +142,9 @@ extension Schema {
 
     /// Reachability through configurations, or `nil` when exploring them takes more than `budget`.
     ///
-    /// A configuration is a phase and, for each operation, its outstanding executions: none, an exact
-    /// count up to the operation's bound, or unbounded. The initial phase and each restorable phase
-    /// start with none. An input or direct edge fires from any configuration of its source; a
+    /// A configuration is a phase paired with each operation's outstanding execution count (none, an
+    /// exact count up to the operation's bound, or unbounded). The initial phase and each restorable
+    /// phase start with none. An input or direct edge fires from any configuration of its source. A
     /// completion edge fires from one in which its operation has an execution outstanding, and retires
     /// one. Every operation's work is carried into the destination when the destination keeps every
     /// scope it holds and the edge invalidates none of them, and an edge that starts an operation may
@@ -162,11 +166,12 @@ extension Schema {
             let to: Int
             /// The operation whose execution the edge completes, if it is a completion edge.
             let completes: Int?
-            /// Whether each operation keeps its work across the edge: active in the destination, with
-            /// no scope it holds invalidated. Edges that invalidate nothing share their destination's.
+            /// Whether each operation keeps its work across the edge, meaning it is active in the
+            /// destination with no scope it holds invalidated. Edges that invalidate nothing share
+            /// their destination's mask.
             let keeps: [Bool]
-            /// Whether each operation is active in the destination, so the edge may start it there; one
-            /// array for each destination, which its edges share.
+            /// Whether each operation is active in the destination so the edge may start it there.
+            /// One array is built per destination and shared by its incoming edges.
             let startable: [Bool]
             /// The operations the edge may start, by index.
             let starts: [Int]
@@ -274,22 +279,22 @@ extension Schema {
     /// Reachability and operation liveness per operation, to a fixed point.
     ///
     /// The initial phase and each restorable phase start with no active work. An input or direct edge
-    /// fires once its source is reached; a completion edge fires once its operation may be active in its
-    /// source. Each operation's outstanding executions are counted where its declarations bound them:
-    /// one for `.latest` and `.rejectWhenActive`, up to the limit for `.parallel(limit:)`, and without a
-    /// bound for a keyed operation, whose keys each hold their own work. A fired edge carries the work
-    /// of each operation active in its source into its destination when the destination keeps every
-    /// scope the operation holds and the edge invalidates none of them; the operation's own completion
-    /// retires one execution, and an edge that starts the operation may add executions up to its bound.
+    /// fires once its source is reached, and a completion edge fires once its operation may be active in
+    /// its source. Each operation's outstanding executions are counted where its declarations bound them
+    /// (one for `.latest` and `.rejectWhenActive`, up to the limit for `.parallel(limit:)`, and unbounded
+    /// for a keyed operation, whose keys each hold their own work). A fired edge carries the work of each
+    /// operation active in its source into its destination when the destination keeps every scope the
+    /// operation holds and the edge invalidates none of them. The operation's own completion retires one
+    /// execution, and an edge that starts the operation may add executions up to its bound.
     ///
     /// Each operation's counts are tracked apart from the others', so an edge that one operation's work
     /// lets fire carries every other operation's work its source holds on any path.
     ///
     /// Edges that leave one phase for one destination and invalidate the same scopes carry every
     /// operation they neither start nor complete alike, so each such class carries an operation's count
-    /// once, however many edges it has; only an edge's own operations are carried edge by edge. The work
-    /// is then linear in the facts the analysis establishes and the classes and edges that carry them, and
-    /// `steps` counts it.
+    /// once regardless of how many edges it has. Only an edge's own operations are carried edge by edge.
+    /// The work is then linear in the facts the analysis establishes and the classes and edges that carry
+    /// them, and `steps` counts it.
     func operationReach() -> GraphReach {
         var steps = 0
         return operationReach(steps: &steps)
@@ -305,7 +310,7 @@ extension Schema {
         let starts = transitions.map { Set($0.starts) }
         let invalidates = transitions.map { Set($0.invalidates) }
         let completes = transitions.map { [.success, .failure].contains($0.trigger.kind) ? $0.trigger.name : nil }
-        /// The operations an edge carries on its own: those it starts and the one it completes.
+        /// The operations an edge carries on its own, namely those it starts and the one it completes.
         let own = transitions.indices.map { starts[$0].union(completes[$0].map { [$0] } ?? []) }
         struct Carry: Hashable {
             let from: String
@@ -419,10 +424,10 @@ extension Schema {
         return reach
     }
 
-    /// The structural defects of the graph in declaration order: phases, then operations, then edges
-    /// and routers.
+    /// The structural defects of the graph in declaration order (phases, then operations, then edges
+    /// and routers).
     ///
-    /// A defect that follows from another is left out: an operation that never starts reports no
+    /// A defect that follows from another is left out. An operation that never starts reports no
     /// completion of its own, and a phase that is never reached reports no completion that leaves it.
     func graphFindings() -> [GraphFinding] {
         let reach = reach()
@@ -454,7 +459,7 @@ extension Schema {
             }
             let active = reach.phases(active: operation.effect)
             // A router without candidates declares no edge, so it accepts no outcome. An operation whose
-            // output and failure are both `Never` has no outcome to accept: it runs until it is revoked.
+            // output and failure are both `Never` has no outcome to accept and runs until it is revoked.
             let outcomes = [Trigger.Kind.success, .failure]
                 .filter {
                     $0 == .success ? !operation.neverSucceeds : !operation.isInfallible

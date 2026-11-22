@@ -1,47 +1,56 @@
 #!/usr/bin/env python3
 """Fuzz the @StateMachine macro with rewrites whose meaning Swift decides.
 
-Each case applies rewrites to a valid seed schema and compiles it, alone, through the real macro plugin:
+Each case applies rewrites to a valid seed schema and compiles it alone through the real macro plugin.
 
-- An equivalence rewrite (parentheses, backticks, aliases, qualification, sugar, trivia, reordering, ...) must leave
-  the program's meaning alone: the case compiles, its generated declarations have the same canonical signatures
-  (demangled object symbols), its exported graph has the same structure, and it prints what the seed prints. A
-  macro diagnostic or a difference passes only when LIMITS, the table of documented limits below, lists it.
-- A distinction rewrite renames one declaration so that it collides with another in a normal form the macro might
-  use (canonical Unicode equivalence, case, a raw identifier against a path, a confusable letter). Swift reads two
-  names, so the case must behave as the seed with that declaration renamed. The guide requires the macro to refuse a
-  schema name that is not in Unicode NFC, so such a name must get that diagnostic; accepting it fails as `policy`.
-- A breaking rewrite makes the schema invalid under the documented grammar while it stays valid Swift; the macro or
-  the compiler must reject it with the documented diagnostic (BREAK_EXPECT) at the site the rewrite changed.
-- An unsupported rewrite writes valid Swift the guide calls unsupported (async edges, untyped throws, `inout` sources,
-  generic functions, generic enclosing types); the macro itself must diagnose it.
-- A variation rewrite changes the program in a way Swift accepts (closure conventions, default isolation, `-O`); the
-  case must compile. A safe rewrite writes valid Swift the guide neither supports nor rules out (access levels,
-  attributes, a schema in a function body); the case must compile or get a macro diagnostic, never invalid generated
-  code.
+- An equivalence rewrite (parentheses, backticks, aliases, qualification, sugar, trivia, reordering, ...)
+  must preserve the program's meaning. The case must compile, emit identical canonical signatures
+  (demangled object symbols), export the same graph structure, and print the seed's output. A macro
+  diagnostic or difference passes only when LIMITS lists it.
+- A distinction rewrite renames one declaration so it collides with another in a normal form the macro
+  might use (canonical Unicode equivalence, case, a raw identifier against a path, or a confusable
+  letter). Swift reads two distinct names, so the case must behave like the seed with that declaration
+  renamed. Because the guide requires the macro to refuse non-NFC schema names, such a name must emit
+  that diagnostic, and accepting it fails as `policy`.
+- A breaking rewrite makes the schema invalid under the documented grammar while keeping it valid Swift.
+  The macro or compiler must reject it with the documented diagnostic (BREAK_EXPECT) at the changed site.
+- An unsupported rewrite writes valid Swift that the guide calls unsupported (async edges, untyped
+  throws, `inout` sources, generic functions, or generic enclosing types). The macro itself must diagnose
+  it.
+- A variation rewrite changes the program in a way Swift accepts (closure conventions, default isolation,
+  or `-O`), and the case must compile. A safe rewrite writes valid Swift that the guide neither supports
+  nor rules out (access levels, attributes, or a schema in a function body). The case must either compile
+  or emit a macro diagnostic, and never produce invalid generated code.
 
-Each case compiles as the module `Fz`; a harness module that imports it prints every graph, its Mermaid and DOT
-renderings, and the seed's report, and a seed's client section compiles in that module, so it sees the schema as
-another module does. Beside the comparison above, every compiled case must: link and run to completion; print a graph
-for every schema the module declares, holding every phase, input, operation, and event the source declares; export
-each type spelling as the author's own text, on one line without comments, and so that, compiled exactly as exported
-in the scope the guide says it is meant in, it names the authored type; render both diagrams so that a strict reader
-of the subset the library writes reads back exactly its graph, the graph's own name included when it is decoded under
-names no identifier spells; give each managed owner an initializer with its driver and handler labels in its own
-declaration order; and leave a client section that calls a deprecated generated member compiling once the compiler's
-fix-its for the deprecation are applied. Every seed must pass all of this on its own, a domain seed
-must print the report EXPECTED_REPORTS pins, and a module generated from the seed's attributes must use each selected
-owner and find no unselected one. A refusal must match its whole documented message at the token it names. Every
-compilation runs under a watchdog that kills its process tree past `--memory-cap-mb` or `--timeout`, which fails the
-case before any allowance. `--self-test` plants a defect for each of these oracles and checks that each is
-reported.
+Each case compiles as the module `Fz`. A separate harness module imports `Fz` to print every graph, its
+Mermaid and DOT renderings, and the seed's report. Any client section in the seed also compiles in that
+harness module so it sees the schema as another module does. Beyond the rewrite comparisons above, every
+compiled case must pass these checks:
 
---cost compares scaled schemas spelled a base way and rewritten ways: the same outcome at the same size, the macro's
-own time within a constant factor, and near-linear growth from the smaller size to the larger.
+- Link and run to completion.
+- Print a graph for every declared schema containing every phase, input, operation, and event from the
+  source.
+- Export each type spelling as the author's single-line text without comments, naming the authored type
+  when compiled in the scope the guide specifies.
+- Render Mermaid and DOT diagrams that a strict reader parses back into the exact graph, including graph
+  names decoded under non-identifier strings.
+- Give each managed owner an initializer whose driver and handler labels match declaration order.
+- Keep any client section that calls a deprecated generated member compiling after applying the compiler's
+  deprecation fix-its.
 
-Every case is compiled in its own process, so one variant's error cannot hide another's. A crash or a timeout of the
-plugin or compiler always fails. Failing cases are written to OUTPUT/failures/ as self-contained sources with a
-one-line description, after removing the rewrites the failure does not need.
+Every seed must pass these checks on its own. A domain seed must print the report pinned in
+EXPECTED_REPORTS, and a module generated from the seed's attributes must use every selected owner and
+reject every unselected one. A refusal must match its whole documented message at the named token. A
+watchdog kills any compilation process tree that exceeds `--memory-cap-mb` or `--timeout`, failing the
+case before any allowance applies. `--self-test` plants a defect for each oracle and verifies that each
+one is reported.
+
+`--cost` compares scaled schemas spelled in base and rewritten forms, checking for identical outcomes at
+the same size, macro time within a constant factor, and near-linear growth from smaller to larger sizes.
+
+Every case compiles in its own process so one variant's error cannot hide another's. A crash or timeout in
+the plugin or compiler always fails. After reducing away unneeded rewrites, the script writes each failing
+case to OUTPUT/failures/ as a self-contained source file with a one-line description.
 """
 import argparse
 import collections
@@ -5376,7 +5385,7 @@ def judge(case, base, control, variant, prefix=None):
                 return 'fail', f"compiles with a signature matching {case['signature']}", f"compiles with {found[:2]}"
             return 'pass', 'compiles with two failures', 'compiles'
         if variant['status'] == 'ok':
-            # A variation changes no behaviour a domain seed pins.
+            # A variation changes no behavior a domain seed pins.
             expected_report = EXPECTED_REPORTS.get(case['seed'])
             if expected_report is not None and variant.get('report') != expected_report:
                 return 'fail', f'compiles and prints the pinned report {expected_report!r}', f"report {variant.get('report')!r}"
@@ -6948,7 +6957,7 @@ def seeds_text_of(name):
 
 def site_signature(rewrite, info):
     """What makes one site of a rewrite different from another for the macro: the kind and role of a type site and
-    the shape of its spelling with names abstracted, or a non-type rewrite's flavour."""
+    the shape of its spelling with names abstracted, or a non-type rewrite's flavor."""
     site = info.get('site', '')
     shape = re.sub(r"'[^']*'|`[^`]*`|\b[A-Za-z_]\w*\b", lambda m: m.group(0) if m.group(0) in KEYWORDS or m.group(0) in STANDARD
                    or m.group(0) in GENERATED_NAMES or m.group(0) in OWNER_VERBS or m.group(0) in SHADOWED else 'N', site)
@@ -7173,14 +7182,14 @@ def main():
     parser.add_argument('--modules', type=pathlib.Path, help='the directory of StateMachine.swiftmodule for --plugin')
     parser.add_argument('--library', type=pathlib.Path, help='a directory with libStateMachine.dylib to link instead of the build\'s objects')
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--smoke', action='store_true', help='every rewrite alone, at sites of every shape the seeds hold; deterministic')
+    mode.add_argument('--smoke', action='store_true', help='run every rewrite alone at sites of every shape the seeds hold (deterministic)')
     mode.add_argument('--random', action='store_true', help='random compositions of two to four rewrites')
-    mode.add_argument('--cost', action='store_true', help='scaled schemas: rewritten spellings against the base spelling')
+    mode.add_argument('--cost', action='store_true', help='compare scaled schemas using rewritten spellings against the base spelling')
     mode.add_argument('--scaling', action='store_true', help='every list-like construct at sizes n and 4n')
     mode.add_argument('--ceilings', action='store_true', help="search each construct's largest size that compiles")
     mode.add_argument('--self-test', action='store_true', help='plant a defect for each oracle and check that it is reported')
     parser.add_argument('--growth-bound', type=float, default=5.0, help='allowed growth of macro time for 4x the size')
-    parser.add_argument('--repeats', type=int, default=3, help='runs per measurement; the median is kept')
+    parser.add_argument('--repeats', type=int, default=3, help='runs per measurement (keeps the median)')
     parser.add_argument('--ceiling-cap', type=int, default=120, help='seconds a ceiling attempt may take')
     parser.add_argument('--ceiling-limit', type=int, default=1024, help='largest size a ceiling search tries')
     parser.add_argument('--cost-factor', type=float, default=3.0, help='allowed macro time of a rewrite over its base')
@@ -7195,12 +7204,12 @@ def main():
     parser.add_argument('--timeout', type=int, default=120, help='seconds a compilation may take before it is killed')
     parser.add_argument('--memory-cap-mb', type=int, default=3000,
                         help="megabytes a compilation's process tree may hold before it is killed as over the memory cap")
-    parser.add_argument('--no-run', action='store_true', help='compile only; do not link and run cases')
+    parser.add_argument('--no-run', action='store_true', help='compile only without linking or running cases')
     parser.add_argument('--no-reduce', action='store_true')
     parser.add_argument('--list', action='store_true', help='list seeds and rewrites and exit')
     parser.add_argument('--spelling-scope', choices=('written', 'schema'), default='written',
-                        help="where an exported spelling is read: where the guide says it is meant (default), or, to check a "
-                             "macro older than that contract, at the schema's scope")
+                        help="where an exported spelling is read, either where the guide specifies (default) or at the "
+                             "schema's scope to check a macro older than that contract")
     args = parser.parse_args()
 
     seeds = {k: v for k, v in all_seeds().items() if re.search(args.only_seeds, k)}
@@ -7213,7 +7222,7 @@ def main():
         return 0
     output = args.output.resolve()
     if output.exists() and any(output.iterdir()):
-        parser.error(f'{output} is not empty; give a fresh --output')
+        parser.error(f'{output} is not empty. Give a fresh --output')
     output.mkdir(parents=True, exist_ok=True)
 
     testing_link = []
@@ -7236,7 +7245,7 @@ def main():
         # The testing product, which a seed's report may drive, links into the cases that import it.
         testing_link = [str(p) for p in sorted((bin_path / 'StateMachineTesting.build').glob('*.o'))]
         if not plugin.exists() or not (modules / 'StateMachine.swiftmodule').exists():
-            parser.error(f'no native build of the macro plugin at {bin_path}; build the package first')
+            parser.error(f'no native build of the macro plugin at {bin_path}. Build the package first')
     # Keep the plugin this run uses, so concurrent rebuilds cannot change it mid-run.
     kept = output / 'plugin'
     shutil.copy2(plugin, kept)

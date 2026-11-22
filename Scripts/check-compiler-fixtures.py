@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile separate-module positive and misuse clients; retain exact commands and diagnostics."""
+"""Compile separate-module positive and misuse clients and retain exact commands and diagnostics."""
 import argparse
 import concurrent.futures
 import hashlib
@@ -85,7 +85,7 @@ for mode in ['debug', 'release']:
         run(f'{mode}-macro-plugin-build', ['swift', 'build', '--build-system', 'native', '--configuration', mode, '--product', 'StateMachineMacros'])
     build = flags + (['-O'] if mode == 'release' else ['-Onone']) + ['-load-plugin-executable', str(bin_path / 'StateMachineMacros-tool') + '#StateMachineMacros']
     modules_ready = True
-    # The examples are not a product; fixtures import them as the package's own clients do.
+    # The examples are not a product. Fixtures import them as the package's own clients do.
     for module in ['StateMachine', 'StateMachineUI', 'StateMachineTesting', 'StateMachineExamples']:
         sources = sorted((ROOT / 'Sources' / module).glob('*.swift'))
         command = build + ['-package-name', 'StateMachine', '-enable-library-evolution', '-emit-library', '-emit-module', '-module-name', module, '-I', directory, '-L', directory, '-o', directory / f'lib{module}.dylib', '-emit-module-path', directory / f'{module}.swiftmodule', '-emit-module-interface-path', directory / f'{module}.swiftinterface']
@@ -128,10 +128,10 @@ for mode in ['debug', 'release']:
 
 pool.shutdown()
 
-summary = dict(records=records, fixture_scope=manifest, limits=['CT012/018 prove production raw storage constraints; facade uses same checked storage', 'Generated facade fixtures compile as separate-module clients against actual expansion'], hashes={str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted([ROOT / 'Package.swift', ROOT / 'Scripts/check-compiler-fixtures.py', *ROOT.glob('Sources/**/*.swift'), *ROOT.glob('Tests/**/*.swift'), *ROOT.glob('ClientFixtures/**/*.swift'), ROOT / 'ClientFixtures/manifest.json'])})
+summary = dict(records=records, fixture_scope=manifest, limits=['CT012/018 prove production raw storage constraints. The facade uses the same checked storage.', 'Generated facade fixtures compile as separate-module clients against actual expansion.'], hashes={str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted([ROOT / 'Package.swift', ROOT / 'Scripts/check-compiler-fixtures.py', *ROOT.glob('Sources/**/*.swift'), *ROOT.glob('Tests/**/*.swift'), *ROOT.glob('ClientFixtures/**/*.swift'), ROOT / 'ClientFixtures/manifest.json'])})
 (output / 'results.json').write_text(json.dumps(summary, indent=2) + '\n')
 failed = [record['name'] for record in records if record['status'] != 'pass']
-print(f'{len(records) - len(failed)}/{len(records)} compiled records passed; final integration limits are recorded in results.json')
+print(f'{len(records) - len(failed)}/{len(records)} compiled records passed. Final integration limits are recorded in results.json')
 if failed:
     print('\n'.join(failed))
 sys.exit(bool(failed))

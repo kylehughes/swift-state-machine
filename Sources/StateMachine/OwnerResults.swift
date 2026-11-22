@@ -25,8 +25,8 @@ nonisolated public enum AcknowledgmentResult: Equatable, Hashable, Sendable {
 /// Every generated managed owner names this type `FlushResult`.
 nonisolated public enum FlushResult: Equatable, Hashable, Sendable {
     /// The owner processed every batch through the receipt. For a graph with operations, it has made
-    /// their cancellation and launch decisions; for one without, it has offered every snapshot through
-    /// the receipt to its subscriptions.
+    /// their cancellation and launch decisions. For one without operations, it has offered every
+    /// snapshot through the receipt to its subscriptions.
     case processed
     /// The receipt was issued by a different owner, so there was nothing to wait for.
     case foreignOwner

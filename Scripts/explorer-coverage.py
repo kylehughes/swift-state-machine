@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Aggregate the schedule explorer's interruption matrix coverage into the tables of Tests/ScheduleExplorer.md.
 
-A run of the explorer with `EXPLORER_COVERAGE=PATH` writes every matrix cell its armed callbacks reached, one
-`class|form|site|interrupt|phase|attempt|registration|origin` line each. A cell is recorded only when the armed event
-changed what the presentation or its registrations hold, and its phase, form, attempt (`current` or `earlier`) and
-registration state are those of the observation the callback concerns, read when the callback starts; `origin` is the
-top-level event it ran under. This script reads one or more such files, sets the reached cells against the cells that
-apply to each presentation class, and prints, in Markdown, each class's reached count and its site by phase table, the
-registration states and origins each phase was reached in, the applicable cells it did not reach, and the cells that
-do not apply, grouped by reason. The tables join the attempts, registration states and origins of the cells in each
-phase; `--cells PATH` also writes every distinct reached cell with all eight coordinates, one per line, so that no
-combination is lost to that join. Run the `matrix` family for each class, each into a file of its own, then aggregate
-them:
+A run with `EXPLORER_COVERAGE=PATH` writes every matrix cell reached by its armed callbacks, one
+`class|form|site|interrupt|phase|attempt|registration|origin` line each. The explorer records a cell
+only when the armed event changes what the presentation or its registrations hold. Its phase, form,
+attempt (`current` or `earlier`), and registration state come from the callback's target observation
+when the callback starts, and `origin` is the top-level event running it.
+
+This script reads one or more coverage files, compares reached cells against the applicable cells for
+each presentation class, and prints Markdown tables showing reached counts, site-by-phase matrices,
+registration states and origins per phase, unreached applicable cells, and inapplicable cells grouped
+by reason. Because the tables combine attempts, registration states, and origins within each phase,
+pass `--cells PATH` to write every distinct reached cell with all eight coordinates, one per line.
+
+Run the `matrix` family for each class into its own file, then aggregate the files:
 
     mkdir -p /tmp/state-machine-coverage
     for kind in SnapshotObservableObject SnapshotPresentation StateMachineObservableObject StateMachinePresentation; do
@@ -21,8 +23,9 @@ them:
     done
     python3 Scripts/explorer-coverage.py /tmp/state-machine-coverage/*.txt
 
-The applicability rules below restate the "Not applicable, by reason" table of Tests/ScheduleExplorer.md; a change to
-the matrix's forms, sites, interrupts or phases updates them, the explorer, and that document together.
+The applicability rules below restate the "Not applicable, by reason" table in Tests/ScheduleExplorer.md.
+Update these rules, the explorer, and that document together whenever the matrix's forms, sites,
+interrupts, or phases change.
 """
 import argparse
 import collections

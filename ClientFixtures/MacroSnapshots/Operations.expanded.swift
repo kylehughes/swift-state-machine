@@ -22,7 +22,7 @@ fileprivate struct _OperationKeyIsHashable<Value: Swift::Hashable & Swift::Senda
 fileprivate struct _EffectIsCopyable<Value> {
 }
 
-/// The schema, for generated code that names it where a value of its name could take the name.
+/// The schema type, used by generated code where a local value could shadow its name.
 public typealias _StateMachineSchema = Flow
 
 fileprivate typealias _StateMachineScopeID = StateMachine::RuntimeScopeID
@@ -342,13 +342,13 @@ public typealias Configuration = StateMachine::ManagedConfiguration
 /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
 public typealias LocalConfiguration = StateMachine::Limits
 
-/// A live observation registration; cancelling or releasing it stops delivery.
+/// A live observation registration. Cancelling or releasing it stops delivery.
 public typealias Subscription = StateMachine::SnapshotSubscription
 
-/// A live observation registration with an owner confined to the actor `Owner`; only that actor can cancel it, which removes it, and dropping it stops delivery.
+/// A live observation registration for an owner confined to `Owner`. Only that actor can cancel and remove it, and releasing it stops delivery.
 public typealias IsolatedSubscription<Owner: Swift::Actor> = StateMachine::IsolatedSnapshotSubscription<Owner>
 
-/// A live MainActor observation registration; cancelling or releasing it stops delivery.
+/// A live `MainActor` observation registration. Cancelling or releasing it stops delivery.
 public typealias MainActorSubscription = StateMachine::MainActorSnapshotSubscription
 
 /// Failure to register another live observer.
@@ -490,7 +490,7 @@ public enum Snapshot: Swift::Sendable, StateMachine::StateMachineSnapshot, Swift
     public var isClosed: Swift::Bool {
         record.isClosed
     }
-    /// Ordinary model data; constructing it confers no installation authority.
+    /// The ordinary model data. Constructing a model value directly confers no installation authority.
     public var model: Flow {
         record.model
     }
@@ -573,11 +573,11 @@ public enum Choose: Swift::Sendable, Swift::Equatable, Swift::Hashable, Swift::C
         case restart
         case keep
     }
-    /// The result of `choose` on an owned `Loaded`: one case per edge it may select.
+    /// The result of calling `choose` on an owned `Loaded`, with one case per edge it may select.
     public enum ChooseResult: ~Swift::Copyable, Swift::Sendable {
         case restart(Flow.Owned<Flow.Idle>)
     case keep(Flow.Owned<Flow.Loaded>)
-    /// The router declined; the source is returned unchanged.
+    /// The router declined and returned the source unchanged.
     case rejected(Flow.Problem, Flow.Owned<Flow.Loaded>)
     }
     /// The choice and owned result types of the routers from `Loaded`.
@@ -596,7 +596,7 @@ public struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swift
         edgeID = record.edge
     }
     /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
-    /// change that takes no edge: a reset, closure, or the authority-only commit of
+    /// change that takes no edge, such as a reset, closure, or the authority-only commit of
     /// `discardPending(id:)`.
     public let edgeID: Swift::String?
     /// The owner-lifetime accepted revision.
@@ -613,8 +613,8 @@ public struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swift
 public enum SendRejection: Swift::Error {
     /// Routing or the authored transition declined the input before a candidate existed.
     case preparation(PreparationRejection)
-    /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`);
-    /// read `snapshot()` for the current root.
+    /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`).
+    /// Read `snapshot()` for the current root.
     case commit(CommitRejection)
 }
 
@@ -697,7 +697,7 @@ public var input: Audit.Input {
 
 /// The sealed terminal result of one execution, which only its owner's `deliver` admits.
 public struct AuditCompletion: Swift::Sendable {
-    /// The value the operation produced; it cannot fail.
+    /// The value the operation produced. This operation cannot fail.
     public let value: Audit.Output
     /// What admission started the work with.
 public let request: AuditRequest
@@ -828,7 +828,8 @@ fileprivate static func _stateMachinePrepare(
 
 /// Routes an input against a historical snapshot, rejecting a missing phase edge explicitly.
 ///
-/// A plan defect is not a routing rejection: it travels inside the result, and admission reports it.
+/// A plan defect travels inside the returned `Prepared` value rather than throwing here, so
+/// admission reports it.
 public static func prepare(_ input: Input, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
     switch input {
     case .load(let input):
@@ -909,7 +910,7 @@ fileprivate static func _stateMachineCompletion(_ completion: Completion, on sna
     }
 }
 
-/// A phase saved data can restore: one in which no operation is active. A restored owner has no outstanding work.
+/// A phase that saved data can restore, covering phases with no active operations. A restored owner has no outstanding work.
 public enum Restoration: Swift::Sendable {
     case idle(Idle)
     case loaded(Loaded)
@@ -920,7 +921,7 @@ public enum Restoration: Swift::Sendable {
 public enum ResetRejection: Swift::Error {
     /// The `@Restoration` function rejected the saved data.
     case restoration(Problem)
-    /// The owner refused the reset: it is closed, its revisions are exhausted, or it had no queue slot for the reset's batch.
+    /// The owner refused the reset because it is closed, its revisions are exhausted, or it had no queue slot for the reset's batch.
     case commit(CommitRejection)
 }
 
@@ -947,7 +948,7 @@ public struct PendingCompletionID: Swift::Hashable, Swift::Sendable {
 
 /// A retained terminal outcome and its delivery diagnostics.
 ///
-/// The outcome is an inert value: only `reconcile(id:)`, `retryAdmission(id:)`, or
+/// The outcome is an inert value. Only `reconcile(id:)`, `retryAdmission(id:)`, or
 /// `discardPending(id:)` can settle the retained completion it describes.
 public struct PendingCompletion: Swift::Sendable {
     /// The retained terminal value of one operation, with the request its work was started with.
@@ -970,7 +971,7 @@ public struct PendingCompletion: Swift::Sendable {
     public let status: PendingStatus
     /// The last failed preparation or admission, when present.
     public let lastRejection: Rejection?
-    /// The saturating count of claimed preparations; capacity retries do not increment it.
+    /// The saturating count of claimed preparations. Capacity retries do not increment it.
     public let attempts: Swift::UInt64
     /// Whether the preparation count has reached its representable limit.
     public var attemptsSaturated: Swift::Bool {
@@ -1001,7 +1002,7 @@ public struct PendingCompletion: Swift::Sendable {
 public enum DeliveryResult: Swift::Sendable {
     /// The outcome committed.
     case committed(Receipt)
-    /// The outcome is retained; its status says what admission is waiting for.
+    /// The outcome is retained, and its status describes what admission is waiting for.
     case pending(PendingCompletionID, PendingStatus)
         /// This call prepared the outcome, and its routing or an authored function refused it, so the outcome
     /// is retained with status `reconciliationRequired`.
@@ -1019,7 +1020,7 @@ public enum DeliveryResult: Swift::Sendable {
 public enum ReconcileResult: Swift::Sendable {
     /// The retained outcome committed.
     case committed(Receipt)
-    /// The outcome is still retained; its status says what admission is waiting for.
+    /// The outcome is still retained, and its status describes what admission is waiting for.
     case pending(PendingCompletionID, PendingStatus)
         /// This call prepared the outcome, and its routing or an authored function refused it, so the outcome
     /// is retained with status `reconciliationRequired`.
@@ -1037,7 +1038,7 @@ public enum ReconcileResult: Swift::Sendable {
 public enum DiscardResult: Swift::Sendable {
     /// The authority-only commit revoked the operation and disposed of its outcome.
     case discarded(Receipt)
-    /// The owner refused the authority-only commit; the outcome stays retained.
+    /// The owner refused the authority-only commit, leaving the outcome retained.
     case rejected(CommitRejection)
     /// No outcome with this identity is retained.
     case notPending
@@ -1114,7 +1115,7 @@ public let isRetrying: Swift::Bool
 public enum ShutdownResult: Swift::Equatable, Swift::Sendable {
     /// Every execution, delivery, and preparation obligation settled.
     case quiescent
-    /// The deadline passed first; the diagnostics describe what was still outstanding.
+    /// The deadline passed first, and the diagnostics describe what remained outstanding.
     case timedOut(ShutdownDiagnostics)
     fileprivate init(_ raw: StateMachine::ShutdownDiagnostics?) {
         self = raw.map {
@@ -1265,7 +1266,7 @@ public typealias Input = Flow.Input
             return _stateMachineAdmission(result)
         }
     }
-    /// Routes, prepares and admits one input against the current root.
+    /// Routes, prepares, and admits one input against the current root.
     @discardableResult
     public mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
         let prepared: Prepared
@@ -1281,7 +1282,7 @@ public typealias Input = Flow.Input
             throw .commit(reason)
         }
     }
-    /// Transfers whole FIFO batches, at most `limit` of them; physical execution occurs after mutating access ends.
+    /// Transfers at most `limit` whole FIFO batches. Physical execution occurs after mutating access ends.
 public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
     engine.drain(limit: limit).map {
         _stateMachineBatch($0)
@@ -1308,7 +1309,7 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
     /// Retains the first outcome and attempts one typed preparation against the current root.
     ///
     /// This is the only way to submit a terminal outcome. A later outcome for the same work never
-    /// replaces the retained one; it reports that outcome's status instead.
+    /// replaces the retained one and reports the retained outcome's status instead.
     public mutating func deliver(_ completion: Completion) -> DeliveryResult {
         switch ledger.retain(completion, for: completion.authority, in: &engine) {
         case .stale:
@@ -1364,7 +1365,7 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
     }
     /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
     ///
-    /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
+    /// Draining and acknowledging never admit a retained completion. Call this after they free capacity.
     public mutating func retryAdmission(id: PendingCompletionID) -> ReconcileResult {
         _stateMachineFinish(ledger.retryAdmission(id.raw, in: &engine))
     }
@@ -1375,7 +1376,7 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
     /// Revokes one retained operation using an atomic authority-only commit.
     ///
     /// The operation's work already returned the outcome it settles, so the commit issues no
-    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+    /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
     public mutating func discardPending(id: PendingCompletionID) -> DiscardResult {
         guard let result = ledger.discard(id.raw, in: &engine) else {
         return .notPending
@@ -1404,7 +1405,7 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues a batch only to cancel the work it revokes, so it needs a slot only then.
+    /// full, leaving state unchanged. It queues a batch only to cancel the work it revokes, so it needs a slot only then.
     @discardableResult
     public mutating func reset(to initial: Idle = _StateMachineSchema.makeIdle()) throws(CommitRejection) -> Receipt {
         let result = engine.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)])
@@ -1420,9 +1421,10 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     public mutating func reset(to initial: Idle = _StateMachineSchema.makeIdle(), expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
         let result = engine.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record)
@@ -1434,8 +1436,8 @@ public mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
         throw reason
         }
     }
-    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
-    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    /// Replaces the model with the phase `restore` validates from saved data in a fresh
+    /// incarnation, as `reset(to:)` does. Restoring saved data never resumes prior work.
     @discardableResult
     public mutating func reset(restoring saved: Int) throws(ResetRejection) -> Receipt {
         let restored: (model: Flow, scopes: [StateMachine::RuntimeScopeID])
@@ -1479,7 +1481,7 @@ public var isQuiescent: Swift::Bool {
     }
 }
 
-/// Immutable operation selections whose non-Sendable values stay within MainActor.
+/// Immutable operation selections whose non-`Sendable` values stay on `MainActor`.
 @Swift::MainActor public struct MainActorDrivers {
     /// Executes this operation within the selected isolation.
 public let fetch: @Swift::MainActor (Fetch.Input) async -> Swift::Result<Fetch.Output, Fetch.Failure>
@@ -1492,29 +1494,29 @@ public let fetch: @Swift::MainActor (Fetch.Input) async -> Swift::Result<Fetch.O
     }
 }
 
-/// A sealed sole-writer MainActor owner with managed execution.
+/// A sealed sole-writer `MainActor` owner with managed execution.
 ///
-/// On iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, and Mac Catalyst 17 and later it is
-/// `Observable`, so a SwiftUI view can read it directly. Each tracked member registers a read of
-/// its own value only: `currentSnapshot` and `snapshot()`, `runningCount`, `subscriberCount`,
-/// and `pendingCompletions()`.
+/// On iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, and Mac Catalyst 17.0 and
+/// later, this owner conforms to `Observable` so a SwiftUI view can read it directly. Each
+/// tracked member registers a read of its own value only, covering `currentSnapshot` and `snapshot()`, `runningCount`,
+/// `subscriberCount`, and `pendingCompletions()`.
 @Swift::MainActor public final class MainActorHost: StateMachine::ObservableMainActorHost, StateMachine::MainActorStateMachineHost {
     private typealias Host = StateMachine::RuntimeMainActorHost<Flow, Effect, Completion, PreparationRejection>
     private let host: Host
     /// How this owner settles a retained completion that does not commit when it is delivered.
     ///
     /// `.retry` prepares a completion again against the newer state when another commit wins the
-    /// race. That is the same as the result arriving a moment later, when its edge would run
-    /// against the newer phase anyway; work that must not survive a change is revoked by the
-    /// edge's `invalidates:` instead. `.manual` never prepares a completion again on its own.
-    /// Either form can pass each completion that needs reconciliation to a handler.
+    /// race. That behaves like the result arriving a moment later, when its edge would run against
+    /// the newer phase anyway. Work that must not survive a change is revoked by the edge's
+    /// `invalidates:` instead. `.manual` never prepares a completion again on its own. Either form
+    /// can pass each completion that needs reconciliation to a handler.
     ///
     /// Initializers default to `.retry`.
     ///
-    /// A handler runs outside the owner's critical section each time a retained completion's
-    /// status becomes `reconciliationRequired`: its completion edge or router threw, its effect
-    /// plan is defective, the owner refused its admission, an explicit `reconcile(id:)` did not
-    /// commit, or, under `.manual`, its preparation lost a race. Settle it with
+    /// A handler runs outside the owner's critical section each time a retained completion enters
+    /// `reconciliationRequired`. This happens when its completion edge or router throws, its
+    /// effect plan is defective, the owner refuses its admission, an explicit `reconcile(id:)`
+    /// does not commit, or, under `.manual`, its preparation loses a race. Settle it with
     /// `reconcile(id:)` or `discardPending(id:)`.
     public struct CompletionPolicy {
         fileprivate let runtime: StateMachine::RuntimeCompletionPolicy
@@ -1529,8 +1531,8 @@ public let fetch: @Swift::MainActor (Fetch.Input) async -> Swift::Result<Fetch.O
         /// at most four times per turn before yielding to other work, and notifies no one.
         ///
         /// Choose it when every completion edge and router is deterministic and free of side
-        /// effects; the compiler does not check that. A completion retained for any other reason
-        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        /// effects, since the compiler does not enforce that. A completion retained for any other
+        /// reason stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var retry: CompletionPolicy {
         CompletionPolicy(.retry, handler: { _ in
             })
@@ -1540,15 +1542,15 @@ public let fetch: @Swift::MainActor (Fetch.Input) async -> Swift::Result<Fetch.O
         public static func retry(onReconciliationRequired handler: @escaping @Swift::MainActor (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.retry, handler: handler)
         }
-        /// Never prepares a completion again on its own, and notifies no one: every completion that
+        /// Never prepares a completion again on its own and notifies no one. Every completion that
         /// needs reconciliation, including one whose preparation lost a race with another commit,
         /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var manual: CompletionPolicy {
         CompletionPolicy(.manual, handler: { _ in
             })
     }
-        /// Never prepares a completion again on its own: every completion that needs reconciliation,
-        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        /// Never prepares a completion again on its own. Every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, is passed to `handler`.
         public static func manual(onReconciliationRequired handler: @escaping @Swift::MainActor (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.manual, handler: handler)
         }
@@ -1620,15 +1622,15 @@ public let fetch: @Swift::MainActor (Fetch.Input) async -> Swift::Result<Fetch.O
         try self.init(restoring: saved, drivers: MainActorDrivers(fetch: fetchDriver, audit: auditDriver),
             configuration: configuration, completionPolicy: completionPolicy)
     }
-    /// Captures a complete historical observation; reading it registers a read of the snapshot with Observation.
+    /// Captures a complete historical observation. Reading it registers a snapshot read with Observation.
     public func snapshot() -> Snapshot {
         _stateMachineSnapshot(host.snapshot())
     }
-    /// The current complete snapshot; reading it registers a read of the snapshot with Observation.
+    /// The current complete snapshot. Reading it registers a snapshot read with Observation.
 public var currentSnapshot: Snapshot {
         _stateMachineSnapshot(host.snapshot())
     }
-    /// Routes, prepares and admits one input in a single isolated turn without suspension.
+    /// Routes, prepares, and admits one input in a single isolated turn without suspension.
     @discardableResult
     public func send(_ input: Input) throws(SendRejection) -> Receipt {
         let result = host.prepareAndCommit { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
@@ -1663,7 +1665,7 @@ public var currentSnapshot: Snapshot {
             return _stateMachineAdmission(host.reject(defect))
         }
     }
-    /// Subscribes to initial, accepted and terminal complete snapshots, taking a subscriber slot when called.
+    /// Subscribes to initial, accepted, and terminal complete snapshots, taking a subscriber slot when called.
     public func subscribe(_ receive: @escaping @Swift::MainActor (Snapshot) -> Swift::Void,
         onFinish: @escaping @Swift::MainActor () -> Swift::Void = {
         }) throws(SubscriptionFailure) -> MainActorSubscription {
@@ -1675,8 +1677,8 @@ public var currentSnapshot: Snapshot {
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func snapshots() throws(SubscriptionFailure) -> Snapshots {
         try host.sendableSnapshots {
             _stateMachineSnapshot($0)
@@ -1747,13 +1749,13 @@ public func pendingCompletions() -> [PendingCompletion] {
     }
     /// Registers a single-pass sequence of the retained completions, each element the whole collection, taking a subscriber slot when called.
     ///
-    /// The first element is the collection current at registration, and each later one the
-    /// collection after a change to it, in the order of those changes; a newer collection
-    /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
-    /// It also ends when this owner is released, when its `cancel()` is called, or when a
-    /// read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// The first element is the collection current at registration, and each later element is the
+    /// collection after a change, in the order of those changes. A newer collection replaces one
+    /// not yet read. Closing delivers a final, empty collection, and it then ends. It also ends
+    /// when this owner is released, when its `cancel()` is called, or when a read finds its
+    /// task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func pendingCompletionUpdates() throws(SubscriptionFailure) -> PendingCompletionUpdates {
         try host.sendablePendingCompletionUpdates {
         $0.map(PendingCompletion.init)
@@ -1778,7 +1780,7 @@ public func pendingCompletions() -> [PendingCompletion] {
     /// Revokes retained delivery with an authority-only admission.
     ///
     /// The operation's work already returned the outcome it settles, so the commit issues no
-    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+    /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
     public func discardPending(id: PendingCompletionID) -> DiscardResult {
         Self.discarded(host.discardPending(id: id.raw))
     }
@@ -1823,7 +1825,7 @@ public func pendingCompletions() -> [PendingCompletion] {
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle()) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)])
@@ -1838,9 +1840,10 @@ public func pendingCompletions() -> [PendingCompletion] {
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle(), expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record)
@@ -1851,8 +1854,8 @@ public func pendingCompletions() -> [PendingCompletion] {
         throw reason
         }
     }
-    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
-    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    /// Replaces the model with the phase `restore` validates from saved data in a fresh
+    /// incarnation, as `reset(to:)` does. Restoring saved data never resumes prior work.
     @discardableResult
     public func reset(restoring saved: Int) throws(ResetRejection) -> Receipt {
         let restored: (model: Flow, scopes: [StateMachine::RuntimeScopeID])
@@ -1894,9 +1897,9 @@ public func flush(through receipt: Receipt) async -> FlushResult {
     }
     /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     public func shutdown(deadline: Swift::ContinuousClock.Instant? = nil) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline))
@@ -1905,7 +1908,7 @@ public func flush(through receipt: Receipt) async -> FlushResult {
     public var runningCount: Swift::Int {
         host.runningCount
     }
-    /// Live observer registrations; reading it registers a read of the count with Observation.
+    /// The count of live observer registrations. Reading it registers a count read with Observation.
     public var subscriberCount: Swift::Int {
         host.subscriberCount
     }
@@ -1935,17 +1938,17 @@ public final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHost
     /// How this owner settles a retained completion that does not commit when it is delivered.
     ///
     /// `.retry` prepares a completion again against the newer state when another commit wins the
-    /// race. That is the same as the result arriving a moment later, when its edge would run
-    /// against the newer phase anyway; work that must not survive a change is revoked by the
-    /// edge's `invalidates:` instead. `.manual` never prepares a completion again on its own.
-    /// Either form can pass each completion that needs reconciliation to a handler.
+    /// race. That behaves like the result arriving a moment later, when its edge would run against
+    /// the newer phase anyway. Work that must not survive a change is revoked by the edge's
+    /// `invalidates:` instead. `.manual` never prepares a completion again on its own. Either form
+    /// can pass each completion that needs reconciliation to a handler.
     ///
     /// Initializers default to `.retry`.
     ///
-    /// A handler runs outside the owner's critical section each time a retained completion's
-    /// status becomes `reconciliationRequired`: its completion edge or router threw, its effect
-    /// plan is defective, the owner refused its admission, an explicit `reconcile(id:)` did not
-    /// commit, or, under `.manual`, its preparation lost a race. Settle it with
+    /// A handler runs outside the owner's critical section each time a retained completion enters
+    /// `reconciliationRequired`. This happens when its completion edge or router throws, its
+    /// effect plan is defective, the owner refuses its admission, an explicit `reconcile(id:)`
+    /// does not commit, or, under `.manual`, its preparation loses a race. Settle it with
     /// `reconcile(id:)` or `discardPending(id:)`.
     public struct CompletionPolicy: Swift::Sendable {
         fileprivate let runtime: StateMachine::RuntimeCompletionPolicy
@@ -1960,8 +1963,8 @@ public final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHost
         /// at most four times per turn before yielding to other work, and notifies no one.
         ///
         /// Choose it when every completion edge and router is deterministic and free of side
-        /// effects; the compiler does not check that. A completion retained for any other reason
-        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        /// effects, since the compiler does not enforce that. A completion retained for any other
+        /// reason stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var retry: CompletionPolicy {
         CompletionPolicy(.retry, handler: { _ in
             })
@@ -1971,15 +1974,15 @@ public final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHost
         public static func retry(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.retry, handler: handler)
         }
-        /// Never prepares a completion again on its own, and notifies no one: every completion that
+        /// Never prepares a completion again on its own and notifies no one. Every completion that
         /// needs reconciliation, including one whose preparation lost a race with another commit,
         /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var manual: CompletionPolicy {
         CompletionPolicy(.manual, handler: { _ in
             })
     }
-        /// Never prepares a completion again on its own: every completion that needs reconciliation,
-        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        /// Never prepares a completion again on its own. Every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, is passed to `handler`.
         public static func manual(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.manual, handler: handler)
         }
@@ -2067,8 +2070,8 @@ public final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHost
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func snapshots() throws(SubscriptionFailure) -> Snapshots {
         try host.snapshots {
             _stateMachineSnapshot($0)
@@ -2133,7 +2136,7 @@ public final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHost
     }
     }
     #endif
-    /// Routes, prepares and admits one input in a single attempt.
+    /// Routes, prepares, and admits one input in a single attempt.
     ///
     /// Preparation runs outside the lock against one snapshot and is never repeated, so
     /// a concurrent commit surfaces as `.commit(.conflict)` for the caller to resolve.
@@ -2167,13 +2170,13 @@ public func pendingCompletions() -> [PendingCompletion] {
     }
     /// Registers a single-pass sequence of the retained completions, each element the whole collection, taking a subscriber slot when called.
     ///
-    /// The first element is the collection current at registration, and each later one the
-    /// collection after a change to it, in the order of those changes; a newer collection
-    /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
-    /// It also ends when this owner is released, when its `cancel()` is called, or when a
-    /// read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// The first element is the collection current at registration, and each later element is the
+    /// collection after a change, in the order of those changes. A newer collection replaces one
+    /// not yet read. Closing delivers a final, empty collection, and it then ends. It also ends
+    /// when this owner is released, when its `cancel()` is called, or when a read finds its
+    /// task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func pendingCompletionUpdates() throws(SubscriptionFailure) -> PendingCompletionUpdates {
         try host.pendingCompletionUpdates {
         $0.map(PendingCompletion.init)
@@ -2198,7 +2201,7 @@ public func pendingCompletions() -> [PendingCompletion] {
     /// Revokes retained delivery with an authority-only admission.
     ///
     /// The operation's work already returned the outcome it settles, so the commit issues no
-    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+    /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
     public func discardPending(id: PendingCompletionID) -> DiscardResult {
         Self.discarded(host.discardPending(id: id.raw))
     }
@@ -2243,7 +2246,7 @@ public func pendingCompletions() -> [PendingCompletion] {
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle()) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)])
@@ -2258,9 +2261,10 @@ public func pendingCompletions() -> [PendingCompletion] {
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle(), expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record)
@@ -2271,8 +2275,8 @@ public func pendingCompletions() -> [PendingCompletion] {
         throw reason
         }
     }
-    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
-    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    /// Replaces the model with the phase `restore` validates from saved data in a fresh
+    /// incarnation, as `reset(to:)` does. Restoring saved data never resumes prior work.
     @discardableResult
     public func reset(restoring saved: Int) throws(ResetRejection) -> Receipt {
         let restored: (model: Flow, scopes: [StateMachine::RuntimeScopeID])
@@ -2314,9 +2318,9 @@ public func flush(through receipt: Receipt) async -> FlushResult {
     }
     /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     public func shutdown(deadline: Swift::ContinuousClock.Instant? = nil) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline))
@@ -2342,17 +2346,17 @@ public final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachineHo
     /// How this owner settles a retained completion that does not commit when it is delivered.
     ///
     /// `.retry` prepares a completion again against the newer state when another commit wins the
-    /// race. That is the same as the result arriving a moment later, when its edge would run
-    /// against the newer phase anyway; work that must not survive a change is revoked by the
-    /// edge's `invalidates:` instead. `.manual` never prepares a completion again on its own.
-    /// Either form can pass each completion that needs reconciliation to a handler.
+    /// race. That behaves like the result arriving a moment later, when its edge would run against
+    /// the newer phase anyway. Work that must not survive a change is revoked by the edge's
+    /// `invalidates:` instead. `.manual` never prepares a completion again on its own. Either form
+    /// can pass each completion that needs reconciliation to a handler.
     ///
     /// Initializers default to `.retry`.
     ///
-    /// A handler runs outside the owner's critical section each time a retained completion's
-    /// status becomes `reconciliationRequired`: its completion edge or router threw, its effect
-    /// plan is defective, the owner refused its admission, an explicit `reconcile(id:)` did not
-    /// commit, or, under `.manual`, its preparation lost a race. Settle it with
+    /// A handler runs outside the owner's critical section each time a retained completion enters
+    /// `reconciliationRequired`. This happens when its completion edge or router throws, its
+    /// effect plan is defective, the owner refuses its admission, an explicit `reconcile(id:)`
+    /// does not commit, or, under `.manual`, its preparation loses a race. Settle it with
     /// `reconcile(id:)` or `discardPending(id:)`.
     public struct CompletionPolicy: Swift::Sendable {
         fileprivate let runtime: StateMachine::RuntimeCompletionPolicy
@@ -2367,8 +2371,8 @@ public final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachineHo
         /// at most four times per turn before yielding to other work, and notifies no one.
         ///
         /// Choose it when every completion edge and router is deterministic and free of side
-        /// effects; the compiler does not check that. A completion retained for any other reason
-        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        /// effects, since the compiler does not enforce that. A completion retained for any other
+        /// reason stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var retry: CompletionPolicy {
         CompletionPolicy(.retry, handler: { _ in
             })
@@ -2378,23 +2382,23 @@ public final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachineHo
         public static func retry(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.retry, handler: handler)
         }
-        /// Never prepares a completion again on its own, and notifies no one: every completion that
+        /// Never prepares a completion again on its own and notifies no one. Every completion that
         /// needs reconciliation, including one whose preparation lost a race with another commit,
         /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var manual: CompletionPolicy {
         CompletionPolicy(.manual, handler: { _ in
             })
     }
-        /// Never prepares a completion again on its own: every completion that needs reconciliation,
-        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        /// Never prepares a completion again on its own. Every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, is passed to `handler`.
         public static func manual(onReconciliationRequired handler: @escaping @Sendable (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.manual, handler: handler)
         }
     }
         /// Creates fresh authority and immutable execution selections.
     ///
-    /// With `isolatedTo`, the owner's actor runs on that actor's serial executor, so their turns
-    /// never overlap; calls into the owner still await.
+    /// With `isolatedTo`, the owner's actor runs on that actor's serial executor so their turns
+    /// never overlap, though calls into the owner still await.
         public init(_ initial: Idle = _StateMachineSchema.makeIdle(), drivers: Drivers, configuration: Configuration = .default, completionPolicy: CompletionPolicy = .retry, isolatedTo: (any Swift::Actor)? = nil) {
             host = Host(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)], configuration: configuration,
                 policy: completionPolicy.runtime, driver: { raw in
@@ -2468,7 +2472,7 @@ public final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachineHo
         _stateMachineSnapshot(await host.snapshot())
     }
 
-    /// Routes, prepares and admits one input in a single isolated turn without suspension.
+    /// Routes, prepares, and admits one input in a single isolated turn without suspension.
     @discardableResult
     public func send(_ input: Input) async throws(SendRejection) -> Receipt {
         let result = await host.prepareAndCommit { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
@@ -2503,7 +2507,7 @@ public final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachineHo
             return _stateMachineAdmission(await host.reject(defect))
         }
     }
-    /// Subscribes to initial, accepted and terminal complete snapshots, taking a subscriber slot when called.
+    /// Subscribes to initial, accepted, and terminal complete snapshots, taking a subscriber slot when called.
     public func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Swift::Void,
         onFinish: @escaping @Sendable () -> Swift::Void = {
         }) async throws(SubscriptionFailure) -> Subscription {
@@ -2515,8 +2519,8 @@ public final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachineHo
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func snapshots() async throws(SubscriptionFailure) -> Snapshots {
         try await host.snapshots {
             _stateMachineSnapshot($0)
@@ -2587,13 +2591,13 @@ public func pendingCompletions() async -> [PendingCompletion] {
     }
     /// Registers a single-pass sequence of the retained completions, each element the whole collection, taking a subscriber slot when called.
     ///
-    /// The first element is the collection current at registration, and each later one the
-    /// collection after a change to it, in the order of those changes; a newer collection
-    /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
-    /// It also ends when this owner is released, when its `cancel()` is called, or when a
-    /// read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// The first element is the collection current at registration, and each later element is the
+    /// collection after a change, in the order of those changes. A newer collection replaces one
+    /// not yet read. Closing delivers a final, empty collection, and it then ends. It also ends
+    /// when this owner is released, when its `cancel()` is called, or when a read finds its
+    /// task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func pendingCompletionUpdates() async throws(SubscriptionFailure) -> PendingCompletionUpdates {
         try await host.pendingCompletionUpdates {
         $0.map(PendingCompletion.init)
@@ -2618,7 +2622,7 @@ public func pendingCompletions() async -> [PendingCompletion] {
     /// Revokes retained delivery with an authority-only admission.
     ///
     /// The operation's work already returned the outcome it settles, so the commit issues no
-    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+    /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
     public func discardPending(id: PendingCompletionID) async -> DiscardResult {
         Self.discarded(await host.discardPending(id: id.raw))
     }
@@ -2663,7 +2667,7 @@ public func pendingCompletions() async -> [PendingCompletion] {
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle()) async throws(CommitRejection) -> Receipt {
         let result = await host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)])
@@ -2678,9 +2682,10 @@ public func pendingCompletions() async -> [PendingCompletion] {
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle(), expecting expected: Snapshot) async throws(CommitRejection) -> Receipt {
         let result = await host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record)
@@ -2691,8 +2696,8 @@ public func pendingCompletions() async -> [PendingCompletion] {
         throw reason
         }
     }
-    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
-    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    /// Replaces the model with the phase `restore` validates from saved data in a fresh
+    /// incarnation, as `reset(to:)` does. Restoring saved data never resumes prior work.
     @discardableResult
     public func reset(restoring saved: Int) async throws(ResetRejection) -> Receipt {
         let restored: (model: Flow, scopes: [StateMachine::RuntimeScopeID])
@@ -2734,9 +2739,9 @@ public func flush(through receipt: Receipt) async -> FlushResult {
     }
     /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     public func shutdown(deadline: Swift::ContinuousClock.Instant? = nil) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline))
@@ -2747,7 +2752,7 @@ public func flush(through receipt: Receipt) async -> FlushResult {
             await host.runningCount
         }
     }
-    /// Live observer registrations.
+    /// The count of live observer registrations.
     public var subscriberCount: Swift::Int {
         get async {
             await host.subscriberCount
@@ -2765,8 +2770,8 @@ public func flush(through receipt: Receipt) async -> FlushResult {
 ///
 /// Create it on the actor that owns it, as `IsolatedHost(isolation: self, …)`, and keep it there.
 /// It is not `Sendable`, so the compiler keeps it in that actor's region, and every method takes
-/// the actor as a defaulted `isolated` parameter: inside the actor a call reads `host.send(input)`,
-/// and a call from another actor or a nonisolated context does not compile. A method that receives
+/// the actor as a defaulted `isolated` parameter. Inside the actor, calls read `host.send(input)`,
+/// while calls from another actor or a nonisolated context do not compile. A method that receives
 /// a different instance of the actor's type stops the program.
 ///
 /// Drivers run on the owning actor and receive it isolated, so they can read and
@@ -2774,10 +2779,11 @@ public func flush(through receipt: Receipt) async -> FlushResult {
 /// Its observation callbacks and the completion policy's handler run there too.
 ///
 /// The host holds its actor weakly, so an idle actor that stores it is released with it. A running
-/// driver retains the actor, because it runs on it; `close()` or `shutdown()` requests the drivers'
-/// cancellation, and the actor is released after each driver returns. A closure that captures the
-/// actor keeps it alive while the host or registration holding the closure lasts, so a driver or
-/// handler, which the host holds for its lifetime, should use the actor it receives instead.
+/// driver retains the actor while it runs on it. Calling `close()` or `shutdown()` requests
+/// cancellation of running drivers, and the actor is released after each driver returns. A closure
+/// that captures the actor keeps it alive while the host or registration holding the closure lasts,
+/// so a driver or handler, which the host holds for its lifetime, should use the actor it receives
+/// instead.
 public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStateMachineHost {
     private typealias Host = StateMachine::RuntimeIsolatedHost<Owner, Flow, Effect, Completion, PreparationRejection>
     private let host: Host
@@ -2798,17 +2804,17 @@ public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStat
     /// How this owner settles a retained completion that does not commit when it is delivered.
     ///
     /// `.retry` prepares a completion again against the newer state when another commit wins the
-    /// race. That is the same as the result arriving a moment later, when its edge would run
-    /// against the newer phase anyway; work that must not survive a change is revoked by the
-    /// edge's `invalidates:` instead. `.manual` never prepares a completion again on its own.
-    /// Either form can pass each completion that needs reconciliation to a handler.
+    /// race. That behaves like the result arriving a moment later, when its edge would run against
+    /// the newer phase anyway. Work that must not survive a change is revoked by the edge's
+    /// `invalidates:` instead. `.manual` never prepares a completion again on its own. Either form
+    /// can pass each completion that needs reconciliation to a handler.
     ///
     /// Initializers default to `.retry`.
     ///
-    /// A handler runs outside the owner's critical section each time a retained completion's
-    /// status becomes `reconciliationRequired`: its completion edge or router threw, its effect
-    /// plan is defective, the owner refused its admission, an explicit `reconcile(id:)` did not
-    /// commit, or, under `.manual`, its preparation lost a race. Settle it with
+    /// A handler runs outside the owner's critical section each time a retained completion enters
+    /// `reconciliationRequired`. This happens when its completion edge or router throws, its
+    /// effect plan is defective, the owner refuses its admission, an explicit `reconcile(id:)`
+    /// does not commit, or, under `.manual`, its preparation loses a race. Settle it with
     /// `reconcile(id:)` or `discardPending(id:)`.
     public struct CompletionPolicy {
         fileprivate let runtime: StateMachine::RuntimeCompletionPolicy
@@ -2823,8 +2829,8 @@ public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStat
         /// at most four times per turn before yielding to other work, and notifies no one.
         ///
         /// Choose it when every completion edge and router is deterministic and free of side
-        /// effects; the compiler does not check that. A completion retained for any other reason
-        /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+        /// effects, since the compiler does not enforce that. A completion retained for any other
+        /// reason stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var retry: CompletionPolicy {
         CompletionPolicy(.retry, handler: { _ in
             })
@@ -2834,15 +2840,15 @@ public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStat
         public static func retry(onReconciliationRequired handler: @escaping (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.retry, handler: handler)
         }
-        /// Never prepares a completion again on its own, and notifies no one: every completion that
+        /// Never prepares a completion again on its own and notifies no one. Every completion that
         /// needs reconciliation, including one whose preparation lost a race with another commit,
         /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
         public static var manual: CompletionPolicy {
         CompletionPolicy(.manual, handler: { _ in
             })
     }
-        /// Never prepares a completion again on its own: every completion that needs reconciliation,
-        /// including one whose preparation lost a race with another commit, goes to `handler`.
+        /// Never prepares a completion again on its own. Every completion that needs reconciliation,
+        /// including one whose preparation lost a race with another commit, is passed to `handler`.
         public static func manual(onReconciliationRequired handler: @escaping (PendingCompletion) -> Swift::Void) -> CompletionPolicy {
             CompletionPolicy(.manual, handler: handler)
         }
@@ -2920,7 +2926,7 @@ public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStat
     public func snapshot(isolation: isolated Owner = #isolation) -> Snapshot {
         _stateMachineSnapshot(host.snapshot(isolation: isolation))
     }
-    /// Routes, prepares and admits one input in a single turn of the owning actor, without suspension.
+    /// Routes, prepares, and admits one input in a single turn of the owning actor, without suspension.
     @discardableResult
     public func send(_ input: Input, isolation: isolated Owner = #isolation) throws(SendRejection) -> Receipt {
         let result = host.prepareAndCommit(isolation: isolation) { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
@@ -2955,15 +2961,15 @@ public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStat
             return _stateMachineAdmission(host.reject(defect, isolation: isolation))
         }
     }
-    /// Subscribes to initial, accepted and terminal complete snapshots, delivered on the owning actor, taking a subscriber slot when called.
+    /// Subscribes to initial, accepted, and terminal complete snapshots, delivered on the owning actor, taking a subscriber slot when called.
     ///
     /// The registration stays in the owning actor's region, and only that actor can cancel it, which
     /// removes the registration before returning, so none of its callbacks begins afterward. Cancelling
-    /// releases the callbacks before it returns, except while this owner is delivering a change, as when
-    /// another observer's callback cancels: that delivery keeps the callbacks it selected until it has
-    /// delivered the change to its other observers, and releases them then. Dropping the registration
-    /// stops delivery and frees its slot at once; this owner releases its callbacks when it next sweeps
-    /// its registrations or is destroyed.
+    /// releases the callbacks before it returns, except while this owner is delivering a change, such
+    /// as when another observer's callback cancels. That delivery keeps the callbacks it selected until
+    /// it finishes delivering the change to its other observers, and releases them then. Dropping the
+    /// registration stops delivery and frees its slot at once, and this owner releases its callbacks
+    /// when it next sweeps its registrations or is destroyed.
     public func subscribe(_ receive: @escaping (Snapshot) -> Swift::Void,
         onFinish: @escaping () -> Swift::Void = {
         }, isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> IsolatedSubscription<Owner> {
@@ -2975,8 +2981,8 @@ public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStat
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func snapshots(isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> Snapshots {
         try host.sendableSnapshots({
                 _stateMachineSnapshot($0)
@@ -2987,7 +2993,7 @@ public final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedStat
     /// `transform` runs on the owning actor when a snapshot is delivered, and the sequence offers
     /// each projection, equal to the one before it or not. It supports every `AsyncSequence`
     /// operator and may be consumed anywhere. `distinctSnapshots(_:)` omits repeated values instead.
-    /// Ending it on another actor stops delivery and frees its slot at once; this owner releases
+    /// Ending it on another actor stops delivery and frees its slot at once, and this owner releases
     /// `transform` when it next sweeps its registrations or is destroyed.
     public func snapshots<Projection: Swift::Sendable>(
         _ transform: @escaping (Snapshot) -> Projection, isolation: isolated Owner = #isolation
@@ -3014,13 +3020,13 @@ public func pendingCompletions(isolation: isolated Owner = #isolation) -> [Pendi
     }
     /// Registers a single-pass sequence of the retained completions, each element the whole collection, taking a subscriber slot when called.
     ///
-    /// The first element is the collection current at registration, and each later one the
-    /// collection after a change to it, in the order of those changes; a newer collection
-    /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
-    /// It also ends when this owner is released, when its `cancel()` is called, or when a
-    /// read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// The first element is the collection current at registration, and each later element is the
+    /// collection after a change, in the order of those changes. A newer collection replaces one
+    /// not yet read. Closing delivers a final, empty collection, and it then ends. It also ends
+    /// when this owner is released, when its `cancel()` is called, or when a read finds its
+    /// task cancelled. A consumer that keeps it after it stops reading
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     public func pendingCompletionUpdates(isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> PendingCompletionUpdates {
         try host.sendablePendingCompletionUpdates({
             $0.map(PendingCompletion.init)
@@ -3045,7 +3051,7 @@ public func pendingCompletions(isolation: isolated Owner = #isolation) -> [Pendi
     /// Revokes retained delivery with an authority-only admission.
     ///
     /// The operation's work already returned the outcome it settles, so the commit issues no
-    /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+    /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
     public func discardPending(id: PendingCompletionID, isolation: isolated Owner = #isolation) -> DiscardResult {
         Self.discarded(host.discardPending(id: id.raw, isolation: isolation))
     }
@@ -3090,7 +3096,7 @@ public func pendingCompletions(isolation: isolated Owner = #isolation) -> [Pendi
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle(), isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)], isolation: isolation)
@@ -3105,9 +3111,10 @@ public func pendingCompletions(isolation: isolated Owner = #isolation) -> [Pendi
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     public func reset(to initial: Idle = _StateMachineSchema.makeIdle(), expecting expected: Snapshot, isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [_StateMachineScopeID(kind: 1)], expecting: expected.record, isolation: isolation)
@@ -3118,8 +3125,8 @@ public func pendingCompletions(isolation: isolated Owner = #isolation) -> [Pendi
         throw reason
         }
     }
-    /// Replaces the model with the phase `restore` validates from saved data, in a fresh
-    /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+    /// Replaces the model with the phase `restore` validates from saved data in a fresh
+    /// incarnation, as `reset(to:)` does. Restoring saved data never resumes prior work.
     @discardableResult
     public func reset(restoring saved: Int, isolation: isolated Owner = #isolation) throws(ResetRejection) -> Receipt {
         let restored: (model: Flow, scopes: [StateMachine::RuntimeScopeID])
@@ -3161,9 +3168,9 @@ public func flush(through receipt: Receipt, isolation: isolated Owner = #isolati
     }
     /// Closes admission, then waits until every execution, delivery, and preparation obligation settles.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     public func shutdown(deadline: Swift::ContinuousClock.Instant? = nil, isolation: isolated Owner = #isolation) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline, isolation: isolation))

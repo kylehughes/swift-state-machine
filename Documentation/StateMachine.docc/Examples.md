@@ -8,7 +8,7 @@ fixtures, and iOS check app use them, and no product publishes them, so read
 them in the source tree rather than importing them. Each file is one
 self-contained workflow.
 
-These declare graphs with the macros:
+## Macro-declared graphs
 
 - `GeneratedProfile.swift` loads a profile with two operations under a load
   scope that also requires an authentication scope, revokes a running load when
@@ -29,7 +29,7 @@ These declare graphs with the macros:
 - `GeneratedNote.swift` declares an isolated schema whose payloads and results
   are not `Sendable`, for a `MainActorHost` or an `IsolatedHost`.
 
-These build on the generated owners or the raw runtime:
+## Generated owners and raw runtime
 
 - `ProfileEditor.swift` wraps a presentation over a `MainActor` host for one
   screen, with named load, refresh, retry, cancel, and account-change actions.
@@ -44,9 +44,9 @@ These build on the generated owners or the raw runtime:
 - `ValueWorkflow.swift` shows an owned workflow over ordinary value data that
   returns two ordered effect descriptions.
 
-These support the profile workflows:
+## Supporting files for the profile workflows
 
 - `ProfileValues.swift` holds the validated request and response values the
   profile workflows share.
-- `ProfileNetwork.swift` holds a URLSession driver and a controllable fake that
-  ignores cancellation until a test completes it.
+- `ProfileNetwork.swift` holds a `URLSession` driver and a controllable fake
+  that ignores cancellation until a test completes it.

@@ -3,7 +3,7 @@
 /// It behaves as ``MainActorControlledDriver`` does, for a keyed operation of a `MainActorHost` whose
 /// inputs and outputs need not be `Sendable`, and each call also carries the key the host started it
 /// for, as a ``KeyedControlledDriver`` call does. Pass its `run` method as the operation's driver, and
-/// take each key's call with ``nextStarted(for:fileID:filePath:line:column:)`` on the main actor:
+/// take each key's call with ``nextStarted(for:fileID:filePath:line:column:)`` on the main actor.
 ///
 /// ```swift
 /// let download = KeyedMainActorControlledDriver<Int, String, String, GeneratedTransfers.TransferFailure>()
@@ -15,10 +15,10 @@
 /// ```
 ///
 /// A host starts each execution in its own task, so calls for different keys can reach the driver in
-/// either order; a wait for one key leaves the others queued. Key equality runs on the main actor, and
-/// a comparison that starts another call or wait, or cancels the waiting task, cannot reorder the
-/// queue: matching follows ``KeyedIsolatedControlledDriver``, whose owning actor is the main actor
-/// here.
+/// either order, while a wait for one key leaves the others queued. Key equality runs on the main
+/// actor, and a comparison that starts another call or wait, or cancels the waiting task, cannot
+/// reorder the queue because matching follows ``KeyedIsolatedControlledDriver`` with the main actor
+/// as its owning actor.
 @MainActor public final class KeyedMainActorControlledDriver<Key: Hashable & Sendable, Input, Output, Failure: Error> {
     /// One started execution of the operation for one key, which the test finishes on the main actor.
     @MainActor public final class Call {
@@ -39,7 +39,7 @@
         /// Whether the host has cancelled this execution's task.
         public var isCancelled: Bool { completion.signal.isCancelled }
 
-        /// Ends the execution with `result`; it reports `false` and changes nothing if it already ended.
+        /// Ends the execution with `result`, returning `false` without changing anything if it already ended.
         ///
         /// The result stays on the main actor, where the suspended driver reads it once it resumes, so
         /// an output may share state with the input or with other main-actor values.
@@ -127,7 +127,7 @@
         )
     }
 
-    /// The driver of a fallible keyed operation: it waits until the test finishes the call.
+    /// Runs as the driver of a fallible keyed operation, waiting until the test finishes the call.
     public func run(_ key: Key, _ input: Input) async -> Result<Output, Failure> {
         let call = Call(key: key, input: input)
         let calls = calls
@@ -136,7 +136,7 @@
 }
 
 extension KeyedMainActorControlledDriver where Failure == Never {
-    /// The driver of a keyed operation that cannot fail: it returns the output the test supplies.
+    /// Runs as the driver of a keyed operation that cannot fail, returning the output the test supplies.
     public func run(_ key: Key, _ input: Input) async -> Output {
         switch await run(key, input) as Result<Output, Never> {
         case .success(let output): output

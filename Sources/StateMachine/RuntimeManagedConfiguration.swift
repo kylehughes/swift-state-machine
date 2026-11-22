@@ -6,7 +6,7 @@ nonisolated public struct ManagedConfiguration: Sendable {
     public let limits: Limits
     /// The maximum number of live serial callback registrations.
     public let subscriberCapacity: Int
-    /// The documented defaults: 256 batches, 64 descriptors, 256 executions, and 128 subscriptions.
+    /// The documented defaults of 256 batches, 64 descriptors, 256 executions, and 128 subscriptions.
     public static let `default` = ManagedConfiguration(validatedLimits: .default, subscribers: 128)
 
     private init(validatedLimits: Limits, subscribers: Int) {

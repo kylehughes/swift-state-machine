@@ -1273,7 +1273,7 @@
   {
     "id": "GMT-deprecated-rename-target",
     "pattern": "Write the bare name of the replacement edge in 'renamed:'",
-    "scope": "a rename is accepted only as the bare name of another edge with a generated method wherever the deprecated one has, so the fix-it's call compiles; a qualified or labelled target is refused at its string"
+    "scope": "a rename is accepted only as the bare name of another edge with a generated method wherever the deprecated one has, so the fix-it's call compiles. A qualified or labeled target is refused at its string"
   },
   {
     "id": "GMT-schema-named-value",

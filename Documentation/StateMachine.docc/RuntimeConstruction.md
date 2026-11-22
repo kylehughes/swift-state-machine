@@ -4,13 +4,14 @@ Keep the reusable admission engine separate from a domain's sealed API.
 
 The `Runtime*` types in this article support generated code and carry no
 source-stability promise. A graph declared with the macros uses its generated
-owners and never names them. Read this article to learn what a generated owner
-relies on, not as a public construction API.
+owners and never names them. Read this article to understand what a generated
+owner relies on rather than as a public construction API.
 
-``RuntimeState`` holds a complete value record: model data, retained identities,
-active operation authority, execution reservations, and committed batches. Its
-methods perform synchronous engine work without invoking reducer or driver
-closures. Payload destruction can execute user code outside the shared lock.
+``RuntimeState`` holds a complete value record containing model data, retained
+identities, active operation authority, execution reservations, and committed
+batches. Its methods perform synchronous engine work without invoking reducer or
+driver closures. Payload destruction can execute user code outside the shared
+lock.
 
 A local host owns this value exclusively. A shared host reads an immutable
 version, computes a proposed engine value outside the lock, and installs the
@@ -32,23 +33,23 @@ precede it, so a snapshot from another owner reports
 ordinary `StateMachine` types that generated facades name directly.
 
 ``RuntimeSharedHost`` provides this shared orchestration. Its copies refer to
-one owner. It requires `Sendable` model data, effect descriptions, and outcomes;
-its immutable preparation and driver closures run outside the storage lock.
+one owner. It requires `Sendable` model data, effect descriptions, and outcomes.
+Its immutable preparation and driver closures run outside the storage lock.
 Generated facades project their sealed domain types through this common host.
 
 ``RuntimeMainActorHost``, ``RuntimeActorHost``, and ``RuntimeIsolatedHost`` own
-the value engine and delivery ledger directly on their actor. Their synchronous input handling can
-read, prepare, and admit in one isolated turn. They release stored-property
-access before invoking domain functions or observation callbacks, and recheck
-the captured revision if synchronous reentry changed it. For each accepted
-batch, they process start commands and advance the revision tracked by
-`flush(through:)` before invoking that batch's observer callbacks. A synchronous
-`MainActor` callback can delay a scheduled driver on the same actor. Releasing a
-host without closing it finishes its retained registrations without a closed
-snapshot. The `MainActor` host can retain non-`Sendable` value data within that
-actor, and so can the isolated host within the actor instance it is created
-with, which it holds weakly; the native actor host requires `Sendable` data at
-its crossing boundaries.
+the value engine and delivery ledger directly on their actor. Their synchronous
+input handling can read, prepare, and admit in one isolated turn. They release
+stored-property access before invoking domain functions or observation
+callbacks, and recheck the captured revision if synchronous reentry changed it.
+For each accepted batch, they process start commands and advance the revision
+tracked by `flush(through:)` before invoking that batch's observer callbacks. A
+synchronous `MainActor` callback can delay a scheduled driver on the same actor.
+Releasing a host without closing it finishes its retained registrations without
+a closed snapshot. The `MainActor` host can retain non-`Sendable` value data
+within that actor, and the isolated host can do the same within the actor
+instance it is created with, which it holds weakly. The native actor host
+requires `Sendable` data at its crossing boundaries.
 
 ## Define the trust boundary
 
@@ -60,8 +61,9 @@ facade adds the domain's legal edge surface and privately binds observations,
 prepared proposals, and typed completions to this runtime.
 
 Keep raw snapshots, candidates, tickets, and the runtime instance out of the
-facade's public properties. Public access to these lower-level types allows a
-separate raw runtime; it does not make them interchangeable with facade proofs.
+facade's public properties. Public access to these lower-level types allows
+building a separate raw runtime, but it does not make them interchangeable with
+facade proofs.
 
 Copying a `RuntimeState` preserves its identity lineage. This supports
 speculative engine calculations followed by one atomic installation. It is not
@@ -71,15 +73,15 @@ independent owner is required.
 ## Bind operations to scope activations
 
 ``RuntimeScopeID`` combines a primitive kind with an optional retained instance
-identity, and ``RuntimeKey`` carries a keyed operation's resolved key. Resolve domain keys before constructing runtime plans. Removing and
-reactivating a scope creates a new activation, even when its visible domain key
-is unchanged. A ticket from the earlier activation cannot authorize the new
-instance.
+identity, and ``RuntimeKey`` carries a keyed operation's resolved key. Resolve
+domain keys before constructing runtime plans. Removing and reactivating a scope
+creates a new activation, even when its visible domain key is unchanged. A
+ticket from the earlier activation cannot authorize the new instance.
 
 An operation binds its primary scope and every declared dependency. Unrelated
 root edits preserve that authority, while a completion proposal still needs a
-fresh whole-root observation. Declare semantic dependencies explicitly; the
-runtime cannot infer them from arbitrary model fields.
+fresh whole-root observation. Declare semantic dependencies explicitly, because
+the runtime cannot infer them from arbitrary model fields.
 
 | Policy | Active authority in one scope activation, operation kind, and key |
 | --- | --- |
@@ -105,8 +107,8 @@ prove shutdown has joined every task.
 
 Confined hosts store `Task<Void, Never>` worker handles. A separate watcher
 awaits each worker before acknowledging actual termination. Returning a driver
-outcome to the host can settle delivery before that worker has returned;
-cancellation alone settles neither lifetime. Task closures capture immutable
+outcome to the host can settle delivery before that worker has returned.
+Cancellation alone settles neither lifetime. Task closures capture immutable
 work and drivers without retaining the owner across the entire driver await.
 
 ## Retain a terminal result until settlement

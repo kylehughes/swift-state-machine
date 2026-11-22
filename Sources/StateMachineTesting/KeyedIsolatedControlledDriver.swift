@@ -5,9 +5,9 @@
 /// started it for, as a ``KeyedControlledDriver`` call does, so a test on the owning actor can finish
 /// one key's work and leave another's running while the inputs and outputs stay on that actor. A host
 /// starts each execution in its own task, so calls for different keys can reach the driver in either
-/// order; ``nextStarted(for:isolation:fileID:filePath:line:column:)`` waits for one key's call and
-/// leaves the others queued. For an `.isolated` graph `Reader` whose `Open` operation is keyed by a
-/// book's identifier:
+/// order. ``nextStarted(for:isolation:fileID:filePath:line:column:)`` waits for one key's call and
+/// leaves the others queued, as in this `.isolated` graph `Reader` whose `Open` operation is keyed
+/// by a book's identifier.
 ///
 /// ```swift
 /// actor Shelf {
@@ -34,7 +34,7 @@
 /// by default, and a use on another instance of `Owner` stops the program, as an
 /// ``IsolatedControlledDriver``'s does. Key equality runs on the owning actor, and a comparison that
 /// starts another call or wait on that actor, or cancels the waiting task, cannot change which call
-/// each wait receives: starts and waits are matched in the order they happened, and a wait cancelled
+/// each wait receives because starts and waits are matched in arrival order and a wait cancelled
 /// during its comparison takes nothing.
 nonisolated public final class KeyedIsolatedControlledDriver<
     Owner: Actor,
@@ -67,7 +67,7 @@ nonisolated public final class KeyedIsolatedControlledDriver<
         /// Whether the host has cancelled this execution's task.
         public var isCancelled: Bool { completion.signal.isCancelled }
 
-        /// Ends the execution with `result`; it reports `false` and changes nothing if it already ended.
+        /// Ends the execution with `result`, returning `false` without changing anything if it already ended.
         @discardableResult public func finish(
             _ result: Result<Output, Failure>,
             isolation: isolated Owner = #isolation
@@ -167,7 +167,7 @@ nonisolated public final class KeyedIsolatedControlledDriver<
         )
     }
 
-    /// The driver of a fallible keyed operation: it waits until the test finishes the call.
+    /// Runs as the driver of a fallible keyed operation, waiting until the test finishes the call.
     public func run(_ owner: isolated Owner, _ key: Key, _ input: Input) async -> Result<Output, Failure> {
         binding.check(owner)
         let call = Call(key: key, input: input, owner: owner)
@@ -177,7 +177,7 @@ nonisolated public final class KeyedIsolatedControlledDriver<
 }
 
 extension KeyedIsolatedControlledDriver where Failure == Never {
-    /// The driver of a keyed operation that cannot fail: it returns the output the test supplies.
+    /// Runs as the driver of a keyed operation that cannot fail, returning the output the test supplies.
     public func run(_ owner: isolated Owner, _ key: Key, _ input: Input) async -> Output {
         switch await run(owner, key, input) as Result<Output, Never> {
         case .success(let output): output

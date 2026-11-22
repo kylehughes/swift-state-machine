@@ -24,7 +24,7 @@ func replaceDraft() -> Bool {
 
 If another writer replaces `before` first, `install` returns `false`. The caller
 must decide whether to read again, report a conflict, or discard its proposal.
-Create a fresh `Version` for each proposed installation; deliberately
+Create a fresh `Version` for each proposed installation. Deliberately
 reinstalling an old version also reuses its comparison identity.
 
 ## Keep domain checks outside the primitive
@@ -48,5 +48,5 @@ closure executes while the primitive holds its lock.
 An accepted replacement retains the outgoing version through unlock. Failed
 replacement also keeps its input versions alive through the locked comparison.
 This lets final payload destruction occur outside the critical section. The
-record still needs value semantics: storing a reference does not make its
-referent immutable.
+record still needs value semantics, because storing a reference does not make
+its referent immutable.

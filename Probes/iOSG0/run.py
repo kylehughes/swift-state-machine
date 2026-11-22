@@ -105,7 +105,7 @@ finally:
               for p in [ROOT / 'Smoke.swift', ROOT / 'run.py', ROOT.parent / 'G0/Sources/ProbeCore.swift']}
     report = {'probe': 'G0-P07', 'status': 'fail' if failure else ('build-only' if args.build_only else 'pass'),
               'failure': failure, 'commands': records, 'source_sha256': hashes, 'device': device,
-              'runtime': result, 'limitations': ['G0 feasibility probe; not production acceptance.']}
+              'runtime': result, 'limitations': ['G0 feasibility probe, not production acceptance.']}
     (OUT / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({'status': report['status'], 'failure': failure, 'report': str(OUT / 'report.json')}, indent=2))
 raise SystemExit(1 if failure else 0)

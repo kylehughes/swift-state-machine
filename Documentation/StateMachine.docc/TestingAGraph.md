@@ -6,16 +6,16 @@ A graph separates what an edge decides from what an owner admits, and tests can
 follow the same line. `Owned` runs an edge with no runtime at all. A `Local`
 owner runs routing, completion delivery, and cancellation synchronously, with
 no task to wait for. A managed owner runs the same rules with real drivers,
-which a test replaces with drivers it controls. The `StateMachineTesting`
-library supplies the harness for the last two and measures which declared edges
-the tests exercised. Its own documentation describes each helper in detail; this
-article walks through one graph from edge to host.
+which a test replaces with drivers it controls. The `StateMachineTesting` library supplies the harness for the last two and
+measures which declared edges the tests exercised. Its own documentation
+describes each helper in detail. This article walks through one graph from edge
+to host.
 
 ## Add the testing library
 
 `StateMachineTesting` depends only on `StateMachine` and links no test
 framework, so it works with Swift Testing and XCTest alike. Add it to the test
-target:
+target in `Package.swift`.
 
 ```swift
 // swift-tools-version: 6.4
@@ -53,7 +53,7 @@ at the line of the test that made the call.
 This schema starts two operations when a search begins, lets a caller refine the
 query while the fetch runs, records each refined query, and finishes when the
 fetch returns. Refining with an empty query abandons the search, and a router
-chooses between the two edges that can handle a refinement:
+chooses between the two edges that can handle a refinement.
 
 ```swift
 import StateMachine
@@ -125,7 +125,7 @@ Every test below is a method or function in a test target that imports
 
 An `Owned` value holds one phase, and each edge consumes it. A test calls the
 edge and reads what comes back, with no host, driver, or task. `Change` carries
-the effects an edge describes, in the order the edge wrote them:
+the effects an edge describes, in the order the edge wrote them.
 
 ```swift
 import StateMachine
@@ -151,24 +151,25 @@ import Testing
 ```
 
 `Owned` edges run only the authored function. They check nothing that a host
-checks, such as operation authority or revision, so they suit a rule that lives
-in an edge: which phase it leaves, what it returns, which effects it describes,
-and which typed failure it throws. A completion edge is an `Owned` method too,
-so `received("Swift.org")` tests the step from `Searching` to `Found`. `begin`
-returns its own effect type, `Effect.Begin`, and each value's `effect` property
-widens it to the schema-wide `Effect` when a test collects effects from several
-edges.
+checks, such as operation authority or revision, so they suit rules that live
+inside an edge, including which phase it leaves, what it returns, which effects
+it describes, and which typed failure it throws. A completion edge is an `Owned`
+method too, so `received("Swift.org")` tests the step from `Searching` to
+`Found`. `begin` returns its own effect type, `Effect.Begin`, and each value's
+`effect` property widens it to the schema-wide `Effect` when a test collects
+effects from several edges.
 
 ## Script a Local owner
 
-`ManualMachineTest` takes a generated `Local` and offers the same verbs: `send`,
-`commit`, `drainCommands`, `deliver`, `acknowledgeExecution`, `retryAdmission`,
-`reconcile`, `discardPending`, every `reset`, including `reset()` when the schema
-declares a default initial payload, and `close`. Each one calls the owner's
-own method and returns the owner's own result, so the test sees real receipts,
-real command batches with real work, and real rejections. The test plays the
-runner: it drains each batch, supplies each result, and acknowledges that each
-execution ended. Every call is synchronous, so a test needs no waiting:
+`ManualMachineTest` takes a generated `Local` and offers the same verbs,
+including `send`, `commit`, `drainCommands`, `deliver`, `acknowledgeExecution`,
+`retryAdmission`, `reconcile`, `discardPending`, every `reset` (including
+`reset()` when the schema declares a default initial payload), and `close`. Each
+one calls the owner's own method and returns the owner's own result, so the test
+sees real receipts, real command batches with real work, and real rejections.
+The test plays the runner by draining each batch, supplying each result, and
+acknowledging that each execution ended. Every call is synchronous, so a test
+needs no waiting.
 
 ```swift
 import StateMachineTesting
@@ -218,10 +219,10 @@ counts before transferring any, so a failed expectation leaves every batch
 queued in the owner. A
 completion is sealed by the work the owner issued and wrapped in the schema's
 `Completion` enum, so `.fetch(fetch.succeeded("Swift.org"))` is the only way to
-deliver a fetch result. `deliver` returns a `DeliveryResult`: `.committed`,
-`.pending`, `.refused`, `.stale`, or `.foreignOwner`. Delivery and acknowledgment are
-separate obligations, so the test reports both, and acknowledging the same
-execution twice reports `.duplicate`.
+deliver a fetch result. `deliver` returns a `DeliveryResult` of `.committed`,
+`.pending`, `.refused`, `.stale`, or `.foreignOwner`. Delivery and
+acknowledgment are separate obligations, so the test reports both, and
+acknowledging the same execution twice reports `.duplicate`.
 
 Every call the owner accepts appends a step to `history`, beginning with the
 owner's state when the harness took it. A step records what produced it, the
@@ -236,7 +237,7 @@ not compile.
 
 A completion from work that has lost its authority is stale. Cancelling leaves
 `Searching`, the only phase where `Fetch` is active, so the fetch the test
-holds cannot move the machine, and a stale delivery adds no step:
+holds cannot move the machine, and a stale delivery adds no step.
 
 ```swift
 extension LookupLocalTests {
@@ -266,7 +267,7 @@ full, a completion that is otherwise admissible is retained as
 `.pending(id, .waitingForCapacity)`, with its prepared candidate.
 `retryAdmission(id:)` retries the retained candidate without preparing it again
 and returns a `ReconcileResult`. In this test, draining frees the queue's only
-slot and the revision stays current, so the retry commits:
+slot and the revision stays current, so the retry commits.
 
 ```swift
 extension LookupLocalTests {
@@ -310,7 +311,7 @@ When several edges share a source and an input, a router chooses between them,
 and every typed call goes through it. An observation offers one method, named
 after the `@Route` function, and none for the candidate edges, and `Owned`
 offers the same method. A test can check that `send`, a committed observation,
-and an owned value agree, without any way to bypass the rule:
+and an owned value agree, without any way to bypass the rule.
 
 ```swift
 extension LookupLocalTests {
@@ -349,7 +350,7 @@ unchanged source.
 
 A wrong-phase input is a rejection rather than a compile error, because `send`
 routes at run time. `rejection(of:)` sends an input that the owner must reject
-and returns the typed rejection, or throws if the owner admits it:
+and returns the typed rejection, or throws if the owner admits it.
 
 ```swift
 extension LookupLocalTests {
@@ -368,26 +369,27 @@ extension LookupLocalTests {
 ## Measure coverage
 
 `GraphCoverage(for:)` measures one owner type and records the history of each
-harness run of that owner; a run of another schema does not compile as an
+harness run of that owner. A run of another schema does not compile as an
 argument, however alike their graphs are. It reports the declared edges no run
 took, the phases no run held, and the routers with candidates none of which ran.
+
 A router without candidates exists only to decline an input or a completion, so
-no step can exercise it; `unexercisedRejectingRouters` lists each one that no
+no step can exercise it. `unexercisedRejectingRouters` lists each one that no
 run saw the real owner decline through, from `rejection(of:)`, a failed `send`,
 or a `deliver` or `reconcile(id:)` whose result reports that its own preparation
 was refused there. A second delivery of a retained completion prepares nothing,
 so it counts nothing.
+
 `requireCoverage()` requires every phase, every edge, and every router with at
-least one candidate, and fails for any of them that no run reached, for any
+least one candidate. It fails for any of them that no run reached, for any
 invariant a run violated, for any change made inside `withOwner` that the
 harness never observed, and for any owner a `withOwner` closure replaced. By
-default it requires nothing of rejections;
-`requireCoverage(includingRejectingRouters: true)` also requires every router
-without candidates to have declined.
-`requireCoverage(excluding:)` waives the edges and routers it names by their
-`"<phase>.<name>"` identifiers. Every step comes from a real owner admitting a
-real change and names the edge from that change's receipt, so an exercised edge
-is one that a test actually took:
+default it requires nothing of rejections. Pass
+`requireCoverage(includingRejectingRouters: true)` to also require every router
+without candidates to have declined. `requireCoverage(excluding:)` waives the
+edges and routers it names by their `"<phase>.<name>"` identifiers. Every step
+comes from a real owner admitting a real change and names the edge from that
+change's receipt, so an exercised edge is one that a test actually took.
 
 ```swift
 @Suite struct LookupCoverageTests {
@@ -419,17 +421,17 @@ is one that a test actually took:
 }
 ```
 
-A router that chooses between edges with the same destination is no exception:
-the receipt names the edge it chose. A harness can also check named invariants
-on every accepted snapshot, which the coverage reports with the rest.
+Even when a router chooses between edges with the same destination, the receipt
+still names the edge it chose. A harness can also check named invariants on
+every accepted snapshot, which the coverage reports with the rest.
 
 ## Test hosted behavior with controlled drivers
 
-A managed owner runs its drivers itself. A `ControlledDriver` stands in for one:
-pass its `run` method as the operation's driver, and each time the host starts
+A managed owner runs its drivers itself. A `ControlledDriver` stands in for one.
+Pass its `run` method as the operation's driver, and each time the host starts
 the operation, the call waits until the test finishes it. `nextStarted()`
 returns the calls in start order with the input the host passed, so the order
-of events is the test's choice and no test sleeps:
+of events is the test's choice and no test sleeps.
 
 ```swift
 @Suite(.timeLimit(.minutes(1))) struct LookupHostTests {
@@ -467,7 +469,7 @@ A call ignores cancellation, as a driver that does not check for it would. When
 the host cancels the call's task, `isCancelled` becomes `true` and
 `waitForCancellation()` returns, and the call keeps running until the test finishes
 it. A test can therefore deliver a result after cancellation and observe that
-the host discards it:
+the host discards it.
 
 ```swift
 extension LookupHostTests {
@@ -497,7 +499,7 @@ for it. Pass a deadline to `shutdown(deadline:)` to bound the wait. It returns
 delivery obligations settle. On timeout it returns `.timedOut(diagnostics)`, and
 the owner stays closed. `diagnostics.outstandingExecutions` identifies the
 reservations it still tracks, and finishing the call lets a later shutdown
-settle:
+settle.
 
 ```swift
 extension LookupHostTests {
@@ -527,7 +529,7 @@ for different keys can start in either order. For values that are not
 `Sendable`, `MainActorControlledDriver` serves a `MainActorHost`, whose values
 stay on the main actor, and `KeyedMainActorControlledDriver` does the same for a
 keyed operation, as in `downloadDriver: download.run`. `IsolatedControlledDriver`
-serves an `IsolatedHost`, whose values stay on its owning actor: that actor
+serves an `IsolatedHost`, whose values stay on its owning actor. That actor
 stores the driver, and the test awaits its calls there.
 `KeyedIsolatedControlledDriver` does the same for a keyed operation. A key's
 equality runs on the main actor or the owning actor, and a comparison that
@@ -542,17 +544,19 @@ counts, into locals first.
 A presentation from the `StateMachineUI` module drives and observes any
 `MainActorStateMachineHost`. A test double conforms to that protocol, which
 confers no authority, and lets a test deliver snapshots in any order and see how
-the presentation reacts. The protocol has six associated types, which a double
-declares as nested types: `Input`, `Snapshot`, `Receipt`, `SendRejection`,
-`Prepared`, and `CommitResult`; a `Receipt` reports its `snapshot` and the
-`edgeID` of the change, which a double can leave `nil`. A double implements
-`snapshot()`, `send(_:)`, `commit(_:)`, `subscribe(_:onFinish:)`, and `close()`;
-the protocol's projecting sequences, `snapshots(_:)` and `distinctSnapshots(_:)`,
-come from its `subscribe(_:onFinish:)` unless it implements them. The double returns its
+the presentation reacts. The protocol has six associated types that a double
+declares as nested types (`Input`, `Snapshot`, `Receipt`, `SendRejection`,
+`Prepared`, and `CommitResult`). A `Receipt` reports its `snapshot` and the
+`edgeID` of the change, which a double can leave `nil`.
+
+A double implements `snapshot()`, `send(_:)`, `commit(_:)`,
+`subscribe(_:onFinish:)`, and `close()`. The protocol's projecting sequences,
+`snapshots(_:)` and `distinctSnapshots(_:)`, come from its
+`subscribe(_:onFinish:)` unless it implements them. The double returns its
 registration as a `MainActorSnapshotSubscription`, which `init(onCancel:)`
 creates. Its action runs exactly once, whether the presentation calls `cancel()`
 or releases the registration. A release runs the action in a later turn on the
-main actor, while `cancel()` runs it before returning:
+main actor, while `cancel()` runs it before returning.
 
 ```swift
 import StateMachine
@@ -673,12 +677,13 @@ values, which `SnapshotSequence(register:)` builds from callbacks of the
 double's own. The closure receives a `receive` callback, which offers an
 element, and a `finish` callback, which ends the sequence, and returns the
 registration's token, a `SnapshotSubscription` from `init(onCancel:)`.
-Releasing both callbacks ends the sequence, as releasing an owner does. The
-sequence cancels the token exactly once, even when the double keeps its own
-reference to it: when `finish` runs or the callbacks are released, even before
-`register` returns and with an element still unread, which stays readable; when
-a read finds its end or finds its task cancelled; when its
-`cancel()` is called; and when the sequence and its iterator are released. A
+Releasing both callbacks ends the sequence, as releasing an owner does.
+
+The sequence cancels the token exactly once, even when the double keeps its own
+reference to it. That cancellation runs when `finish` runs or the callbacks are
+released (even before `register` returns and with an element still unread, which
+stays readable), when a read reaches the end or finds its task cancelled, when
+`cancel()` is called, or when both the sequence and its iterator are released. A
 double offers the snapshot current at registration first, as a real owner does.
 An isolated double's `subscribe(_:onFinish:isolation:)` returns an
 `IsolatedSnapshotSubscription` from `init(isolation:onCancel:onRelease:)`.
@@ -688,7 +693,7 @@ Cancelling a registration removes its callbacks by identifier, through a weak
 reference, so the token does not keep the feed alive. Releasing the feed
 releases every callback it keeps, which ends each sequence it registered, so the
 preview stays live for exactly as long as the code that created the feed keeps
-it:
+it.
 
 ```swift
 import StateMachine
@@ -783,7 +788,7 @@ func beginFromIdle() {
 }
 ```
 
-The compiler reports this diagnostic:
+The compiler reports this diagnostic.
 
 ```text
 instance method 'cancel()' requires the types 'Lookup.Idle' and 'Lookup.Searching' be equivalent

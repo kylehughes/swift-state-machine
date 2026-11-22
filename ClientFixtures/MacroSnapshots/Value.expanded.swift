@@ -22,7 +22,7 @@ fileprivate struct _OperationKeyIsHashable<Value: Swift::Hashable & Swift::Senda
 fileprivate struct _EffectIsCopyable<Value> {
 }
 
-/// The schema, for generated code that names it where a value of its name could take the name.
+/// The schema type, used by generated code where a local value could shadow its name.
 internal typealias _StateMachineSchema = Counter
 
 fileprivate typealias _StateMachineScopeID = StateMachine::RuntimeScopeID
@@ -106,13 +106,13 @@ internal typealias Configuration = StateMachine::ManagedConfiguration
 /// Admission bounds for a manual local owner, with no subscriptions or runner policy.
 internal typealias LocalConfiguration = StateMachine::Limits
 
-/// A live observation registration; cancelling or releasing it stops delivery.
+/// A live observation registration. Cancelling or releasing it stops delivery.
 internal typealias Subscription = StateMachine::SnapshotSubscription
 
-/// A live observation registration with an owner confined to the actor `Owner`; only that actor can cancel it, which removes it, and dropping it stops delivery.
+/// A live observation registration for an owner confined to `Owner`. Only that actor can cancel and remove it, and releasing it stops delivery.
 internal typealias IsolatedSubscription<Owner: Swift::Actor> = StateMachine::IsolatedSnapshotSubscription<Owner>
 
-/// A live MainActor observation registration; cancelling or releasing it stops delivery.
+/// A live `MainActor` observation registration. Cancelling or releasing it stops delivery.
 internal typealias MainActorSubscription = StateMachine::MainActorSnapshotSubscription
 
 /// Failure to register another live observer.
@@ -171,7 +171,7 @@ internal enum Snapshot: Swift::Sendable, StateMachine::StateMachineSnapshot, Swi
     internal var isClosed: Swift::Bool {
         record.isClosed
     }
-    /// Ordinary model data; constructing it confers no installation authority.
+    /// The ordinary model data. Constructing a model value directly confers no installation authority.
     internal var model: Counter {
         record.model
     }
@@ -236,7 +236,7 @@ internal struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swi
         edgeID = record.edge
     }
     /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
-    /// change that takes no edge: a reset, closure, or the authority-only commit of
+    /// change that takes no edge, such as a reset, closure, or the authority-only commit of
     /// `discardPending(id:)`.
     internal let edgeID: Swift::String?
     /// The owner-lifetime accepted revision.
@@ -253,8 +253,8 @@ internal struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swi
 internal enum SendRejection: Swift::Error {
     /// Routing or the authored transition declined the input before a candidate existed.
     case preparation(PreparationRejection)
-    /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`);
-    /// read `snapshot()` for the current root.
+    /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`).
+    /// Read `snapshot()` for the current root.
     case commit(CommitRejection)
 }
 
@@ -315,7 +315,8 @@ fileprivate static func _stateMachinePrepare(
 
 /// Routes an input against a historical snapshot, rejecting a missing phase edge explicitly.
 ///
-/// A plan defect is not a routing rejection: it travels inside the result, and admission reports it.
+/// A plan defect travels inside the returned `Prepared` value rather than throwing here, so
+/// admission reports it.
 internal static func prepare(_ input: Input, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
     switch input {
     case .finish(let input):
@@ -328,7 +329,7 @@ internal static func prepare(_ input: Input, on snapshot: Snapshot) throws(Prepa
     }
 }
 
-/// A phase saved data can restore: one in which no operation is active. A restored owner has no outstanding work.
+/// A phase that saved data can restore, covering phases with no active operations. A restored owner has no outstanding work.
 internal enum Restoration: Swift::Sendable {
     case idle(Idle)
     case done(Done)
@@ -364,7 +365,7 @@ internal struct ShutdownDiagnostics: Swift::Equatable, Swift::Sendable {
 internal enum ShutdownResult: Swift::Equatable, Swift::Sendable {
     /// Every execution, delivery, and preparation obligation settled.
     case quiescent
-    /// The deadline passed first; the diagnostics describe what was still outstanding.
+    /// The deadline passed first, and the diagnostics describe what remained outstanding.
     case timedOut(ShutdownDiagnostics)
     fileprivate init(_ raw: StateMachine::ShutdownDiagnostics?) {
         self = raw.map {
@@ -449,7 +450,7 @@ internal typealias Input = Counter.Input
             return _stateMachineAdmission(result)
         }
     }
-    /// Routes, prepares and admits one input against the current root.
+    /// Routes, prepares, and admits one input against the current root.
     @discardableResult
     internal mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
         let prepared: Prepared
@@ -480,7 +481,7 @@ internal typealias Input = Counter.Input
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues no batch, so it needs no slot.
+    /// full, leaving state unchanged. It queues no batch, so it needs no slot.
     @discardableResult
     internal mutating func reset(to initial: Idle = _StateMachineSchema.Idle()) throws(CommitRejection) -> Receipt {
         let result = engine.reset(.idle(initial), scopes: [])
@@ -495,9 +496,10 @@ internal typealias Input = Counter.Input
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     internal mutating func reset(to initial: Idle = _StateMachineSchema.Idle(), expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
         let result = engine.reset(.idle(initial), scopes: [], expecting: expected.record)
@@ -511,11 +513,11 @@ internal typealias Input = Counter.Input
 
 }
 
-/// A sealed sole-writer MainActor owner with managed execution.
+/// A sealed sole-writer `MainActor` owner with managed execution.
 ///
-/// On iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, and Mac Catalyst 17 and later it is
-/// `Observable`, so a SwiftUI view can read it directly. Each tracked member registers a read of
-/// its own value only: `currentSnapshot` and `snapshot()`, and `subscriberCount`.
+/// On iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, and Mac Catalyst 17.0 and
+/// later, this owner conforms to `Observable` so a SwiftUI view can read it directly. Each
+/// tracked member registers a read of its own value only, covering `currentSnapshot` and `snapshot()`, and `subscriberCount`.
 @Swift::MainActor internal final class MainActorHost: StateMachine::ObservableMainActorHost, StateMachine::MainActorStateMachineHost {
     private typealias Host = StateMachine::RuntimeMainActorHost<Counter, Effect, Swift::Never, PreparationRejection>
     private let host: Host
@@ -533,15 +535,15 @@ internal typealias Input = Counter.Input
                 }
             })
     }
-    /// Captures a complete historical observation; reading it registers a read of the snapshot with Observation.
+    /// Captures a complete historical observation. Reading it registers a snapshot read with Observation.
     internal func snapshot() -> Snapshot {
         _stateMachineSnapshot(host.snapshot())
     }
-    /// The current complete snapshot; reading it registers a read of the snapshot with Observation.
+    /// The current complete snapshot. Reading it registers a snapshot read with Observation.
 internal var currentSnapshot: Snapshot {
         _stateMachineSnapshot(host.snapshot())
     }
-    /// Routes, prepares and admits one input in a single isolated turn without suspension.
+    /// Routes, prepares, and admits one input in a single isolated turn without suspension.
     @discardableResult
     internal func send(_ input: Input) throws(SendRejection) -> Receipt {
         let result = host.prepareAndCommit { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
@@ -576,7 +578,7 @@ internal var currentSnapshot: Snapshot {
             return _stateMachineAdmission(host.reject(defect))
         }
     }
-    /// Subscribes to initial, accepted and terminal complete snapshots, taking a subscriber slot when called.
+    /// Subscribes to initial, accepted, and terminal complete snapshots, taking a subscriber slot when called.
     internal func subscribe(_ receive: @escaping @Swift::MainActor (Snapshot) -> Swift::Void,
         onFinish: @escaping @Swift::MainActor () -> Swift::Void = {
         }) throws(SubscriptionFailure) -> MainActorSubscription {
@@ -588,8 +590,8 @@ internal var currentSnapshot: Snapshot {
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     internal func snapshots() throws(SubscriptionFailure) -> Snapshots {
         try host.sendableSnapshots {
             _stateMachineSnapshot($0)
@@ -667,7 +669,7 @@ internal var currentSnapshot: Snapshot {
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle()) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [])
@@ -682,9 +684,10 @@ internal var currentSnapshot: Snapshot {
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle(), expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [], expecting: expected.record)
@@ -701,16 +704,16 @@ internal func flush(through receipt: Receipt) async -> FlushResult {
     }
     /// Closes admission, then waits until every accepted batch is processed.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     internal func shutdown(deadline: Swift::ContinuousClock.Instant? = nil) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline))
     }
 
 
-    /// Live observer registrations; reading it registers a read of the count with Observation.
+    /// The count of live observer registrations. Reading it registers a count read with Observation.
     internal var subscriberCount: Swift::Int {
         host.subscriberCount
     }
@@ -754,8 +757,8 @@ internal final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHo
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     internal func snapshots() throws(SubscriptionFailure) -> Snapshots {
         try host.snapshots {
             _stateMachineSnapshot($0)
@@ -820,7 +823,7 @@ internal final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHo
     }
     }
     #endif
-    /// Routes, prepares and admits one input in a single attempt.
+    /// Routes, prepares, and admits one input in a single attempt.
     ///
     /// Preparation runs outside the lock against one snapshot and is never repeated, so
     /// a concurrent commit surfaces as `.commit(.conflict)` for the caller to resolve.
@@ -861,7 +864,7 @@ internal final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHo
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle()) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [])
@@ -876,9 +879,10 @@ internal final class Shared: Swift::Sendable, StateMachine::SharedStateMachineHo
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle(), expecting expected: Snapshot) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [], expecting: expected.record)
@@ -895,9 +899,9 @@ internal func flush(through receipt: Receipt) async -> FlushResult {
     }
     /// Closes admission, then waits until every accepted batch is processed.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     internal func shutdown(deadline: Swift::ContinuousClock.Instant? = nil) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline))
@@ -920,8 +924,8 @@ internal final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachine
     private let host: Host
         /// Creates fresh authority.
     ///
-    /// With `isolatedTo`, the owner's actor runs on that actor's serial executor, so their turns
-    /// never overlap; calls into the owner still await.
+    /// With `isolatedTo`, the owner's actor runs on that actor's serial executor so their turns
+    /// never overlap, though calls into the owner still await.
         internal init(_ initial: Idle = _StateMachineSchema.Idle(), configuration: Configuration = .default, isolatedTo: (any Swift::Actor)? = nil) {
             host = Host(.idle(initial), scopes: [], configuration: configuration,
                 driver: { raw in
@@ -940,7 +944,7 @@ internal final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachine
         _stateMachineSnapshot(await host.snapshot())
     }
 
-    /// Routes, prepares and admits one input in a single isolated turn without suspension.
+    /// Routes, prepares, and admits one input in a single isolated turn without suspension.
     @discardableResult
     internal func send(_ input: Input) async throws(SendRejection) -> Receipt {
         let result = await host.prepareAndCommit { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
@@ -975,7 +979,7 @@ internal final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachine
             return _stateMachineAdmission(await host.reject(defect))
         }
     }
-    /// Subscribes to initial, accepted and terminal complete snapshots, taking a subscriber slot when called.
+    /// Subscribes to initial, accepted, and terminal complete snapshots, taking a subscriber slot when called.
     internal func subscribe(_ receive: @escaping @Sendable (Snapshot) -> Swift::Void,
         onFinish: @escaping @Sendable () -> Swift::Void = {
         }) async throws(SubscriptionFailure) -> Subscription {
@@ -987,8 +991,8 @@ internal final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachine
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     internal func snapshots() async throws(SubscriptionFailure) -> Snapshots {
         try await host.snapshots {
             _stateMachineSnapshot($0)
@@ -1066,7 +1070,7 @@ internal final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachine
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle()) async throws(CommitRejection) -> Receipt {
         let result = await host.reset(.idle(initial), scopes: [])
@@ -1081,9 +1085,10 @@ internal final class ActorHost: Swift::Sendable, StateMachine::ActorStateMachine
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle(), expecting expected: Snapshot) async throws(CommitRejection) -> Receipt {
         let result = await host.reset(.idle(initial), scopes: [], expecting: expected.record)
@@ -1100,16 +1105,16 @@ internal func flush(through receipt: Receipt) async -> FlushResult {
     }
     /// Closes admission, then waits until every accepted batch is processed.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     internal func shutdown(deadline: Swift::ContinuousClock.Instant? = nil) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline))
     }
 
 
-    /// Live observer registrations.
+    /// The count of live observer registrations.
     internal var subscriberCount: Swift::Int {
         get async {
             await host.subscriberCount
@@ -1127,8 +1132,8 @@ internal func flush(through receipt: Receipt) async -> FlushResult {
 ///
 /// Create it on the actor that owns it, as `IsolatedHost(isolation: self, …)`, and keep it there.
 /// It is not `Sendable`, so the compiler keeps it in that actor's region, and every method takes
-/// the actor as a defaulted `isolated` parameter: inside the actor a call reads `host.send(input)`,
-/// and a call from another actor or a nonisolated context does not compile. A method that receives
+/// the actor as a defaulted `isolated` parameter. Inside the actor, calls read `host.send(input)`,
+/// while calls from another actor or a nonisolated context do not compile. A method that receives
 /// a different instance of the actor's type stops the program.
 ///
 /// Its observation callbacks run on the owning actor.
@@ -1158,7 +1163,7 @@ internal final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedSt
     internal func snapshot(isolation: isolated Owner = #isolation) -> Snapshot {
         _stateMachineSnapshot(host.snapshot(isolation: isolation))
     }
-    /// Routes, prepares and admits one input in a single turn of the owning actor, without suspension.
+    /// Routes, prepares, and admits one input in a single turn of the owning actor, without suspension.
     @discardableResult
     internal func send(_ input: Input, isolation: isolated Owner = #isolation) throws(SendRejection) -> Receipt {
         let result = host.prepareAndCommit(isolation: isolation) { raw -> Swift::Result<_StateMachineEngine.Candidate, SendRejection> in
@@ -1193,15 +1198,15 @@ internal final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedSt
             return _stateMachineAdmission(host.reject(defect, isolation: isolation))
         }
     }
-    /// Subscribes to initial, accepted and terminal complete snapshots, delivered on the owning actor, taking a subscriber slot when called.
+    /// Subscribes to initial, accepted, and terminal complete snapshots, delivered on the owning actor, taking a subscriber slot when called.
     ///
     /// The registration stays in the owning actor's region, and only that actor can cancel it, which
     /// removes the registration before returning, so none of its callbacks begins afterward. Cancelling
-    /// releases the callbacks before it returns, except while this owner is delivering a change, as when
-    /// another observer's callback cancels: that delivery keeps the callbacks it selected until it has
-    /// delivered the change to its other observers, and releases them then. Dropping the registration
-    /// stops delivery and frees its slot at once; this owner releases its callbacks when it next sweeps
-    /// its registrations or is destroyed.
+    /// releases the callbacks before it returns, except while this owner is delivering a change, such
+    /// as when another observer's callback cancels. That delivery keeps the callbacks it selected until
+    /// it finishes delivering the change to its other observers, and releases them then. Dropping the
+    /// registration stops delivery and frees its slot at once, and this owner releases its callbacks
+    /// when it next sweeps its registrations or is destroyed.
     internal func subscribe(_ receive: @escaping (Snapshot) -> Swift::Void,
         onFinish: @escaping () -> Swift::Void = {
         }, isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> IsolatedSubscription<Owner> {
@@ -1213,8 +1218,8 @@ internal final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedSt
     ///
     /// It ends after the closed snapshot, when this owner is released, when its `cancel()` is
     /// called, or when a read finds its task cancelled. A consumer that keeps it after it stops reading
-    /// calls `cancel()`, from any isolation domain, which frees its subscriber slot before it
-    /// returns; a read already handed an element by then still returns it.
+    /// calls `cancel()` from any isolation domain, which frees its subscriber slot before it
+    /// returns. A read that already received an element still returns it.
     internal func snapshots(isolation: isolated Owner = #isolation) throws(SubscriptionFailure) -> Snapshots {
         try host.sendableSnapshots({
                 _stateMachineSnapshot($0)
@@ -1225,7 +1230,7 @@ internal final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedSt
     /// `transform` runs on the owning actor when a snapshot is delivered, and the sequence offers
     /// each projection, equal to the one before it or not. It supports every `AsyncSequence`
     /// operator and may be consumed anywhere. `distinctSnapshots(_:)` omits repeated values instead.
-    /// Ending it on another actor stops delivery and frees its slot at once; this owner releases
+    /// Ending it on another actor stops delivery and frees its slot at once, and this owner releases
     /// `transform` when it next sweeps its registrations or is destroyed.
     internal func snapshots<Projection: Swift::Sendable>(
         _ transform: @escaping (Snapshot) -> Projection, isolation: isolated Owner = #isolation
@@ -1259,7 +1264,7 @@ internal final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedSt
     /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
     /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
     /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-    /// full, and then changes nothing; it queues every reset to publish it, so it always needs a slot.
+    /// full, leaving state unchanged. It queues every reset to publish it, so it always needs a slot.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle(), isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [], isolation: isolation)
@@ -1274,9 +1279,10 @@ internal final class IsolatedHost<Owner: Swift::Actor>: StateMachine::IsolatedSt
     /// still holds the root `expected` observed, so a decision made on that snapshot cannot
     /// discard a change accepted since.
     ///
-    /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-    /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-    /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+    /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+    /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+    /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+    /// other acceptance, and then the same errors as `reset(to:)`.
     @discardableResult
     internal func reset(to initial: Idle = _StateMachineSchema.Idle(), expecting expected: Snapshot, isolation: isolated Owner = #isolation) throws(CommitRejection) -> Receipt {
         let result = host.reset(.idle(initial), scopes: [], expecting: expected.record, isolation: isolation)
@@ -1293,9 +1299,9 @@ internal func flush(through receipt: Receipt, isolation: isolated Owner = #isola
     }
     /// Closes admission, then waits until every accepted batch is processed.
     ///
-    /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-    /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-    /// it always returns `.quiescent`.
+    /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+    /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+    /// deadline, it always returns `.quiescent`.
     @discardableResult
     internal func shutdown(deadline: Swift::ContinuousClock.Instant? = nil, isolation: isolated Owner = #isolation) async -> ShutdownResult {
         ShutdownResult(await host.shutdown(deadline: deadline, isolation: isolation))

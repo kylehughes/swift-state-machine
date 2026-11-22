@@ -37,7 +37,7 @@ jobs:
       timeout-minutes: 15
       run: |
         python3 -I - <<'PY'
-        # This source is embedded inline into the workflow; never executed from an artifact.
+        # This source is embedded inline in the workflow and never executed from an artifact.
         import hashlib
         import json
         import os
@@ -69,7 +69,7 @@ jobs:
         def check_conflicts(api, tag):
             if api("GET", "/git/ref/tags/" + urllib.parse.quote(tag, safe=""), missing=True) is not None:
                 raise ValueError("Tag already exists")
-            # The list includes drafts when authenticated. Exhaust pagination; never
+            # The list includes drafts when authenticated. Exhaust pagination and never
             # treat a partial release page or an API failure as absence.
             page = 1
             while True:
@@ -107,9 +107,9 @@ jobs:
                 except urllib.error.HTTPError as error:
                     if missing and error.code == 404:
                         return None
-                    raise Unknown(f"API {method} response {error.code}; inspect before another write") from error
+                    raise Unknown(f"API {method} response {error.code}. Inspect before another write") from error
                 except (OSError, ValueError) as error:
-                    raise Unknown(f"API {method} outcome unknown; inspect before another write") from error
+                    raise Unknown(f"API {method} outcome unknown. Inspect before another write") from error
 
 
         def inspect_candidate(api, candidate, ref, workflow):
@@ -142,16 +142,16 @@ jobs:
                     print(json.dumps({"tag_creation": "uncertain", "inspection": observed}), flush=True)
                 except Unknown as inspection_error:
                     print(json.dumps({"tag_creation": "uncertain", "inspection_error": str(inspection_error)}), flush=True)
-                raise Unknown("Tag creation response uncertain; stop and inspect before another write") from error
+                raise Unknown("Tag creation response uncertain. Stop and inspect before another write") from error
             print(json.dumps({"tag_creation": "response", "response": created}), flush=True)
             try:
                 observed = api("GET", path, missing=True)
             except Unknown as error:
                 print(json.dumps({"tag_creation": "unverified", "inspection_error": str(error)}), flush=True)
-                raise Unknown("Created tag observation uncertain; stop and inspect before another write") from error
+                raise Unknown("Created tag observation uncertain. Stop and inspect before another write") from error
             print(json.dumps({"tag_creation": "observed", "inspection": observed}), flush=True)
             if not tag_matches(created, tag, candidate) or not tag_matches(observed, tag, candidate):
-                raise Unknown("Created tag identity is unverified; stop and inspect before another write")
+                raise Unknown("Created tag identity is unverified. Stop and inspect before another write")
 
 
         def publish(api, *, tag, candidate, notes, generated, archive, expected_digest):
@@ -161,11 +161,11 @@ jobs:
                 raise ValueError("Artifact bytes differ from read-only build output")
             check_conflicts(api, tag)
             # Retained job logs identify intent before the first write. Never retry a
-            # write automatically: inspect the remote and stop on an unknown outcome.
+            # write automatically. Inspect the remote and stop on an unknown outcome.
             print(json.dumps({"tag": tag, "candidate": candidate, "asset": archive.name, "sha256": digest}), flush=True)
             # Atomic create-ref refuses a concurrently created tag. Never move or
             # replace a ref. A later authorized force-move remains outside any
-            # cross-API atomicity guarantee; observe again before publication.
+            # cross-API atomicity guarantee. Observe again before publication.
             claim_tag(api, tag, candidate)
             prerelease = "-" in tag.split("+", 1)[0]
             body = {"tag_name": tag, "target_commitish": candidate, "name": tag,
@@ -176,21 +176,21 @@ jobs:
                 releases = api("GET", "/releases?per_page=100")
                 matches = [r for r in releases if r.get("tag_name") == tag]
                 print(json.dumps({"inspection": matches}), flush=True)
-                raise Unknown("Release creation response uncertain; inspect retained state before another write")
+                raise Unknown("Release creation response uncertain. Inspect retained state before another write")
             print(json.dumps({"draft_creation": "response", "release": release}), flush=True)
             release_id = release["id"]
             if (release.get("tag_name") != tag or not release.get("draft")
                     or release.get("target_commitish") != candidate or release.get("prerelease") is not prerelease):
-                raise Unknown("Created release identity mismatch; inspect before another write")
+                raise Unknown("Created release identity mismatch. Inspect before another write")
             try:
                 asset = api("POST", f"/releases/{release_id}/assets?name=" + urllib.parse.quote(archive.name), payload, upload=True)
             except Unknown:
                 print(json.dumps({"inspection": api("GET", f"/releases/{release_id}/assets")}), flush=True)
-                raise Unknown("Asset upload uncertain; inspect before another write")
+                raise Unknown("Asset upload uncertain. Inspect before another write")
             # GitHub's server digest verifies received bytes without following a
             # redirect carrying write credentials or executing/extracting archive data.
             if asset.get("name") != archive.name or asset.get("size") != len(payload) or asset.get("digest") != "sha256:" + digest:
-                raise Unknown("Uploaded asset identity unverified; inspect before another write")
+                raise Unknown("Uploaded asset identity unverified. Inspect before another write")
             boundary_release = api("GET", f"/releases/{release_id}")
             boundary_tag = api("GET", "/git/ref/tags/" + urllib.parse.quote(tag, safe=""), missing=True)
             print(json.dumps({"operation": "publish-draft", "release": boundary_release,
@@ -200,14 +200,14 @@ jobs:
                     or boundary_release.get("target_commitish") != candidate
                     or boundary_release.get("prerelease") is not prerelease
                     or not tag_matches(boundary_tag, tag, candidate)):
-                raise Unknown("Publication boundary identity changed; stop and inspect before another write")
+                raise Unknown("Publication boundary identity changed. Stop and inspect before another write")
             try:
                 result = api("PATCH", f"/releases/{release_id}", {"draft": False, "prerelease": prerelease})
             except Unknown:
                 result = api("GET", f"/releases/{release_id}")
                 if (result.get("draft") is not False or result.get("tag_name") != tag
                         or result.get("prerelease") is not prerelease):
-                    raise Unknown("Publication remains unknown; stop and inspect")
+                    raise Unknown("Publication remains unknown. Stop and inspect")
             remote_tag = api("GET", "/git/ref/tags/" + urllib.parse.quote(tag, safe=""))
             if (result.get("draft") is not False or result.get("tag_name") != tag
                     or result.get("prerelease") is not prerelease
@@ -359,7 +359,7 @@ jobs:
       timeout-minutes: 15
       run: |
         python3 -I - <<'PY'
-        # This source is embedded inline into the workflow; never executed from an artifact.
+        # This source is embedded inline in the workflow and never executed from an artifact.
         import hashlib
         import json
         import os
@@ -391,7 +391,7 @@ jobs:
         def check_conflicts(api, tag):
             if api("GET", "/git/ref/tags/" + urllib.parse.quote(tag, safe=""), missing=True) is not None:
                 raise ValueError("Tag already exists")
-            # The list includes drafts when authenticated. Exhaust pagination; never
+            # The list includes drafts when authenticated. Exhaust pagination and never
             # treat a partial release page or an API failure as absence.
             page = 1
             while True:
@@ -429,9 +429,9 @@ jobs:
                 except urllib.error.HTTPError as error:
                     if missing and error.code == 404:
                         return None
-                    raise Unknown(f"API {method} response {error.code}; inspect before another write") from error
+                    raise Unknown(f"API {method} response {error.code}. Inspect before another write") from error
                 except (OSError, ValueError) as error:
-                    raise Unknown(f"API {method} outcome unknown; inspect before another write") from error
+                    raise Unknown(f"API {method} outcome unknown. Inspect before another write") from error
 
 
         def inspect_candidate(api, candidate, ref, workflow):
@@ -464,16 +464,16 @@ jobs:
                     print(json.dumps({"tag_creation": "uncertain", "inspection": observed}), flush=True)
                 except Unknown as inspection_error:
                     print(json.dumps({"tag_creation": "uncertain", "inspection_error": str(inspection_error)}), flush=True)
-                raise Unknown("Tag creation response uncertain; stop and inspect before another write") from error
+                raise Unknown("Tag creation response uncertain. Stop and inspect before another write") from error
             print(json.dumps({"tag_creation": "response", "response": created}), flush=True)
             try:
                 observed = api("GET", path, missing=True)
             except Unknown as error:
                 print(json.dumps({"tag_creation": "unverified", "inspection_error": str(error)}), flush=True)
-                raise Unknown("Created tag observation uncertain; stop and inspect before another write") from error
+                raise Unknown("Created tag observation uncertain. Stop and inspect before another write") from error
             print(json.dumps({"tag_creation": "observed", "inspection": observed}), flush=True)
             if not tag_matches(created, tag, candidate) or not tag_matches(observed, tag, candidate):
-                raise Unknown("Created tag identity is unverified; stop and inspect before another write")
+                raise Unknown("Created tag identity is unverified. Stop and inspect before another write")
 
 
         def publish(api, *, tag, candidate, notes, generated, archive, expected_digest):
@@ -483,11 +483,11 @@ jobs:
                 raise ValueError("Artifact bytes differ from read-only build output")
             check_conflicts(api, tag)
             # Retained job logs identify intent before the first write. Never retry a
-            # write automatically: inspect the remote and stop on an unknown outcome.
+            # write automatically. Inspect the remote and stop on an unknown outcome.
             print(json.dumps({"tag": tag, "candidate": candidate, "asset": archive.name, "sha256": digest}), flush=True)
             # Atomic create-ref refuses a concurrently created tag. Never move or
             # replace a ref. A later authorized force-move remains outside any
-            # cross-API atomicity guarantee; observe again before publication.
+            # cross-API atomicity guarantee. Observe again before publication.
             claim_tag(api, tag, candidate)
             prerelease = "-" in tag.split("+", 1)[0]
             body = {"tag_name": tag, "target_commitish": candidate, "name": tag,
@@ -498,21 +498,21 @@ jobs:
                 releases = api("GET", "/releases?per_page=100")
                 matches = [r for r in releases if r.get("tag_name") == tag]
                 print(json.dumps({"inspection": matches}), flush=True)
-                raise Unknown("Release creation response uncertain; inspect retained state before another write")
+                raise Unknown("Release creation response uncertain. Inspect retained state before another write")
             print(json.dumps({"draft_creation": "response", "release": release}), flush=True)
             release_id = release["id"]
             if (release.get("tag_name") != tag or not release.get("draft")
                     or release.get("target_commitish") != candidate or release.get("prerelease") is not prerelease):
-                raise Unknown("Created release identity mismatch; inspect before another write")
+                raise Unknown("Created release identity mismatch. Inspect before another write")
             try:
                 asset = api("POST", f"/releases/{release_id}/assets?name=" + urllib.parse.quote(archive.name), payload, upload=True)
             except Unknown:
                 print(json.dumps({"inspection": api("GET", f"/releases/{release_id}/assets")}), flush=True)
-                raise Unknown("Asset upload uncertain; inspect before another write")
+                raise Unknown("Asset upload uncertain. Inspect before another write")
             # GitHub's server digest verifies received bytes without following a
             # redirect carrying write credentials or executing/extracting archive data.
             if asset.get("name") != archive.name or asset.get("size") != len(payload) or asset.get("digest") != "sha256:" + digest:
-                raise Unknown("Uploaded asset identity unverified; inspect before another write")
+                raise Unknown("Uploaded asset identity unverified. Inspect before another write")
             boundary_release = api("GET", f"/releases/{release_id}")
             boundary_tag = api("GET", "/git/ref/tags/" + urllib.parse.quote(tag, safe=""), missing=True)
             print(json.dumps({"operation": "publish-draft", "release": boundary_release,
@@ -522,14 +522,14 @@ jobs:
                     or boundary_release.get("target_commitish") != candidate
                     or boundary_release.get("prerelease") is not prerelease
                     or not tag_matches(boundary_tag, tag, candidate)):
-                raise Unknown("Publication boundary identity changed; stop and inspect before another write")
+                raise Unknown("Publication boundary identity changed. Stop and inspect before another write")
             try:
                 result = api("PATCH", f"/releases/{release_id}", {"draft": False, "prerelease": prerelease})
             except Unknown:
                 result = api("GET", f"/releases/{release_id}")
                 if (result.get("draft") is not False or result.get("tag_name") != tag
                         or result.get("prerelease") is not prerelease):
-                    raise Unknown("Publication remains unknown; stop and inspect")
+                    raise Unknown("Publication remains unknown. Stop and inspect")
             remote_tag = api("GET", "/git/ref/tags/" + urllib.parse.quote(tag, safe=""))
             if (result.get("draft") is not False or result.get("tag_name") != tag
                     or result.get("prerelease") is not prerelease

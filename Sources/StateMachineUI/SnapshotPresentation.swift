@@ -6,15 +6,15 @@ import os
 /// An `ObservableObject` projection of one complete `MainActor` snapshot across Apple platforms.
 ///
 /// The Combine counterpart of ``SnapshotPresentation``, with the same observation operations and a
-/// publisher of the snapshots it shows, ``presentedSnapshots``, for apps that deploy before iOS 17. It
-/// supports every deployment target of the package, including iOS 16. This object owns observation only.
-/// The enclosing screen or service owns the live machine and decides when navigating away closes its work
-/// scope. Released on another thread, it closes its registration's gate at once, which stops a generated
-/// owner's delivery, and leaves the rest to a later main-actor turn, which finishes the publisher's
-/// subscribers, removes its registration, and only once that removal has completed releases its snapshot,
-/// its closures, and an element still unread, on the main actor.
+/// publisher of the snapshots it shows, ``presentedSnapshots``, for apps that deploy before iOS 17.0.
+/// It supports every deployment target of the package, including iOS 16.0. This object owns
+/// observation only. The enclosing screen or service owns the live machine and decides when
+/// navigating away closes its work scope. Released on another thread, it closes its registration's
+/// gate at once to stop a generated owner's delivery, and leaves the rest to a later main-actor turn,
+/// which finishes the publisher's subscribers, removes its registration, and releases its snapshot,
+/// its closures, and any unread element on the main actor once that removal completes.
 @MainActor public final class SnapshotObservableObject<Snapshot>: ObservableObject {
-    /// The latest complete snapshot; independently published phase fields cannot diverge.
+    /// The latest complete snapshot, kept whole so phase fields cannot diverge.
     ///
     /// `objectWillChange` announces each change before it is made. The presentation keeps the snapshot
     /// in storage that a main-actor turn empties when the presentation is released, so its stored
@@ -29,10 +29,10 @@ import os
     /// does. An observation of a sequence that has delivered no element yet is not live until its
     /// first element is shown, and one whose sequence has finished with its final element still
     /// unread is not live. A refused observation, and one whose registration has already ended,
-    /// leaves it `false` and publishes nothing. It becomes `false` only once the registrations the presentation
-    /// let go have been removed, which is when a host of your own frees the slot of a token, so a
-    /// host that ends the observation from inside its own cancellation of that token has the slot
-    /// free by then; a change to `true` that follows waits behind it.
+    /// leaves it `false` and publishes nothing. It becomes `false` only once the registrations the
+    /// presentation let go have been removed, which is when a custom host frees the slot of a token,
+    /// so a host that ends the observation from inside its own cancellation of that token has the
+    /// slot free by then. Any change to `true` that follows waits behind it.
     @Published public private(set) var isObserving = false
     private let core: PresentationCore<SnapshotObservableObject>
     /// The work the presentation has spent deciding whether a registration waits for earlier ones, and
@@ -50,14 +50,13 @@ import os
         core.surface = self
         feed.current = { [weak self] in self?.snapshot }
     }
-    // A presentation can be released on another thread, as when an object that stores it is released
-    // there. The registration's gate closes at once, which stops delivery and frees a generated owner's
-    // slot; one later main-actor turn then finishes the publisher's subscribers, removes the
-    // registration, and clears its token, and once that removal has completed, which a host of your own
-    // that is cancelling the token on another thread can delay, releases the shown snapshot, the
-    // closures, and every value the observation held, on the main actor. The core holds those values
-    // alone, so they are released there even when that turn runs before this presentation's own storage
-    // is destroyed.
+    // A presentation can be released on another thread when an object storing it is released there.
+    // The registration's gate closes at once to stop delivery and free a generated owner's slot. One
+    // later main-actor turn then finishes the publisher's subscribers, removes the registration, and
+    // clears its token, releasing the shown snapshot, closures, and every value the observation held
+    // on the main actor once that removal completes (which a custom host cancelling the token on
+    // another thread can delay). The core holds those values alone, so they are released on the main
+    // actor even when that turn runs before this presentation's own storage is destroyed.
     deinit {
         core.gate.close()
         let core = core
@@ -71,64 +70,69 @@ import os
     /// A Combine publisher of a `Sendable` projection of each snapshot the presentation shows, which
     /// `transform` computes on the main actor, for a snapshot that is not `Sendable`.
     ///
-    /// It publishes as ``presentedSnapshots`` does: the projection of the snapshot shown when a
-    /// subscriber attaches, then of each newly shown snapshot, in the order and at the times that
-    /// ``PresentationPublisher`` describes. It stays open across observations and finishes once the
-    /// presentation is released.
+    /// It follows the same publication rules as ``presentedSnapshots``, emitting the projection of the
+    /// snapshot shown when a subscriber attaches and then each newly shown snapshot in the order and
+    /// at the times that ``PresentationPublisher`` describes. It stays open across observations and
+    /// finishes once the presentation is released.
     public func presentedSnapshots<Projection: Sendable>(
         projecting transform: @escaping @MainActor (Snapshot) -> Projection
     ) -> PresentationPublisher<Projection> {
         PresentationPublisher(feed, transform)
     }
-    /// Applies a newer complete snapshot synchronously; delayed delivery cannot regress the model.
+    /// Applies a newer complete snapshot synchronously so delayed delivery cannot regress the model.
     ///
-    /// A snapshot applied after an observation starts belongs to that observation: the observation's
-    /// first snapshot does not replace one that is at least as new. A snapshot whose revision closure
-    /// starts another observation belongs to the observation it replaced, so it is not applied. A
-    /// snapshot applied from a callback of a publication is shown once that publication's callbacks
-    /// return; one that will not be shown then, because its observation ended or the task that follows
-    /// it was cancelled first, holds back no newer snapshot.
+    /// A snapshot applied after an observation starts belongs to that observation, so the
+    /// observation's first snapshot does not replace one that is at least as new. A snapshot whose
+    /// revision closure starts another observation belongs to the observation it replaced and is not
+    /// applied. A snapshot applied from a callback of a publication is shown once that publication's
+    /// callbacks return. One that will not be shown then, because its observation ended or the task
+    /// following it was cancelled first, holds back no newer snapshot.
     @discardableResult public func apply(_ next: Snapshot) -> Bool { core.apply(next) }
     /// Observes a single-pass snapshot sequence, such as an owner's projected `snapshots(_:)`, from its
     /// first element.
     ///
     /// A sequence's first element is the snapshot current when it registered, or a newer one, so the
-    /// presentation shows it at once when it arrives and restarts its revision check from it; the caller
-    /// supplies no baseline, and the sequence may come from a different owner than the one shown so
-    /// far. ``isObserving`` becomes `true` once that element is shown, so a sequence whose owner
-    /// delivers its first element later, as a shared owner's does, is live from then. Each later
-    /// element is applied on the main actor through the revision check. At most 32 of the sequence's
-    /// elements, the first among them, are applied in one main-actor turn, and the rest on later
-    /// turns, whatever an earlier observation applied in that turn, so a
-    /// sequence that delivers again from each snapshot shown cannot hold the main actor, and is live
-    /// while it does. Snapshots that a replaced observation still delivers are discarded.
-    /// ``isObserving`` becomes `false` when the sequence ends; ``snapshot`` keeps the last value
-    /// applied. A sequence that has already ended, as a closed owner's has, or that ends while its
+    /// presentation shows it at once when it arrives and restarts its revision check from it. The
+    /// caller supplies no baseline, and the sequence may come from a different owner than the one
+    /// shown so far. ``isObserving`` becomes `true` once that element is shown, so a sequence whose
+    /// owner delivers its first element later, such as a shared owner, is live from then.
+    ///
+    /// Each later element is applied on the main actor through the revision check. At most 32 of the
+    /// sequence's elements, including the first, are applied in one main-actor turn, with the rest on
+    /// later turns regardless of what an earlier observation applied in that turn, so a sequence that
+    /// delivers again from each snapshot shown cannot hold the main actor and stays live while it
+    /// does. Snapshots that a replaced observation still delivers are discarded.
+    ///
+    /// ``isObserving`` becomes `false` when the sequence ends, while ``snapshot`` keeps the last value
+    /// applied. A sequence that has already ended, such as a closed owner's, or that ends while its
     /// first element is shown, shows the snapshot it holds while ``isObserving`` stays `false`. A
-    /// sequence that another consumer is already iterating belongs to that consumer: the presentation shows
-    /// nothing from it, reports nothing, and never ends it. The presentation owns any other sequence from the
-    /// moment of the call, before it ends the current observation, so a callback of that end that stops
-    /// observing or starts another observation releases the sequence as it releases any registration it
-    /// lets go: ``isObserving`` becomes `false` only once the sequence's slot is free.
+    /// sequence that another consumer is already iterating belongs to that consumer, so the
+    /// presentation shows nothing from it, reports nothing, and never ends it. The presentation owns
+    /// any other sequence from the moment of the call, before ending the current observation, so a
+    /// callback of that end that stops observing or starts another observation releases the sequence
+    /// like any registration it lets go, and ``isObserving`` becomes `false` only once the sequence's
+    /// slot is free.
     public func observe(_ snapshots: SnapshotSequence<Snapshot>) where Snapshot: Sendable {
         core.observe(snapshots)
     }
     /// Ends the current observation, then registers a snapshot sequence with `register` and observes
     /// it from its first element.
     ///
-    /// Use it to observe a projection of an owner, as
-    /// `try presentation.observe(snapshotsFrom: { try host.snapshots(project) })` does, where `project` keeps
-    /// the snapshot's revision for the revision check, as
-    /// `{ TitleSnapshot(revision: $0.revision, title: $0.title) }` does. The current observation
-    /// releases its registration before `register` runs, so observing the same owner again needs no
-    /// spare slot; `observe(try host.snapshots(project))` registers first, because
-    /// Swift evaluates the argument before the call, and an owner with one slot refuses it then. The
-    /// sequence `register` returns is observed as `observe(_:)` observes a sequence. If `register`
-    /// throws, this throws, nothing is shown, and ``isObserving`` is `false`. An observation started
-    /// from a callback that `register` runs replaces this one: the sequence `register` returns is
-    /// released at once, and a refusal is not thrown. This call cannot wait, so `register` runs at
-    /// once even while an earlier asynchronous registration of this presentation is still in flight; an
-    /// owner whose only slot that registration holds refuses this one, and the refusal is thrown.
+    /// Use this method to observe a projection of an owner, such as
+    /// `try presentation.observe(snapshotsFrom: { try host.snapshots(project) })`, where `project`
+    /// keeps the snapshot's revision for the revision check, as in
+    /// `{ TitleSnapshot(revision: $0.revision, title: $0.title) }`. The current observation releases
+    /// its registration before `register` runs, so observing the same owner again needs no spare
+    /// slot. Calling `observe(try host.snapshots(project))` registers first because Swift evaluates
+    /// the argument before the call, which an owner with one slot would refuse.
+    ///
+    /// The returned sequence is observed as ``observe(_:)-(SnapshotSequence<Snapshot>)`` observes a
+    /// sequence. If `register` throws, this method throws, nothing is shown, and ``isObserving`` is
+    /// `false`. An observation started from a callback that `register` runs replaces this one,
+    /// releasing the returned sequence at once without throwing a refusal. Because this call cannot
+    /// wait, `register` runs immediately even while an earlier asynchronous registration of this
+    /// presentation is still in flight, and an owner whose only slot that registration holds refuses
+    /// this one and throws the refusal.
     public func observe<Failure: Error>(
         snapshotsFrom register: () throws(Failure) -> SnapshotSequence<Snapshot>
     ) throws(Failure) where Snapshot: Sendable {
@@ -137,20 +141,22 @@ import os
     /// Ends the current observation, then registers a snapshot sequence with `register`, which may
     /// await its owner, and observes it from its first element.
     ///
-    /// Use it to observe a projection of an owner that registers across a suspension, as
-    /// `try await presentation.observe(snapshotsFrom: { try await host.snapshots(project) })` does for an
+    /// Use this method to observe a projection of an owner that registers across a suspension, such as
+    /// `try await presentation.observe(snapshotsFrom: { try await host.snapshots(project) })` for an
     /// actor owner. `register` runs on the main actor once the current observation has released its
-    /// registration, and once every registration that an earlier observation of this presentation is
+    /// registration and once every registration that an earlier observation of this presentation is
     /// still making, through a closure or with an owner, has returned and been installed or released,
-    /// so observing the same owner again needs no spare slot, even while an earlier `register` still
-    /// awaits it. An observation or ``stopObserving()`` that replaces this one during that wait makes
-    /// it return without running `register`. The sequence `register` returns is observed as
-    /// `observe(_:)` observes a sequence, and this returns once its first element, if it holds one, is
-    /// shown, also when a snapshot publication in progress shows it only after its callbacks return;
-    /// the observation then belongs to the presentation, not to the calling task. If `register` throws,
-    /// this throws, nothing is shown, and ``isObserving`` is `false`. An observation or
-    /// ``stopObserving()`` that replaces this one while `register` runs releases the sequence it
-    /// returns at once, and a refusal is not thrown then.
+    /// so observing the same owner again needs no spare slot even while an earlier `register` still
+    /// awaits it.
+    ///
+    /// An observation or ``stopObserving()`` that replaces this one during that wait makes this call
+    /// return without running `register`. The returned sequence is observed as
+    /// ``observe(_:)-(SnapshotSequence<Snapshot>)`` observes a sequence, and this call returns once its
+    /// first element, if it holds one, is shown (including after any snapshot publication in progress
+    /// finishes its callbacks). The observation then belongs to the presentation rather than to the
+    /// calling task. If `register` throws, this method throws, nothing is shown, and ``isObserving`` is
+    /// `false`. An observation or ``stopObserving()`` that replaces this one while `register` runs
+    /// releases the returned sequence at once without throwing a refusal.
     public func observe<Failure: Error>(
         snapshotsFrom register: @MainActor () async throws(Failure) -> SnapshotSequence<Snapshot>
     ) async throws(Failure) where Snapshot: Sendable {
@@ -159,18 +165,18 @@ import os
     /// Observes a `MainActor` owner from its current snapshot.
     ///
     /// The owner's registration supplies the current snapshot and every later one from one ordering
-    /// point: the presentation shows the first at once and restarts its revision check from it, so the
+    /// point. The presentation shows the first at once and restarts its revision check from it, so the
     /// caller supplies no baseline. Deliveries and the finish of a replaced observation are discarded.
-    /// If the owner refuses the registration, this throws and ``isObserving`` is `false`. When the owner
-    /// finishes the registration, by closing or being released, the observation cancels its
-    /// subscription before ``isObserving`` becomes `false`, so a host of your own that frees its slot
-    /// only when its subscription is cancelled has the slot free by then.
+    /// If the owner refuses the registration, this throws and ``isObserving`` is `false`. When the
+    /// owner finishes the registration by closing or being released, the observation cancels its
+    /// subscription before ``isObserving`` becomes `false`, so a custom host that frees its slot only
+    /// when its subscription is cancelled has the slot free by then.
     ///
     /// An observation started while an earlier one is still registering, such as from a callback that
-    /// registration runs, replaces it. This call cannot wait, so it registers at once, and a refusal
-    /// throws at once, also when the earlier one, or a registration that the owner is still cancelling,
-    /// holds the owner's only slot; nothing registers later. To observe again while a cancellation is
-    /// in progress, use an asynchronous form, which waits for earlier registrations.
+    /// registration runs, replaces it. Because this call cannot wait, it registers at once and throws
+    /// any refusal immediately, including when the earlier registration or one the owner is still
+    /// cancelling holds the owner's only slot. Nothing registers later. To observe again while a
+    /// cancellation is in progress, use an asynchronous form that waits for earlier registrations.
     public func observe<Host: MainActorStateMachineHost>(_ host: Host) throws(SubscriptionFailure)
     where Host.Snapshot == Snapshot {
         try core.observe(host)
@@ -178,61 +184,66 @@ import os
     /// Observes an owner confined to the main actor from its current snapshot.
     ///
     /// The owner's registration supplies the current snapshot and every later one from one ordering
-    /// point, exactly as for a `MainActor` owner, and an observation started while an earlier one is
-    /// still registering replaces it the same way. ``isObserving`` becomes `false` when the owner
-    /// closes, and also when it is released without closing, once the observation has cancelled its
-    /// registration on the main actor.
+    /// point, as for a `MainActor` owner, and an observation started while an earlier one is still
+    /// registering replaces it the same way. ``isObserving`` becomes `false` when the owner closes or
+    /// is released without closing, once the observation has cancelled its registration on the main actor.
     public func observe<Host: IsolatedStateMachineHost>(_ host: Host) throws(SubscriptionFailure)
     where Host.Owner == MainActor, Host.Snapshot == Snapshot {
         try core.observe(host)
     }
     /// Observes a shared owner from its current snapshot.
     ///
-    /// The presentation registers the owner's snapshot sequence, then shows the owner's current snapshot, read
-    /// once the registration exists, restarts its revision check from it, and follows the sequence, so
-    /// the caller supplies no baseline. Snapshots that a replaced observation still delivers are
-    /// discarded. If the owner refuses the registration, this throws, nothing is shown, and
-    /// ``isObserving`` is `false`; an owner that has already closed shows its closed snapshot and
-    /// ``isObserving`` stays `false`, and so does a sequence that ends while its first snapshot is
-    /// shown. The presentation owns the registration before it reads the snapshot, so an observation started
-    /// from that read releases it; one started from inside the owner's registration call replaces this
-    /// one, and if the owner refuses it while this one holds the slot, that refusal throws at once.
+    /// The presentation registers the owner's snapshot sequence, then shows the owner's current snapshot
+    /// read once the registration exists, restarts its revision check from it, and follows the
+    /// sequence, so the caller supplies no baseline. Snapshots that a replaced observation still
+    /// delivers are discarded. If the owner refuses the registration, this throws, nothing is shown,
+    /// and ``isObserving`` is `false`. An owner that has already closed shows its closed snapshot
+    /// while ``isObserving`` stays `false`, as does a sequence that ends while its first snapshot is
+    /// shown. The presentation owns the registration before reading the snapshot, so an observation
+    /// started from that read releases it. An observation started from inside the owner's registration
+    /// call replaces this one, and if the owner refuses it while this one holds the slot, that
+    /// refusal throws at once.
     public func observe<Host: SharedStateMachineHost>(_ host: Host) throws(SubscriptionFailure)
     where Host.Snapshot == Snapshot {
         try core.observe(host)
     }
     /// Observes an actor owner from its current snapshot.
     ///
-    /// The presentation ends its current observation at once and registers the owner's snapshot sequence once
-    /// every earlier registration of this presentation with the same owner, or through a closure, has
-    /// returned and been installed or released, so observing the same owner again needs no spare
-    /// slot. It owns the registration as soon as the owner returns it to the main actor, then reads the owner's
-    /// current snapshot, shows it, or the registration's unread snapshot when that is at least as new,
-    /// restarts its revision check from it, and follows the sequence; a refusal shows nothing, and an
-    /// owner that has closed by then shows its closed snapshot while ``isObserving`` stays `false`. An
-    /// observation or ``stopObserving()`` that replaces this one while it awaits the owner releases what
-    /// this one registered, at once when the registration has already returned, and this one returns
-    /// without throwing; one that replaces it during the wait makes it return without registering.
-    /// Cancelling its task ends the wait, and it registers at once. If the owner refuses the
-    /// registration, this throws and ``isObserving`` is `false`.
+    /// The presentation ends its current observation at once and registers the owner's snapshot
+    /// sequence once every earlier registration of this presentation with the same owner, or through
+    /// a closure, has returned and been installed or released, so observing the same owner again
+    /// needs no spare slot. It owns the registration as soon as the owner returns it to the main
+    /// actor, then reads the owner's current snapshot, shows it (or the registration's unread
+    /// snapshot when that is at least as new), restarts its revision check from it, and follows the
+    /// sequence. A refusal shows nothing, and an owner that has closed by then shows its closed
+    /// snapshot while ``isObserving`` stays `false`.
+    ///
+    /// An observation or ``stopObserving()`` that replaces this one while it awaits the owner
+    /// releases what this one registered, at once when the registration has already returned, and
+    /// this call returns without throwing. One that replaces it during the wait makes it return
+    /// without registering. Cancelling its task ends the wait, and it registers at once. If the owner
+    /// refuses the registration, this throws and ``isObserving`` is `false`.
     public func observe<Host: ActorStateMachineHost>(_ host: Host) async throws(SubscriptionFailure)
     where Host.Snapshot == Snapshot {
         try await core.observe(host)
     }
-    /// Observes an owner confined to another actor from its current snapshot; call it on that actor.
+    /// Observes an owner confined to another actor from its current snapshot.
     ///
-    /// The owner's registration and its current snapshot, read after it, are taken on the owning actor
-    /// in one turn, then handed to the main actor, where the presentation shows that snapshot, restarts its
-    /// revision check from it, and follows the registration; a refusal shows nothing, and an owner that
-    /// has already closed shows its closed snapshot while ``isObserving`` stays `false`. The presentation's
-    /// current observation ends first, and the registration is taken once every earlier registration
-    /// of this presentation with the same owner, or through a closure, has returned and been installed or
-    /// released, so observing the same owner again needs no spare slot; one that replaces this one
-    /// during that wait makes it return without registering, and cancelling its task ends the wait. The observation owns the hand-off from its start: one started on the main
-    /// actor before the hand-off arrives replaces this one, and the owning actor then stops the
-    /// registration's delivery as soon as the host returns it, without reading a snapshot for it, and
-    /// the main actor removes it; a replacement that needs its slot registers once that removal has
-    /// completed. If the owner refuses the registration, this throws, the presentation has stopped
+    /// Call this method on the owning actor. The owner's registration and its current snapshot, read
+    /// after it, are taken on the owning actor in one turn and then handed to the main actor, where
+    /// the presentation shows that snapshot, restarts its revision check from it, and follows the
+    /// registration. A refusal shows nothing, and an owner that has already closed shows its closed
+    /// snapshot while ``isObserving`` stays `false`. The presentation's current observation ends first,
+    /// and the registration is taken once every earlier registration of this presentation with the
+    /// same owner, or through a closure, has returned and been installed or released, so observing the
+    /// same owner again needs no spare slot. An observation replacing this one during that wait makes
+    /// it return without registering, and cancelling its task ends the wait.
+    ///
+    /// The observation owns the hand-off from its start. An observation started on the main actor
+    /// before the hand-off arrives replaces this one, and the owning actor then stops the
+    /// registration's delivery as soon as the host returns it without reading a snapshot for it while
+    /// the main actor removes it. A replacement that needs its slot registers once that removal
+    /// completes. If the owner refuses the registration, this throws, the presentation has stopped
     /// observing, and ``isObserving`` is `false`.
     public func observe<Host: IsolatedStateMachineHost>(
         _ host: Host,
@@ -244,39 +255,41 @@ import os
     ///
     /// The sequence seeds the revision check with its first element, and later elements are applied
     /// and the observation reported live as they are when the sequence is observed without a task.
-    /// The observation belongs to the calling task: this returns only once it has ended, when the
-    /// sequence ends, when the task is cancelled, or when ``stopObserving()`` or another observation
-    /// replaces it, including when it starts inside a snapshot callback, whose publication shows the
-    /// first snapshot after the callback returns and decides then, running no other client code,
-    /// whether the observation is live; the task applies the elements that wait after that. Cancelling
-    /// the task ends the observation at its next wait: the wait for an element, or the turn it gives up
-    /// after 32 elements. A cancellation that a snapshot callback issues while the task applies
-    /// elements ends the observation before the task shows another element or reports the observation
-    /// live, and so does a cancellation that the revision closure issues: the element it evaluates is
-    /// not shown, nor is an element that a snapshot publication in progress was to show once its
-    /// callbacks return, when the task is cancelled before then. This suits SwiftUI's `task` modifier, which cancels the task when the view
-    /// disappears. A task that is already cancelled, or that the end of the observation this one
-    /// replaces cancels, as a host's code that runs when that registration is released can, ends the
-    /// current observation and releases the sequence without showing it, and a sequence that another
-    /// consumer is already iterating returns at once and is left to that consumer.
+    /// The observation belongs to the calling task, so this call returns only once the observation
+    /// has ended because the sequence ended, the task was cancelled, or ``stopObserving()`` or
+    /// another observation replaced it. That includes starting inside a snapshot callback, whose
+    /// publication shows the first snapshot after the callback returns and decides then, running no
+    /// other client code, whether the observation is live, after which the task applies waiting elements.
+    ///
+    /// Cancelling the task ends the observation at its next wait, either the wait for an element or
+    /// the yield after 32 elements. A cancellation issued by a snapshot callback while the task
+    /// applies elements ends the observation before the task shows another element or reports the
+    /// observation live, as does a cancellation issued by the revision closure. The element being
+    /// evaluated is not shown, nor is an element that a snapshot publication in progress was about to
+    /// show once its callbacks return if the task is cancelled before then. This suits SwiftUI's
+    /// `task` modifier, which cancels the task when the view disappears. A task that is already
+    /// cancelled, or cancelled while the replaced observation ends (such as by host code running when
+    /// that registration is released), ends the current observation and releases the sequence without
+    /// showing it. A sequence that another consumer is already iterating returns at once and is left
+    /// to that consumer.
     public func follow(_ snapshots: SnapshotSequence<Snapshot>) async where Snapshot: Sendable {
         await core.follow(snapshots)
     }
     /// Ends the current observation, then registers a snapshot sequence with `register` and follows
     /// it for as long as the calling task runs.
     ///
-    /// `register` runs on the main actor once the current observation has released its registration,
-    /// and once every registration that an earlier observation of this presentation is still making has
-    /// returned and been installed or released, so following the same owner again needs no spare
-    /// slot, and it may await an owner, as `try await host.snapshots(project)` does for an actor
-    /// owner. A replacement, a stop, or the task's cancellation during that wait makes this return
-    /// without running `register`. The sequence it returns is then followed as ``follow(_:)`` follows
-    /// a sequence, and this returns once that observation has ended, and once a snapshot publication
-    /// in progress has shown the snapshot the observation accepted, if it does. If `register` throws, this
-    /// throws, nothing is shown, and ``isObserving`` is `false`; a refusal is not thrown once another
-    /// observation or the task's cancellation has replaced this one. A task that is already cancelled
-    /// ends the current observation and registers nothing, and one cancelled while `register` runs
-    /// releases the sequence it returns.
+    /// `register` runs on the main actor once the current observation has released its registration
+    /// and once every registration that an earlier observation of this presentation is still making
+    /// has returned and been installed or released, so following the same owner again needs no spare
+    /// slot. `register` may await an owner, as `try await host.snapshots(project)` does for an actor
+    /// owner. A replacement, a stop, or task cancellation during that wait makes this return without
+    /// running `register`. The returned sequence is followed as ``follow(_:)`` follows a sequence,
+    /// and this call returns once that observation has ended and any snapshot publication in progress
+    /// has shown the snapshot the observation accepted. If `register` throws, this method throws,
+    /// nothing is shown, and ``isObserving`` is `false`. No refusal is thrown once another
+    /// observation or task cancellation has replaced this one. A task already cancelled ends the
+    /// current observation and registers nothing, and one cancelled while `register` runs releases
+    /// the returned sequence.
     public func follow<Failure: Error>(
         snapshotsFrom register: @MainActor () async throws(Failure) -> SnapshotSequence<Snapshot>
     ) async throws(Failure) where Snapshot: Sendable {
@@ -302,15 +315,15 @@ extension SnapshotObservableObject where Snapshot: Sendable {
     /// A Combine publisher of the snapshots the presentation shows.
     ///
     /// It publishes the snapshot shown when a subscriber attaches, then each newly shown snapshot. A
-    /// change the subscriber has demand for
-    /// arrives after `objectWillChange` and before ``snapshot`` returns it; a buffered one arrives once
-    /// the subscriber has demand again, as ``PresentationPublisher`` describes.
+    /// change the subscriber has demand for arrives after `objectWillChange` and before ``snapshot``
+    /// returns it, while a buffered one arrives once the subscriber has demand again, as
+    /// ``PresentationPublisher`` describes.
     ///
-    /// It belongs to the presentation, not to one observation, so it stays open across
+    /// It belongs to the presentation rather than to one observation, so it stays open across
     /// ``stopObserving()`` and every later observation, and ``isObserving`` reports whether an
-    /// observation is live. Once the presentation is released, it finishes, and a subscriber that
-    /// attaches after that receives `.finished` at once. A snapshot that is not `Sendable` is published
-    /// through ``presentedSnapshots(projecting:)``.
+    /// observation is live. Once the presentation is released, it finishes, and any subscriber
+    /// attaching afterward receives `.finished` at once. Publish a non-`Sendable` snapshot through
+    /// ``presentedSnapshots(projecting:)``.
     public var presentedSnapshots: PresentationPublisher<Snapshot> { PresentationPublisher(feed) { $0 } }
 }
 
@@ -321,16 +334,16 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
 
 /// An `@Observable` projection of one complete `MainActor` snapshot.
 ///
-/// Only ``snapshot`` and ``isObserving`` are tracked. This object owns observation only. The enclosing screen
-/// or service owns the live machine and decides when navigating away closes its work scope. It requires iOS
-/// 17 or a matching release; ``SnapshotObservableObject`` has the same observation operations for earlier
-/// ones. Released on another thread, it closes its registration's gate at once, which stops a generated
-/// owner's delivery, and leaves the rest to a later main-actor turn, which removes its registration and
-/// only once that removal has completed releases its snapshot, its closures, and an element still unread,
-/// on the main actor.
+/// Only ``snapshot`` and ``isObserving`` are tracked. This object owns observation only. The
+/// enclosing screen or service owns the live machine and decides when navigating away closes its work
+/// scope. Requires iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, or Mac Catalyst 17.0
+/// and later. Use ``SnapshotObservableObject`` for earlier OS releases. Released on another thread,
+/// it closes its registration's gate at once to stop a generated owner's delivery, and leaves the
+/// rest to a later main-actor turn, which removes its registration and releases its snapshot, its
+/// closures, and any unread element on the main actor once that removal completes.
 @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, macCatalyst 17.0, *)
 @MainActor @Observable public final class SnapshotPresentation<Snapshot> {
-    /// The latest complete snapshot; independently observed phase fields cannot diverge.
+    /// The latest complete snapshot, kept whole so observed phase fields cannot diverge.
     ///
     /// The model keeps the snapshot in storage that a main-actor turn empties when the model is
     /// released, so its stored properties never hold a snapshot of their own.
@@ -348,9 +361,9 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
     /// first element is shown, and one whose sequence has finished with its final element still
     /// unread is not live. A refused observation, and one whose registration has already ended,
     /// leaves it `false` and changes nothing. It becomes `false` only once the registrations the model
-    /// let go have been removed, which is when a host of your own frees the slot of a token, so a
-    /// host that ends the observation from inside its own cancellation of that token has the slot
-    /// free by then; a change to `true` that follows waits behind it.
+    /// let go have been removed, which is when a custom host frees the slot of a token, so a host
+    /// that ends the observation from inside its own cancellation of that token has the slot free by
+    /// then. Any change to `true` that follows waits behind it.
     public private(set) var isObserving = false
     @ObservationIgnored private let core: PresentationCore<SnapshotPresentation>
     /// The work the model has spent deciding whether a registration waits for earlier ones, and adding
@@ -365,68 +378,72 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
         core = PresentationCore(initial, watermark: revision(initial), revision: revision)
         core.surface = self
     }
-    // A presentation can be released on another thread, as when an object that stores it is released
-    // there. The registration's gate closes at once, which stops delivery and frees a generated owner's
-    // slot; one later main-actor turn then removes the registration and clears its token, and once that
-    // removal has completed, which a host of your own that is cancelling the token on another thread can
-    // delay, releases the shown snapshot, the closures, and every value the observation held, on the
-    // main actor. The core holds those values alone, so they are released there even when that turn
-    // runs before this model's own storage is destroyed.
+    // A presentation can be released on another thread when an object storing it is released there.
+    // The registration's gate closes at once to stop delivery and free a generated owner's slot. One
+    // later main-actor turn then removes the registration and clears its token, releasing the shown
+    // snapshot, closures, and every value the observation held on the main actor once that removal
+    // completes (which a custom host cancelling the token on another thread can delay). The core
+    // holds those values alone, so they are released on the main actor even when that turn runs
+    // before this model's own storage is destroyed.
     deinit {
         core.gate.close()
         let core = core
         Task { @MainActor in core.dispose() }
         DestructorPause.reached()
     }
-    /// Applies a newer complete snapshot synchronously; delayed delivery cannot regress the model.
+    /// Applies a newer complete snapshot synchronously so delayed delivery cannot regress the model.
     ///
-    /// A snapshot applied after an observation starts belongs to that observation: the observation's
-    /// first snapshot does not replace one that is at least as new. A snapshot whose revision closure
-    /// starts another observation belongs to the observation it replaced, so it is not applied. A
-    /// snapshot applied from a callback of a publication is shown once that publication's callbacks
-    /// return; one that will not be shown then, because its observation ended or the task that follows
-    /// it was cancelled first, holds back no newer snapshot.
+    /// A snapshot applied after an observation starts belongs to that observation, so the
+    /// observation's first snapshot does not replace one that is at least as new. A snapshot whose
+    /// revision closure starts another observation belongs to the observation it replaced and is not
+    /// applied. A snapshot applied from a callback of a publication is shown once that publication's
+    /// callbacks return. One that will not be shown then, because its observation ended or the task
+    /// following it was cancelled first, holds back no newer snapshot.
     @discardableResult public func apply(_ next: Snapshot) -> Bool { core.apply(next) }
     /// Observes a single-pass snapshot sequence, such as an owner's projected `snapshots(_:)`, from its
     /// first element.
     ///
     /// A sequence's first element is the snapshot current when it registered, or a newer one, so the
-    /// model shows it at once when it arrives and restarts its revision check from it; the caller
+    /// model shows it at once when it arrives and restarts its revision check from it. The caller
     /// supplies no baseline, and the sequence may come from a different owner than the one shown so
     /// far. ``isObserving`` becomes `true` once that element is shown, so a sequence whose owner
-    /// delivers its first element later, as a shared owner's does, is live from then. Each later
-    /// element is applied on the main actor through the revision check. At most 32 of the sequence's
-    /// elements, the first among them, are applied in one main-actor turn, and the rest on later
-    /// turns, whatever an earlier observation applied in that turn, so a
-    /// sequence that delivers again from each snapshot shown cannot hold the main actor, and is live
-    /// while it does. Snapshots that a replaced observation still delivers are discarded.
-    /// ``isObserving`` becomes `false` when the sequence ends; ``snapshot`` keeps the last value
-    /// applied. A sequence that has already ended, as a closed owner's has, or that ends while its
+    /// delivers its first element later, such as a shared owner, is live from then.
+    ///
+    /// Each later element is applied on the main actor through the revision check. At most 32 of the
+    /// sequence's elements, including the first, are applied in one main-actor turn, with the rest on
+    /// later turns regardless of what an earlier observation applied in that turn, so a sequence that
+    /// delivers again from each snapshot shown cannot hold the main actor and stays live while it
+    /// does. Snapshots that a replaced observation still delivers are discarded.
+    ///
+    /// ``isObserving`` becomes `false` when the sequence ends, while ``snapshot`` keeps the last value
+    /// applied. A sequence that has already ended, such as a closed owner's, or that ends while its
     /// first element is shown, shows the snapshot it holds while ``isObserving`` stays `false`. A
-    /// sequence that another consumer is already iterating belongs to that consumer: the model shows
-    /// nothing from it, reports nothing, and never ends it. The model owns any other sequence from the
-    /// moment of the call, before it ends the current observation, so a callback of that end that stops
-    /// observing or starts another observation releases the sequence as it releases any registration it
-    /// lets go: ``isObserving`` becomes `false` only once the sequence's slot is free.
+    /// sequence that another consumer is already iterating belongs to that consumer, so the model
+    /// shows nothing from it, reports nothing, and never ends it. The model owns any other sequence
+    /// from the moment of the call, before ending the current observation, so a callback of that end
+    /// that stops observing or starts another observation releases the sequence like any registration
+    /// it lets go, and ``isObserving`` becomes `false` only once the sequence's slot is free.
     public func observe(_ snapshots: SnapshotSequence<Snapshot>) where Snapshot: Sendable {
         core.observe(snapshots)
     }
     /// Ends the current observation, then registers a snapshot sequence with `register` and observes
     /// it from its first element.
     ///
-    /// Use it to observe a projection of an owner, as
-    /// `try model.observe(snapshotsFrom: { try host.snapshots(project) })` does, where `project` keeps
-    /// the snapshot's revision for the revision check, as
-    /// `{ TitleSnapshot(revision: $0.revision, title: $0.title) }` does. The current observation
-    /// releases its registration before `register` runs, so observing the same owner again needs no
-    /// spare slot; `observe(try host.snapshots(project))` registers first, because
-    /// Swift evaluates the argument before the call, and an owner with one slot refuses it then. The
-    /// sequence `register` returns is observed as `observe(_:)` observes a sequence. If `register`
-    /// throws, this throws, nothing is shown, and ``isObserving`` is `false`. An observation started
-    /// from a callback that `register` runs replaces this one: the sequence `register` returns is
-    /// released at once, and a refusal is not thrown. This call cannot wait, so `register` runs at
-    /// once even while an earlier asynchronous registration of this model is still in flight; an
-    /// owner whose only slot that registration holds refuses this one, and the refusal is thrown.
+    /// Use this method to observe a projection of an owner, such as
+    /// `try model.observe(snapshotsFrom: { try host.snapshots(project) })`, where `project` keeps
+    /// the snapshot's revision for the revision check, as in
+    /// `{ TitleSnapshot(revision: $0.revision, title: $0.title) }`. The current observation releases
+    /// its registration before `register` runs, so observing the same owner again needs no spare
+    /// slot. Calling `observe(try host.snapshots(project))` registers first because Swift evaluates
+    /// the argument before the call, which an owner with one slot would refuse.
+    ///
+    /// The returned sequence is observed as ``observe(_:)-(SnapshotSequence<Snapshot>)`` observes a
+    /// sequence. If `register` throws, this method throws, nothing is shown, and ``isObserving`` is
+    /// `false`. An observation started from a callback that `register` runs replaces this one,
+    /// releasing the returned sequence at once without throwing a refusal. Because this call cannot
+    /// wait, `register` runs immediately even while an earlier asynchronous registration of this model
+    /// is still in flight, and an owner whose only slot that registration holds refuses this one and
+    /// throws the refusal.
     public func observe<Failure: Error>(
         snapshotsFrom register: () throws(Failure) -> SnapshotSequence<Snapshot>
     ) throws(Failure) where Snapshot: Sendable {
@@ -435,20 +452,22 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
     /// Ends the current observation, then registers a snapshot sequence with `register`, which may
     /// await its owner, and observes it from its first element.
     ///
-    /// Use it to observe a projection of an owner that registers across a suspension, as
-    /// `try await model.observe(snapshotsFrom: { try await host.snapshots(project) })` does for an
-    /// actor owner. `register` runs on the main actor once the current observation has released its
-    /// registration, and once every registration that an earlier observation of this model is
-    /// still making, through a closure or with an owner, has returned and been installed or released,
-    /// so observing the same owner again needs no spare slot, even while an earlier `register` still
-    /// awaits it. An observation or ``stopObserving()`` that replaces this one during that wait makes
-    /// it return without running `register`. The sequence `register` returns is observed as
-    /// `observe(_:)` observes a sequence, and this returns once its first element, if it holds one, is
-    /// shown, also when a snapshot publication in progress shows it only after its callbacks return;
-    /// the observation then belongs to the model, not to the calling task. If `register` throws,
-    /// this throws, nothing is shown, and ``isObserving`` is `false`. An observation or
-    /// ``stopObserving()`` that replaces this one while `register` runs releases the sequence it
-    /// returns at once, and a refusal is not thrown then.
+    /// Use this method to observe a projection of an owner that registers across a suspension, such as
+    /// `try await model.observe(snapshotsFrom: { try await host.snapshots(project) })` for an actor
+    /// owner. `register` runs on the main actor once the current observation has released its
+    /// registration and once every registration that an earlier observation of this model is still
+    /// making, through a closure or with an owner, has returned and been installed or released, so
+    /// observing the same owner again needs no spare slot even while an earlier `register` still
+    /// awaits it.
+    ///
+    /// An observation or ``stopObserving()`` that replaces this one during that wait makes this call
+    /// return without running `register`. The returned sequence is observed as
+    /// ``observe(_:)-(SnapshotSequence<Snapshot>)`` observes a sequence, and this call returns once its
+    /// first element, if it holds one, is shown (including after any snapshot publication in progress
+    /// finishes its callbacks). The observation then belongs to the model rather than to the calling
+    /// task. If `register` throws, this method throws, nothing is shown, and ``isObserving`` is
+    /// `false`. An observation or ``stopObserving()`` that replaces this one while `register` runs
+    /// releases the returned sequence at once without throwing a refusal.
     public func observe<Failure: Error>(
         snapshotsFrom register: @MainActor () async throws(Failure) -> SnapshotSequence<Snapshot>
     ) async throws(Failure) where Snapshot: Sendable {
@@ -457,18 +476,18 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
     /// Observes a `MainActor` owner from its current snapshot.
     ///
     /// The owner's registration supplies the current snapshot and every later one from one ordering
-    /// point: the model shows the first at once and restarts its revision check from it, so the
-    /// caller supplies no baseline. Deliveries and the finish of a replaced observation are discarded.
-    /// If the owner refuses the registration, this throws and ``isObserving`` is `false`. When the owner
-    /// finishes the registration, by closing or being released, the observation cancels its
-    /// subscription before ``isObserving`` becomes `false`, so a host of your own that frees its slot
-    /// only when its subscription is cancelled has the slot free by then.
+    /// point. The model shows the first at once and restarts its revision check from it, so the caller
+    /// supplies no baseline. Deliveries and the finish of a replaced observation are discarded. If
+    /// the owner refuses the registration, this throws and ``isObserving`` is `false`. When the owner
+    /// finishes the registration by closing or being released, the observation cancels its
+    /// subscription before ``isObserving`` becomes `false`, so a custom host that frees its slot only
+    /// when its subscription is cancelled has the slot free by then.
     ///
     /// An observation started while an earlier one is still registering, such as from a callback that
-    /// registration runs, replaces it. This call cannot wait, so it registers at once, and a refusal
-    /// throws at once, also when the earlier one, or a registration that the owner is still cancelling,
-    /// holds the owner's only slot; nothing registers later. To observe again while a cancellation is
-    /// in progress, use an asynchronous form, which waits for earlier registrations.
+    /// registration runs, replaces it. Because this call cannot wait, it registers at once and throws
+    /// any refusal immediately, including when the earlier registration or one the owner is still
+    /// cancelling holds the owner's only slot. Nothing registers later. To observe again while a
+    /// cancellation is in progress, use an asynchronous form that waits for earlier registrations.
     public func observe<Host: MainActorStateMachineHost>(_ host: Host) throws(SubscriptionFailure)
     where Host.Snapshot == Snapshot {
         try core.observe(host)
@@ -476,25 +495,25 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
     /// Observes an owner confined to the main actor from its current snapshot.
     ///
     /// The owner's registration supplies the current snapshot and every later one from one ordering
-    /// point, exactly as for a `MainActor` owner, and an observation started while an earlier one is
-    /// still registering replaces it the same way. ``isObserving`` becomes `false` when the owner
-    /// closes, and also when it is released without closing, once the observation has cancelled its
-    /// registration on the main actor.
+    /// point, as for a `MainActor` owner, and an observation started while an earlier one is still
+    /// registering replaces it the same way. ``isObserving`` becomes `false` when the owner closes or
+    /// is released without closing, once the observation has cancelled its registration on the main actor.
     public func observe<Host: IsolatedStateMachineHost>(_ host: Host) throws(SubscriptionFailure)
     where Host.Owner == MainActor, Host.Snapshot == Snapshot {
         try core.observe(host)
     }
     /// Observes a shared owner from its current snapshot.
     ///
-    /// The model registers the owner's snapshot sequence, then shows the owner's current snapshot, read
+    /// The model registers the owner's snapshot sequence, then shows the owner's current snapshot read
     /// once the registration exists, restarts its revision check from it, and follows the sequence, so
     /// the caller supplies no baseline. Snapshots that a replaced observation still delivers are
     /// discarded. If the owner refuses the registration, this throws, nothing is shown, and
-    /// ``isObserving`` is `false`; an owner that has already closed shows its closed snapshot and
-    /// ``isObserving`` stays `false`, and so does a sequence that ends while its first snapshot is
-    /// shown. The model owns the registration before it reads the snapshot, so an observation started
-    /// from that read releases it; one started from inside the owner's registration call replaces this
-    /// one, and if the owner refuses it while this one holds the slot, that refusal throws at once.
+    /// ``isObserving`` is `false`. An owner that has already closed shows its closed snapshot while
+    /// ``isObserving`` stays `false`, as does a sequence that ends while its first snapshot is shown.
+    /// The model owns the registration before reading the snapshot, so an observation started from
+    /// that read releases it. An observation started from inside the owner's registration call
+    /// replaces this one, and if the owner refuses it while this one holds the slot, that refusal
+    /// throws at once.
     public func observe<Host: SharedStateMachineHost>(_ host: Host) throws(SubscriptionFailure)
     where Host.Snapshot == Snapshot {
         try core.observe(host)
@@ -504,34 +523,39 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
     /// The model ends its current observation at once and registers the owner's snapshot sequence once
     /// every earlier registration of this model with the same owner, or through a closure, has
     /// returned and been installed or released, so observing the same owner again needs no spare
-    /// slot. It owns the registration as soon as the owner returns it to the main actor, then reads the owner's
-    /// current snapshot, shows it, or the registration's unread snapshot when that is at least as new,
-    /// restarts its revision check from it, and follows the sequence; a refusal shows nothing, and an
-    /// owner that has closed by then shows its closed snapshot while ``isObserving`` stays `false`. An
-    /// observation or ``stopObserving()`` that replaces this one while it awaits the owner releases what
-    /// this one registered, at once when the registration has already returned, and this one returns
-    /// without throwing; one that replaces it during the wait makes it return without registering.
-    /// Cancelling its task ends the wait, and it registers at once. If the owner refuses the
-    /// registration, this throws and ``isObserving`` is `false`.
+    /// slot. It owns the registration as soon as the owner returns it to the main actor, then reads
+    /// the owner's current snapshot, shows it (or the registration's unread snapshot when that is at
+    /// least as new), restarts its revision check from it, and follows the sequence. A refusal shows
+    /// nothing, and an owner that has closed by then shows its closed snapshot while ``isObserving``
+    /// stays `false`.
+    ///
+    /// An observation or ``stopObserving()`` that replaces this one while it awaits the owner
+    /// releases what this one registered, at once when the registration has already returned, and
+    /// this call returns without throwing. One that replaces it during the wait makes it return
+    /// without registering. Cancelling its task ends the wait, and it registers at once. If the owner
+    /// refuses the registration, this throws and ``isObserving`` is `false`.
     public func observe<Host: ActorStateMachineHost>(_ host: Host) async throws(SubscriptionFailure)
     where Host.Snapshot == Snapshot {
         try await core.observe(host)
     }
-    /// Observes an owner confined to another actor from its current snapshot; call it on that actor.
+    /// Observes an owner confined to another actor from its current snapshot.
     ///
-    /// The owner's registration and its current snapshot, read after it, are taken on the owning actor
-    /// in one turn, then handed to the main actor, where the model shows that snapshot, restarts its
-    /// revision check from it, and follows the registration; a refusal shows nothing, and an owner that
-    /// has already closed shows its closed snapshot while ``isObserving`` stays `false`. The model's
-    /// current observation ends first, and the registration is taken once every earlier registration
-    /// of this model with the same owner, or through a closure, has returned and been installed or
-    /// released, so observing the same owner again needs no spare slot; one that replaces this one
-    /// during that wait makes it return without registering, and cancelling its task ends the wait. The observation owns the hand-off from its start: one started on the main
-    /// actor before the hand-off arrives replaces this one, and the owning actor then stops the
-    /// registration's delivery as soon as the host returns it, without reading a snapshot for it, and
-    /// the main actor removes it; a replacement that needs its slot registers once that removal has
-    /// completed. If the owner refuses the registration, this throws, the model has stopped observing,
-    /// and ``isObserving`` is `false`.
+    /// Call this method on the owning actor. The owner's registration and its current snapshot, read
+    /// after it, are taken on the owning actor in one turn and then handed to the main actor, where
+    /// the model shows that snapshot, restarts its revision check from it, and follows the
+    /// registration. A refusal shows nothing, and an owner that has already closed shows its closed
+    /// snapshot while ``isObserving`` stays `false`. The model's current observation ends first, and
+    /// the registration is taken once every earlier registration of this model with the same owner, or
+    /// through a closure, has returned and been installed or released, so observing the same owner
+    /// again needs no spare slot. An observation replacing this one during that wait makes it return
+    /// without registering, and cancelling its task ends the wait.
+    ///
+    /// The observation owns the hand-off from its start. An observation started on the main actor
+    /// before the hand-off arrives replaces this one, and the owning actor then stops the
+    /// registration's delivery as soon as the host returns it without reading a snapshot for it while
+    /// the main actor removes it. A replacement that needs its slot registers once that removal
+    /// completes. If the owner refuses the registration, this throws, the model has stopped
+    /// observing, and ``isObserving`` is `false`.
     public func observe<Host: IsolatedStateMachineHost>(
         _ host: Host,
         isolation: isolated Host.Owner = #isolation
@@ -542,39 +566,41 @@ extension SnapshotObservableObject where Snapshot: StateMachineSnapshot {
     ///
     /// The sequence seeds the revision check with its first element, and later elements are applied
     /// and the observation reported live as they are when the sequence is observed without a task.
-    /// The observation belongs to the calling task: this returns only once it has ended, when the
-    /// sequence ends, when the task is cancelled, or when ``stopObserving()`` or another observation
-    /// replaces it, including when it starts inside a snapshot callback, whose publication shows the
-    /// first snapshot after the callback returns and decides then, running no other client code,
-    /// whether the observation is live; the task applies the elements that wait after that. Cancelling
-    /// the task ends the observation at its next wait: the wait for an element, or the turn it gives up
-    /// after 32 elements. A cancellation that a snapshot callback issues while the task applies
-    /// elements ends the observation before the task shows another element or reports the observation
-    /// live, and so does a cancellation that the revision closure issues: the element it evaluates is
-    /// not shown, nor is an element that a snapshot publication in progress was to show once its
-    /// callbacks return, when the task is cancelled before then. This suits SwiftUI's `task` modifier, which cancels the task when the view
-    /// disappears. A task that is already cancelled, or that the end of the observation this one
-    /// replaces cancels, as a host's code that runs when that registration is released can, ends the
-    /// current observation and releases the sequence without showing it, and a sequence that another
-    /// consumer is already iterating returns at once and is left to that consumer.
+    /// The observation belongs to the calling task, so this call returns only once the observation
+    /// has ended because the sequence ended, the task was cancelled, or ``stopObserving()`` or
+    /// another observation replaced it. That includes starting inside a snapshot callback, whose
+    /// publication shows the first snapshot after the callback returns and decides then, running no
+    /// other client code, whether the observation is live, after which the task applies waiting elements.
+    ///
+    /// Cancelling the task ends the observation at its next wait, either the wait for an element or
+    /// the yield after 32 elements. A cancellation issued by a snapshot callback while the task
+    /// applies elements ends the observation before the task shows another element or reports the
+    /// observation live, as does a cancellation issued by the revision closure. The element being
+    /// evaluated is not shown, nor is an element that a snapshot publication in progress was about to
+    /// show once its callbacks return if the task is cancelled before then. This suits SwiftUI's
+    /// `task` modifier, which cancels the task when the view disappears. A task that is already
+    /// cancelled, or cancelled while the replaced observation ends (such as by host code running when
+    /// that registration is released), ends the current observation and releases the sequence without
+    /// showing it. A sequence that another consumer is already iterating returns at once and is left
+    /// to that consumer.
     public func follow(_ snapshots: SnapshotSequence<Snapshot>) async where Snapshot: Sendable {
         await core.follow(snapshots)
     }
     /// Ends the current observation, then registers a snapshot sequence with `register` and follows
     /// it for as long as the calling task runs.
     ///
-    /// `register` runs on the main actor once the current observation has released its registration,
+    /// `register` runs on the main actor once the current observation has released its registration
     /// and once every registration that an earlier observation of this model is still making has
     /// returned and been installed or released, so following the same owner again needs no spare
-    /// slot, and it may await an owner, as `try await host.snapshots(project)` does for an actor
-    /// owner. A replacement, a stop, or the task's cancellation during that wait makes this return
-    /// without running `register`. The sequence it returns is then followed as ``follow(_:)`` follows
-    /// a sequence, and this returns once that observation has ended, and once a snapshot publication
-    /// in progress has shown the snapshot the observation accepted, if it does. If `register` throws, this
-    /// throws, nothing is shown, and ``isObserving`` is `false`; a refusal is not thrown once another
-    /// observation or the task's cancellation has replaced this one. A task that is already cancelled
-    /// ends the current observation and registers nothing, and one cancelled while `register` runs
-    /// releases the sequence it returns.
+    /// slot. `register` may await an owner, as `try await host.snapshots(project)` does for an actor
+    /// owner. A replacement, a stop, or task cancellation during that wait makes this return without
+    /// running `register`. The returned sequence is followed as ``follow(_:)`` follows a sequence,
+    /// and this call returns once that observation has ended and any snapshot publication in progress
+    /// has shown the snapshot the observation accepted. If `register` throws, this method throws,
+    /// nothing is shown, and ``isObserving`` is `false`. No refusal is thrown once another
+    /// observation or task cancellation has replaced this one. A task already cancelled ends the
+    /// current observation and registers nothing, and one cancelled while `register` runs releases
+    /// the returned sequence.
     public func follow<Failure: Error>(
         snapshotsFrom register: @MainActor () async throws(Failure) -> SnapshotSequence<Snapshot>
     ) async throws(Failure) where Snapshot: Sendable {
@@ -610,27 +636,27 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     func report(observing: Bool)
 }
 
-/// The observation of both snapshot presentations: which source a presentation follows, which
-/// deliveries it applies, and when it reports that observation started or ended.
+/// The observation core shared by both snapshot presentations, managing which source a presentation
+/// follows, which deliveries it applies, and when it reports that observation started or ended.
 ///
 /// Each observation claims a generation, and every callback carries the generation it was registered
 /// for, so a replaced observation's deliveries and finish are discarded.
 ///
 /// Every registration with an owner, synchronous or across suspensions, is one attempt. An attempt is
-/// in `registering` exactly while it is inside the owner's registration call, or while the release
-/// of the registration it obtained has not returned: the only times it may hold a slot the
-/// presentation cannot count as free. `settle` alone decides what an answered attempt does: install
-/// its registration or release it; a refusal withdraws it. The presentation owns a registration from
-/// the moment the owner returns it, before it reads a snapshot or runs any other code, so a stop or a
-/// newer observation can always release it. A synchronous observation registers at once and throws a
-/// refusal at once. An asynchronous one first waits until no related attempt that began before it is
-/// in `registering`, which each attempt's serial orders, so it never registers while an earlier
-/// attempt of its own holds the slot, and then throws a refusal at once too.
+/// in `registering` exactly while it is inside the owner's registration call or while the release of
+/// the registration it obtained has not returned, which are the only times it may hold a slot the
+/// presentation cannot count as free. `adopt` alone decides whether an answered attempt installs or
+/// releases its registration, while `withdraw` handles a refusal. The presentation owns a
+/// registration from the moment the owner returns it, before reading a snapshot or running any other
+/// code, so a stop or newer observation can always release it. A synchronous observation registers at
+/// once and throws any refusal at once. An asynchronous one first waits until no related attempt that
+/// began before it is in `registering`, ordered by attempt serial, so it never registers while an
+/// earlier attempt of its own holds the slot, and then throws any refusal at once.
 ///
-/// What an observation shows and whether it reports itself live come from its registration: a
-/// sequence's unread element outranks an older snapshot read separately, and the registration's
-/// state is read again after every callout, so a registration that ended meanwhile, as a closed
-/// owner's does, shows its last snapshot without reporting an observation.
+/// What an observation shows and whether it reports itself live come from its registration. A
+/// sequence's unread element outranks an older snapshot read separately, and the registration's state
+/// is checked again after every callout so a registration that ended meanwhile, such as a closed
+/// owner's, shows its last snapshot without reporting an observation.
 @MainActor private final class PresentationCore<Surface: PresentationSurface> {
     typealias Snapshot = Surface.Snapshot
 
@@ -669,9 +695,9 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     // Replaced by a closure that captures nothing when a released presentation is disposed of, so the
     // client's closure is released on the main actor.
     private var revision: @MainActor (Snapshot) -> UInt64
-    // The snapshot the surface shows, which the surface reads from here: a presentation released on
-    // another thread destroys its own storage there, so this core, which the main-actor turn that
-    // disposes of it holds, keeps the snapshot's only reference until that turn.
+    // The snapshot the surface shows, which the surface reads from here. A presentation released on
+    // another thread destroys its own storage there, so this core, held by the main-actor turn that
+    // disposes of it, keeps the snapshot's only reference until that turn.
     private var shown: Snapshot?
     // The revision of `shown`, or of the snapshot a publication in progress is assigning, whose
     // assignment follows its announcement's callbacks whatever they do. A deferred value that will not
@@ -739,13 +765,13 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     // Whether an observation is live. `isObserving` reports it.
     private var live = false
     // The changes of `live` that `isObserving` has not reported yet, oldest first, and whether a report
-    // is being assigned. A callback of that assignment can start or end an observation; its change
+    // is being assigned. A callback of that assignment can start or end an observation, and its change
     // waits here and is assigned after the one in progress.
     private var reports = PendingReports()
     private var reporting = false
-    // The disposal of a released presentation: not begun, waiting until no registration it made or let
-    // go is still being made or removed, or done. While it waits, the core keeps itself here, so the
-    // releases find it when they return, and it releases the client values it holds only then.
+    // The disposal state of a released presentation (not begun, waiting until no registration it made
+    // or let go is still being made or removed, or done). While waiting, the core retains itself here
+    // so releases find it when they return, and releases its client values only then.
     private var disposal = Disposal.none
     private enum Disposal {
         case none
@@ -766,13 +792,13 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     /// Disposes of the core of a released presentation, on the main actor.
     ///
     /// The presentation's destructor closed the current registration's gate where it ran. This ends the
-    /// observation as `stopObserving()` does, which removes the registration and clears its token, and
-    /// once no registration this presentation made is still in its owner's registration call or being
-    /// removed, releases the client values the core holds: the shown snapshot, a deferred one, the
-    /// attempts' seeds, and the revision closure. A host of your own that is cancelling a token on
-    /// another thread at this moment delays that until its cancellation returns, and an owner still
-    /// inside a registration call until it returns and the presentation has removed what it returned.
-    /// The core keeps itself until then.
+    /// observation as `stopObserving()` does, removing the registration and clearing its token, and
+    /// releases the client values the core holds (the shown snapshot, any deferred snapshot, the
+    /// attempts' seeds, and the revision closure) once no registration this presentation made is still
+    /// inside an owner's registration call or being removed. A custom host cancelling a token on
+    /// another thread delays that until its cancellation returns, and an owner still inside a
+    /// registration call delays it until that call returns and the presentation removes what it
+    /// returned. The core keeps itself alive until then.
     func dispose() {
         _ = endObservation()
         guard case .none = disposal else { return }
@@ -1401,10 +1427,11 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     }
     /// How the observation of a sequence registration continues after a step on the main actor.
     private enum Continuation {
-        /// Nothing follows: a newer observation replaced it, or its registration ended.
+        /// Nothing follows because a newer observation replaced it or its registration ended.
         case done
         /// It continues on the task that follows it, which applies what the registration delivers.
-        /// `live` reports whether it is live already; one that is not applies the elements waiting in
+        ///
+        /// `live` reports whether it is live already. One that is not applies the elements waiting in
         /// the registration on later turns until it is. `applied` counts the elements applied in the
         /// current main-actor turn.
         case follow(live: Bool, applied: Int)
@@ -1590,14 +1617,16 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     private enum Drained {
         /// A newer observation replaced this one.
         case replaced
-        /// The registration ended and was released; the observation reports nothing.
+        /// The registration ended and was released, so the observation reports nothing.
         case ended
         /// The task that follows the observation was cancelled by a callout of the step.
         case cancelled
         /// The registration has delivered nothing yet.
         case unshown(applied: Int)
-        /// The observation's first snapshot is shown; `applied` elements were applied in this turn,
-        /// and more may wait once that reaches the turn's limit.
+        /// The observation's first snapshot is shown.
+        ///
+        /// `applied` elements were applied in this turn, and more may wait once that reaches the
+        /// turn's limit.
         case shown(applied: Int)
     }
     // Applies the elements a sequence registration holds until it holds none, it ends, or `applied`
@@ -1705,7 +1734,7 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     private enum Standing {
         /// A newer observation or a stop replaced it.
         case replaced
-        /// It is current; `unshown` reports that it has shown nothing yet.
+        /// The observation is current, with `unshown` reporting whether it has shown nothing yet.
         case current(unshown: Bool)
     }
     private func standing(of observing: UInt64) -> Standing {
@@ -2021,8 +2050,8 @@ package struct PendingReports {
     private var values: [Bool] = []
     // The position of the oldest report not yet taken.
     private var start = 0
-    /// The number of reports that reclaiming storage has moved so far, which tests read as the work that
-    /// reclaiming takes; it saturates instead of overflowing.
+    /// The saturating number of reports that reclaiming storage has moved so far, which tests read as
+    /// the work that reclaiming takes.
     package private(set) var moved = 0 { didSet { if moved < oldValue { moved = .max } } }
 
     package init() {}
@@ -2094,10 +2123,10 @@ nonisolated private final class ObservationRelease: Sendable {
 /// between that actor and the main actor.
 ///
 /// The presentation can let the registration go before the owner has returned it, and the owning actor
-/// can hold it after the presentation let it go; whichever comes second sees the other. A hold that
-/// comes second keeps nothing and reports it, and the owning actor hands the registration to the main
-/// actor to remove. The stage sits behind a lock, and the call that releases a held registration takes
-/// the release out of it, so no other call ever holds it.
+/// can hold it after the presentation let it go, with whichever comes second seeing the other. A hold
+/// that comes second keeps nothing and reports it, and the owning actor hands the registration to the
+/// main actor to remove. The stage sits behind a lock, and the call that releases a held registration
+/// takes the release out of it, so no other call ever holds it.
 nonisolated private final class RegistrationHandoff: Sendable {
     /// Removes the registration on the main actor and runs its argument once the removal has completed.
     typealias Release = @MainActor @Sendable (_ done: @escaping @MainActor @Sendable () -> Void) -> Void
@@ -2191,7 +2220,7 @@ private typealias PresentationRegister<Snapshot> =
         return false
     }
 
-    /// Reports whether a delivery applies now; one that arrives while registering is held instead.
+    /// Reports whether a delivery applies now, holding one that arrives while registering instead.
     final func admit(_ next: Snapshot) -> Bool {
         switch stage {
         case .registering(let displaced, let finished):
@@ -2202,8 +2231,8 @@ private typealias PresentationRegister<Snapshot> =
         case .ended: return false
         }
     }
-    /// Reports whether a finish applies now, ending the registration; one that arrives while
-    /// registering is held instead.
+    /// Reports whether a finish applies now and ends the registration, holding one that arrives while
+    /// registering instead.
     final func admitFinish() -> Bool {
         switch stage {
         case .registering(let seed, _):
@@ -2221,7 +2250,7 @@ private typealias PresentationRegister<Snapshot> =
         stage = .installed
         return (seed, finished)
     }
-    /// Ends a registration that was refused, replaced, or ended; its later callbacks change nothing.
+    /// Ends a registration that was refused, replaced, or ended so its later callbacks change nothing.
     ///
     /// Returns the seed it held, for the caller to release once the registration it ends is released.
     @discardableResult final func end() -> Snapshot? {
@@ -2237,7 +2266,7 @@ private typealias PresentationRegister<Snapshot> =
 /// and leaves them, without examining the others.
 ///
 /// A registration that waits with an owner waits for that owner's earlier attempts and for every
-/// earlier one through a closure, which may hold any owner's slot; one through a closure waits for
+/// earlier one through a closure, which may hold any owner's slot. One through a closure waits for
 /// every earlier attempt. Each set of serials is kept in ascending order, so each question reads its
 /// smallest serial.
 @MainActor private struct RegisteringAttempts<Snapshot> {
@@ -2292,8 +2321,8 @@ private typealias PresentationRegister<Snapshot> =
 /// Distinct serials in ascending order.
 ///
 /// Serials are made in ascending order, so an insertion normally appends. Removing the first serial
-/// advances a head past it and past every later serial already removed; removing any other serial
-/// records it, to be skipped when the head reaches it. The slots before the head are reclaimed once they
+/// advances a head past it and past every later serial already removed. Removing any other serial
+/// records it to be skipped when the head reaches it. The slots before the head are reclaimed once they
 /// make up half of the storage, and the removed serials after it once they outnumber the serials still
 /// present, so a first serial that stays while many later ones come and go keeps storage proportional
 /// to the serials present. Returning attempts oldest first, newest first, or in any order costs
@@ -2434,7 +2463,7 @@ private struct SerialOrder {
     func answer() { answered = true }
 }
 
-/// A capacity-one bridge from Sendable background snapshots to MainActor presentation.
+/// A capacity-one bridge from `Sendable` background snapshots to `MainActor` presentation.
 ///
 /// Offers replace pending UI data, never effect commands. Exactly one responsible
 /// delivery task exists per active cohort, regardless of the number of offered updates.
@@ -2449,8 +2478,8 @@ nonisolated public final class MainActorSnapshotIngress<Snapshot: Sendable>: Sen
         var scheduled = false
         var closed = false
     }
-    // Behind one lock: a change takes the envelope it replaces out of the state and releases it after
-    // unlocking, so a call that reads whether the bridge is closed never holds a snapshot.
+    // Protected by one lock. Each change takes any replaced envelope out of the state and releases it
+    // after unlocking, so a call checking whether the bridge is closed never holds a snapshot.
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let receive: @MainActor @Sendable (Snapshot) -> Void
     /// Selects the isolated presentation callback without retaining a live machine.
@@ -2513,13 +2542,13 @@ nonisolated final class PresentationGate: Sendable {
         get { gate.withLock { $0 } }
         set { gate.withLock { $0 = newValue } }
     }
-    /// Closes the gate recorded now; the registration stays for the main actor to remove.
+    /// Closes the gate recorded now, leaving the registration for the main actor to remove.
     func close() { current?.close() }
 }
 
-/// The registration a presentation's current observation holds: a callback registration's token, or
-/// the release of a sequence registration or of a hand-off from another actor, which runs its argument
-/// once the release has returned, with the gate of a claimed sequence.
+/// The registration held by a presentation's current observation, either a callback registration's
+/// token or the release of a sequence registration or cross-actor hand-off that runs its argument
+/// once removal returns, along with the gate of any claimed sequence.
 @MainActor private enum HeldRegistration {
     case none
     case token(MainActorSnapshotSubscription)

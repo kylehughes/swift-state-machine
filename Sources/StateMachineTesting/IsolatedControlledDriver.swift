@@ -4,9 +4,9 @@ import os
 ///
 /// It behaves as ``ControlledDriver`` does, for an `IsolatedHost` whose inputs and outputs need not be
 /// `Sendable`, such as one of an `.isolated` graph. The driver, its calls, and their values stay with
-/// the actor that owns the host: the actor stores the driver, its driver closure reaches the driver
+/// the actor that owns the host. The actor stores the driver, its driver closure reaches the driver
 /// through the actor it receives, and the test awaits
-/// ``nextStarted(isolation:fileID:filePath:line:column:)`` on that actor:
+/// ``nextStarted(isolation:fileID:filePath:line:column:)`` on that actor.
 ///
 /// ```swift
 /// actor Editor {
@@ -30,7 +30,7 @@ import os
 /// ```
 ///
 /// Every method that reaches a call's values takes the owning actor as an `isolated` parameter, which
-/// a call on that actor passes by default: a call from another actor, or from a nonisolated context
+/// a call on that actor passes by default. A call from another actor, or from a nonisolated context
 /// such as the destructor of an ordinary class, does not compile. The first use binds the driver to
 /// one instance of `Owner`, and a use that passes another instance stops the program. A call's
 /// output stays on the actor too, so a test can finish a call with a value that shares state with its
@@ -42,8 +42,8 @@ import os
 /// until the test finishes it. A call that the test never finishes never returns, and the host's
 /// shutdown waits for it.
 ///
-/// The driver grants no authority: it supplies a result to the host's own work, which only the host
-/// can deliver.
+/// The driver grants no authority, because it supplies a result to the host's own work, which only
+/// the host can deliver.
 nonisolated public final class IsolatedControlledDriver<Owner: Actor, Input, Output, Failure: Error> {
     /// One started execution of the operation, which the test finishes on the owning actor.
     public final class Call {
@@ -66,7 +66,7 @@ nonisolated public final class IsolatedControlledDriver<Owner: Actor, Input, Out
         /// Whether the host has cancelled this execution's task.
         public var isCancelled: Bool { completion.signal.isCancelled }
 
-        /// Ends the execution with `result`; it reports `false` and changes nothing if it already ended.
+        /// Ends the execution with `result`, returning `false` without changing anything if it already ended.
         @discardableResult public func finish(
             _ result: Result<Output, Failure>,
             isolation: isolated Owner = #isolation
@@ -113,20 +113,20 @@ nonisolated public final class IsolatedControlledDriver<Owner: Actor, Input, Out
     /// How many executions the host has started.
     public var startedCount: Int { calls.startedCount }
 
-    /// How many queued calls and waits matching has examined, which tests read as its work; read it on
-    /// the owning actor.
+    /// How many queued calls and waits matching has examined, which tests read on the owning actor as
+    /// its work.
     package var examinedCallEntries: Int { calls.examinedEntries }
-    /// How many queued calls and waits the driver stores, which tests read as its storage; read it on
-    /// the owning actor.
+    /// How many queued calls and waits the driver stores, which tests read on the owning actor as its
+    /// storage.
     package var storedCallEntries: Int { calls.storedEntries }
-    /// How many waits for a started call have registered and not ended; read it on the owning actor.
+    /// How many waits for a started call have registered and not ended, read on the owning actor.
     package var waitingCount: Int { calls.waitCount }
 
     /// Returns the oldest started execution not yet returned, waiting on the owning actor until the
     /// host starts one.
     ///
-    /// It throws when the waiting task is cancelled first, for example by a test's time limit; a
-    /// task that is already cancelled leaves every started execution for a later wait.
+    /// Throws when the waiting task is cancelled first, for example by a test's time limit. A task
+    /// that is already cancelled leaves every started execution for a later wait.
     public func nextStarted(
         isolation: isolated Owner = #isolation,
         fileID: String = #fileID,
@@ -147,7 +147,7 @@ nonisolated public final class IsolatedControlledDriver<Owner: Actor, Input, Out
         )
     }
 
-    /// The driver of a fallible operation: it waits until the test finishes the call.
+    /// Runs as the driver of a fallible operation, waiting until the test finishes the call.
     public func run(_ owner: isolated Owner, _ input: Input) async -> Result<Output, Failure> {
         binding.check(owner)
         let call = Call(input: input, owner: owner)
@@ -157,7 +157,7 @@ nonisolated public final class IsolatedControlledDriver<Owner: Actor, Input, Out
 }
 
 extension IsolatedControlledDriver where Failure == Never {
-    /// The driver of an operation that cannot fail: it returns the output the test supplies.
+    /// Runs as the driver of an operation that cannot fail, returning the output the test supplies.
     public func run(_ owner: isolated Owner, _ input: Input) async -> Output {
         switch await run(owner, input) as Result<Output, Never> {
         case .success(let output): output
@@ -221,7 +221,9 @@ nonisolated final class IsolatedCallCompletion<Owner: Actor, Output, Failure: Er
 
     init(owner: Owner) { self.owner = owner }
 
-    /// Whether the test has finished the call; it may be read from any thread.
+    /// Whether the test has finished the call.
+    ///
+    /// Safe to read from any thread.
     var isFinished: Bool { finished.withLock { $0 } }
 
     /// Stops the program when `isolation` is not the actor that started the call.
@@ -243,10 +245,10 @@ nonisolated final class IsolatedCallCompletion<Owner: Actor, Output, Failure: Er
         return true
     }
 
-    /// Suspends the driver until the test chooses its result; cancellation does not end the wait.
+    /// Suspends the driver until the test chooses its result.
     ///
-    /// The continuation is installed before `offer` hands the call to a test, so a test can finish
-    /// only an execution that is already waiting.
+    /// Cancellation does not end the wait. The continuation is installed before `offer` hands the call
+    /// to a test, so a test can finish only an execution that is already waiting.
     func wait(offering offer: () -> Void, isolation: isolated Owner) async -> Result<Output, Failure> {
         let signal = signal
         await withTaskCancellationHandler {
@@ -267,18 +269,19 @@ nonisolated final class IsolatedCallCompletion<Owner: Actor, Output, Failure: Er
 /// the queue.
 ///
 /// The calls, the waits' predicates, and the queue never leave that actor, and a predicate, such as a
-/// key's equality, runs there outside every lock. A predicate is test code, which can reenter the
-/// queue on that actor before it returns: an immediate task can start another call or another wait,
-/// and the waiting task can be cancelled. Matching therefore follows ``CallQueue``'s order: each
-/// started call and each new wait is an arrival, one matcher at a time takes the arrivals in the order
-/// they happened, and an arrival made while a predicate runs waits its turn. A call goes to the oldest
-/// waiting test that accepts it and a wait receives the oldest unclaimed call it accepts, each named
-/// by a stable identifier rather than a position, and a claim made after a predicate returns succeeds
-/// only if the wait is still unanswered, so a wait cancelled during its comparison takes nothing.
+/// key's equality, runs there outside every lock. Because a predicate is test code, it can reenter
+/// the queue on that actor before returning, for example by starting another call or wait in an
+/// immediate task or cancelling the waiting task. Matching therefore follows ``CallQueue``'s order.
+/// Each started call and each new wait is recorded as an arrival, one matcher at a time processes
+/// arrivals in the order they happened, and any arrival made while a predicate runs waits its turn.
+/// A call goes to the oldest waiting test that accepts it and a wait receives the oldest unclaimed
+/// call it accepts, each named by a stable identifier rather than a position, and a claim made after
+/// a predicate returns succeeds only if the wait is still unanswered, so a wait cancelled during its
+/// comparison takes nothing.
 ///
 /// Only a wait's continuation, which a cancellation may resume from any thread, sits behind a lock,
-/// and it carries no call: a match gives the call to the wait's slot, and the wait reads it there once
-/// it resumes on the actor.
+/// and it carries no call. A match writes the call to the wait's slot, and the wait reads it there
+/// once it resumes on the actor.
 nonisolated final class IsolatedCallQueue<Call> {
     /// A started call or a new wait, in the order they happened.
     private enum Arrival {
@@ -288,11 +291,11 @@ nonisolated final class IsolatedCallQueue<Call> {
 
     /// Every started call no wait has claimed, by identifier.
     private var calls: [UInt64: Call] = [:]
-    /// The matched calls that no wait accepted, in start order; a claimed one is skipped.
+    /// The matched calls that no wait accepted in start order, skipping any already claimed.
     private var unclaimed = ArrivalQueue<UInt64>()
     /// The calls each wait that has not ended accepts, or `nil` for one that accepts every call.
     private var predicates: [UInt64: ((Call) -> Bool)?] = [:]
-    /// The matched waits that no call answered, in registration order; an ended one is skipped.
+    /// The matched waits that no call answered in registration order, skipping any already ended.
     private var unanswered = ArrivalQueue<UInt64>()
     /// The call each answered wait reads once it resumes.
     private var assigned: [UInt64: Call] = [:]
@@ -304,7 +307,9 @@ nonisolated final class IsolatedCallQueue<Call> {
 
     init() {}
 
-    /// How many calls have started; it may be read from any thread.
+    /// How many calls have started.
+    ///
+    /// Safe to read from any thread.
     var startedCount: Int { waits.startedCount }
 
     /// How many queued calls and waits matching has examined, which tests read as its work.
@@ -323,8 +328,8 @@ nonisolated final class IsolatedCallQueue<Call> {
         arrive(.call(nextCall))
     }
 
-    /// The oldest call that `accepts` matches, or the oldest call when it is `nil`, that no test has
-    /// taken, once one has started; `nil` if the waiting task is cancelled.
+    /// Returns the oldest unclaimed call that `accepts` matches (or the oldest unclaimed call when
+    /// `accepts` is `nil`) once one has started, or `nil` if the waiting task is cancelled.
     ///
     /// A task that is already cancelled takes nothing, as a wait whose task is cancelled before a
     /// match answers it does, so the started calls stay for the next wait.
@@ -365,9 +370,9 @@ nonisolated final class IsolatedCallQueue<Call> {
 
     /// Hands a started call to the oldest matched wait that accepts it, or leaves it unclaimed.
     ///
-    /// Only the matcher claims, so the call stays unclaimed while the predicates run; a candidate wait
-    /// can only end by cancellation, and the call then goes to the next one. The candidates end at the
-    /// oldest wait that accepts every call, which needs no predicate.
+    /// Only the matcher claims, so the call stays unclaimed while the predicates run. A candidate wait
+    /// can end only by cancellation, in which case the call goes to the next one. The candidates end
+    /// at the oldest wait that accepts every call, which needs no predicate.
     private func matchCall(_ id: UInt64) {
         guard let call = calls[id] else { return }
         let waits = waits
@@ -398,8 +403,8 @@ nonisolated final class IsolatedCallQueue<Call> {
     /// Gives a new wait the oldest unclaimed call it accepts, or leaves it waiting.
     ///
     /// A wait that accepts every call takes the oldest unclaimed one. Otherwise only the matcher claims,
-    /// so every unclaimed call stays available while the predicate runs; the wait can only end by
-    /// cancellation, and it then takes nothing.
+    /// so every unclaimed call stays available while the predicate runs, and if the wait is cancelled
+    /// it takes nothing.
     private func matchWait(_ wait: UInt64) {
         guard waits.isWaiting(wait), let acceptance = predicates[wait] else { return }
         let candidates: [UInt64]
@@ -455,7 +460,7 @@ nonisolated private final class WaitList: Sendable {
     }
 
     private struct State: Sendable {
-        /// Every wait that has not ended, by identifier; identifiers increase in registration order.
+        /// Every wait that has not ended, keyed by identifiers that increase in registration order.
         var waits: [UInt64: Wait] = [:]
         var next: UInt64 = 0
         var started = 0

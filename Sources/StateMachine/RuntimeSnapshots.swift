@@ -4,14 +4,15 @@ import os
 ///
 /// Creating the sequence registers one observer. The first element is the snapshot that was
 /// current at registration unless a newer one has replaced it, and later elements have strictly
-/// increasing revisions. One pending snapshot is retained: a consumer that reads slowly receives
-/// the latest value and never an older one.
+/// increasing revisions. Only one pending snapshot is retained, so a consumer that reads slowly
+/// receives the latest value and never an older one.
 ///
 /// The sequence ends after the owner's closed snapshot, when the owner is released without
-/// closing, when ``cancel(isolation:)`` is called, and when a read finds its task cancelled, whether it was
-/// cancelled before or during the read. Only a read observes task cancellation: a task cancelled
+/// closing, when ``cancel(isolation:)`` is called, or when a read finds its task cancelled, whether
+/// cancelled before or during the read. Only a read observes task cancellation. A task cancelled
 /// after its last read, or a loop that leaves early with `break` or `first(where:)`, leaves the
-/// registration in place for as long as the sequence is kept. A consumer that keeps the sequence beyond its loop ends it explicitly:
+/// registration in place for as long as the sequence is kept. A consumer that keeps the sequence
+/// beyond its loop should end it explicitly.
 ///
 /// ```swift
 /// let snapshots = try host.snapshots()
@@ -19,9 +20,8 @@ import os
 /// let closed = await snapshots.first { $0.isClosed }
 /// ```
 ///
-/// Only the first iterator receives elements; a later iterator ends immediately. Releasing the
-/// sequence and its iterator removes the registration, and the sequence does not keep its owner
-/// alive.
+/// Only the first iterator receives elements, and any later iterator ends immediately. Releasing the
+/// sequence and its iterator removes the registration. The sequence does not keep its owner alive.
 nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Sendable {
     /// Iteration never throws.
     public typealias Failure = Never
@@ -68,14 +68,14 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
     package struct Consumer: Sendable {
         fileprivate let lifetime: Lifetime
 
-        /// Takes the pending element without waiting; reading the end removes the registration.
+        /// Takes the pending element without waiting, and removes the registration when reading the end.
         package func poll(isolation: isolated (any Actor)? = #isolation) -> Poll {
             let found = lifetime.mailbox.poll()
             if case .ended = found { lifetime.end(isolation: isolation) }
             return found
         }
-        /// Whether the sequence can still deliver: neither finished nor cancelled, whether or not an
-        /// element is pending.
+        /// Whether the sequence can still deliver, meaning it is neither finished nor cancelled,
+        /// regardless of whether an element is currently pending.
         package var isOpen: Bool { lifetime.mailbox.isOpen }
         /// Returns the latest unread element, waiting for one when none is pending, or `nil` once the
         /// sequence has ended, and then removes the registration.
@@ -84,11 +84,11 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             lifetime.end(isolation: #isolation)
             return nil
         }
-        /// The gate that stops delivery and frees the slot at once, from any thread.
+        /// The gate that stops delivery and frees the slot at once from any thread.
         ///
         /// The owner admits through it, so closing it stops delivery without removing the registration
-        /// or releasing an element; it is `nil` for a host of your own. A destructor closes it and
-        /// leaves the removal to an end on the owner's actor. It is a flag of its own, so closing it
+        /// or releasing an element. It is `nil` for a custom host. A destructor closes it and leaves
+        /// the removal to an end on the owner's actor. Because it is a flag of its own, closing it
         /// reads no element and no token.
         package var gate: RuntimeRegistrationGate? { lifetime.registration.gate }
         /// Ends the sequence and, for a main-actor owner, removes its registration before returning.
@@ -104,10 +104,11 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             lifetime.endOnMainActor(then: completion)
         }
         /// Runs `completion` on the main actor once the registration has been removed, which is the
-        /// moment a host of your own frees its slot: before this returns when it has been removed by
-        /// then, and otherwise on a later main-actor turn after the removal, as when the host is
-        /// cancelling the registration's token at that moment and the sequence was ended from inside
-        /// that cancellation.
+        /// moment a custom host frees its slot.
+        ///
+        /// Runs before returning when already removed, and otherwise on a later main-actor turn after
+        /// removal, such as when the host is cancelling the registration's token and the sequence was
+        /// ended from inside that cancellation.
         @MainActor package func afterRemoval(_ completion: @escaping @MainActor @Sendable () -> Void) {
             let later = lifetime.registration.observeRemoval { Task { @MainActor in completion() } }
             if !later { completion() }
@@ -123,9 +124,9 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
     //
     // An element for the waiting read is stored in the state, and the continuation only tells the read
     // whether one was handed to it, which it then takes under the lock. The Swift runtime does not
-    // report to the thread sanitizer the ordering of a continuation resumed before its task suspends,
-    // so an element carried in that resumption would look unsynchronized with the thread that offered
-    // it; the lock orders the two in a way the sanitizer observes.
+    // report to Thread Sanitizer the ordering of a continuation resumed before its task suspends, so
+    // an element carried in that resumption would look unsynchronized with the thread that offered
+    // it. The lock orders the two in a way the sanitizer observes.
     fileprivate final class Mailbox: Sendable {
         private struct State: Sendable {
             var pending: Element?
@@ -178,7 +179,7 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         var isOpen: Bool { state.withLock { !$0.finished && !$0.cancelled } }
 
         // Also runs inside a task cancellation handler, so it only records the flag and wakes the
-        // consumer; no later read returns the element still pending. Whoever ends the sequence then
+        // consumer. No later read returns any element still pending. Whoever ends the sequence then
         // removes its registration and only afterward discards that element, so a destructor that
         // registers again finds the slot free.
         func cancel() {
@@ -254,7 +255,7 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             self.registration = registration
             self.onDetach = onDetach
         }
-        // A finish ends the registration at once; an element offered before it stays readable.
+        // A finish ends the registration at once while keeping any previously offered element readable.
         func finish() {
             mailbox.finish()
             registration.release()
@@ -290,15 +291,16 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
     // first is recorded and carried out when the token arrives. A host may keep its own reference to
     // the token, so the sequence cancels it explicitly instead of relying on its release.
     //
-    // Every release follows one order: close the registration's gate, record the release, cancel the
-    // token, and only then release the elements the releases discarded and tell the calls waiting for
-    // the removal. Closing the gate first means that a later release that finds the release recorded
-    // returns after the gate closed, so an owner that admits through the gate stops counting the
-    // registration, whichever release cancels the token. Until the token's cancellation has returned,
-    // the state keeps every element a release discarded, and whoever cancels the token releases them
-    // afterward, so a destructor that registers again finds the slot free. A main-actor owner's token
-    // can be cancelled only on the main actor: a release elsewhere keeps it in the state and queues its
-    // cancellation there, and whichever main-actor release comes first takes it and cancels it.
+    // Every release follows one order. It closes the registration's gate, records the release,
+    // cancels the token, and only then releases any discarded elements and notifies calls waiting
+    // for removal. Closing the gate first means a later release that finds the release already
+    // recorded still returns after the gate closed, so an owner that admits through the gate stops
+    // counting the registration regardless of which release cancels the token. Until the token's
+    // cancellation returns, the state keeps every element discarded by a release, and whoever cancels
+    // the token releases them afterward so a destructor that registers again finds the slot free. A
+    // main-actor owner's token can be cancelled only on the main actor, so a release elsewhere keeps
+    // it in the state and queues its cancellation there, and whichever main-actor release arrives
+    // first takes and cancels it.
     //
     // The state sits behind one lock. A change that replaces a stage holding elements or a token takes
     // the replaced stage out and releases it after unlocking, and the gate is kept apart from the
@@ -308,8 +310,9 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             // `released` holds the elements discarded once a release came first, and is `nil` until then.
             case registering(released: [Element]?)
             case registered(Token)
-            // Released, and the token not yet cancelled: a main-actor owner's token waits in `queued` for a
-            // main-actor release, or a release is cancelling it now. `discarded` waits for that to return.
+            // Released while the token is not yet cancelled. A main-actor owner's token waits in
+            // `queued` for a main-actor release, or a release is cancelling it now, while `discarded`
+            // waits for that cancellation to return.
             case removing(queued: MainActorSnapshotSubscription?, discarded: [Element])
             case removed
         }
@@ -381,10 +384,9 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
                 return true
             }
         }
-        /// Cancels the registration once, from any thread, and releases `discarded`, the element the
-        /// end discarded, once the registration is removed: at once, after another release's
-        /// cancellation of the token has returned, or after the main actor has removed a main-actor
-        /// owner's registration.
+        /// Cancels the registration once from any thread and releases `discarded` once removal
+        /// completes, either at once, after another release's cancellation of the token returns, or
+        /// after the main actor removes a main-actor owner's registration.
         func release(discarding discarded: Element? = nil) {
             guard let token = take(discarding: discarded) else { return }
             cancel(token)
@@ -399,10 +401,10 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         }
 
         // Cancels a token whose release is recorded, then releases the discarded elements once the
-        // token's cancellation has returned: a shared owner's at once, and a main-actor owner's on the
-        // main actor, where the first main-actor release to come takes it from the state. A host that
-        // is cancelling the token itself, and ends the sequence from its `onCancel`, finds that
-        // cancellation in progress: the elements wait until it returns.
+        // token's cancellation returns. A shared owner's token cancels at once, and a main-actor
+        // owner's cancels on the main actor where the first main-actor release takes it from the
+        // state. A host cancelling the token itself that ends the sequence from its `onCancel` finds
+        // that cancellation in progress, so the elements wait until it returns.
         private func cancel(_ token: Token) {
             switch token {
             case .shared(let token):
@@ -411,10 +413,10 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
                 Task { @MainActor [self] in self.removeQueued() }
             }
         }
-        // Closes the gate of a held registration and records its release, in that order, and returns
-        // its token, or `nil` when the registration was already released or never made. A release that
-        // finds the registration still being removed leaves `discarded` with that removal; one that
-        // finds it removed releases `discarded` at once.
+        // Closes the gate of a held registration and records its release in that order, then returns
+        // its token or `nil` when the registration was already released or never made. A release that
+        // finds the registration still being removed leaves `discarded` with that removal, while one
+        // that finds it removed releases `discarded` at once.
         private func take(discarding discarded: Element?) -> Token? {
             closeGate()
             var change = state.withLock { state -> (token: Token?, retired: Stage?) in
@@ -459,7 +461,7 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         }
     }
 
-    // The sequence and its iterator share it; when the last of them goes away, the registration ends.
+    // The sequence and its iterator share this lifetime. When the last of them goes away, the registration ends.
     fileprivate final class Lifetime: Sendable {
         let mailbox: Mailbox
         let registration: Registration
@@ -468,9 +470,8 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             self.mailbox = mailbox
             self.registration = registration
         }
-        /// Removes the registration, then releases the element no read can return any more, so its
-        /// destructor runs once the slot is free: before this returns, or, when the main actor removes
-        /// the registration later, after it has.
+        /// Removes the registration and then releases any unread element so its destructor runs once
+        /// the slot is free, either before returning or after the main actor removes the registration.
         func end() {
             registration.release(discarding: mailbox.discard())
         }
@@ -512,11 +513,11 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         }
         /// Ends the sequence from code isolated to `isolation`.
         ///
-        /// The caller's isolation, not the thread it runs on, decides how a main-actor owner's
-        /// registration is removed: only code isolated to the main actor runs on its executor,
-        /// whichever thread that is, and code isolated to another actor can run on the main thread.
-        /// Code isolated to the main actor removes it before returning, and any other code leaves that
-        /// to the next main-actor turn.
+        /// The caller's isolation determines how a main-actor owner's registration is removed,
+        /// regardless of which thread the call runs on, because only code isolated to the main actor
+        /// runs on its executor and code isolated to another actor can still execute on the main
+        /// thread. Code isolated to the main actor removes the registration before returning, while
+        /// any other code leaves removal to the next main-actor turn.
         func end(isolation: isolated (any Actor)?) {
             if let isolation, isolation === MainActor.shared {
                 MainActor.assumeIsolated { endOnMainActor() }
@@ -552,16 +553,16 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
     ///
     /// `register` receives the two callbacks that feed the sequence and returns the registration's
     /// token, typically one made with ``SnapshotSubscription/init(onCancel:)``. `receive` offers an
-    /// element from any thread, one call at a time, and replaces an element not yet read; `finish`
+    /// element from any thread, one call at a time, and replaces any element not yet read. `finish`
     /// ends the sequence once any offered element has been read. Releasing both callbacks without
     /// calling `finish` ends the sequence too, as an owner released without closing does. A host
     /// that conforms to a hosting protocol offers the snapshot current at registration first and then
     /// each newer one, as a generated owner does.
     ///
     /// The sequence cancels the token exactly once, whether or not the host keeps its own reference
-    /// to it: when `finish` is called, or the callbacks are released, even with an element still
-    /// unread, which stays readable; when a read finds the end, or its task is cancelled while it
-    /// waits; when ``cancel(isolation:)`` is called; and when the sequence and its iterator are released. A
+    /// to it. Cancellation happens when `finish` is called or the callbacks are released (keeping any
+    /// unread element readable), when a read reaches the end or its task is cancelled while waiting,
+    /// when ``cancel(isolation:)`` is called, or when the sequence and its iterator are released. A
     /// `finish` that `register` calls before returning cancels the token as soon as it is returned.
     ///
     /// A sequence is observation only, so creating one grants no authority over any owner.
@@ -672,7 +673,9 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         lifetime = Lifetime(mailbox, registration)
     }
 
-    /// Claims the sequence for one consumer; a later iterator ends immediately.
+    /// Claims the sequence for one consumer.
+    ///
+    /// Any later iterator ends immediately.
     public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(lifetime: lifetime.mailbox.claim() ? lifetime : nil)
     }
@@ -683,33 +686,31 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         lifetime.mailbox.claim() ? Consumer(lifetime: lifetime) : nil
     }
 
-    /// Ends the sequence and removes its registration, from any isolation domain.
+    /// Ends the sequence and removes its registration from any isolation domain.
     ///
     /// A read waiting for an element returns `nil`, unless the owner had already handed it an element,
-    /// which that read still returns. Every later read returns `nil`. An element still unread is
-    /// discarded and released only once the registration is removed, so a destructor that registers
-    /// again finds the slot free: before this returns, or, when another call or the owner's finish is
-    /// removing the registration at that moment, or a `MainActor` owner's registration is removed on a
-    /// later main-actor turn, right after that removal. A call isolated to the main actor releases the
-    /// element on the main actor, on the main-actor turn after the removal when another thread
-    /// completes it.
+    /// which that read still returns. Every later read returns `nil`. Any unread element is discarded
+    /// and released only once the registration is removed so a destructor that registers again finds
+    /// the slot free. Release happens before this method returns, or right after removal when another
+    /// call or the owner's finish is removing the registration or when a `MainActor` owner removes it
+    /// on a later main-actor turn. A call isolated to the main actor releases the element on the main
+    /// actor, on the main-actor turn following removal when another thread completes it.
     ///
-    /// The owner stops delivering before this returns, and a generated owner frees the subscriber slot
-    /// by then, whichever call cancels first; an owner confined to an actor removes the registration's
-    /// callbacks on its next turn there. A `MainActor` host of your own frees its slot when its
-    /// subscription is cancelled, which only the main actor can do: a call isolated to the main actor,
-    /// whose `isolation` is `MainActor.shared`, cancels it before returning, including when a call
-    /// elsewhere came first, and any other call, from another actor, a nonisolated function, or a
-    /// destructor, leaves it to the next main-actor turn. A host registered through
-    /// ``init(register:)`` frees its slot when its token's `onCancel` returns, which the first call
-    /// runs; a concurrent call can return before then, and the element it discarded waits for that
-    /// return. So does a call that the host makes from inside that `onCancel` while it cancels the
-    /// token itself: the call returns at once, and the element is released once `onCancel` returns.
-    /// Calling it again, or after the sequence has ended, changes nothing.
+    /// The owner stops delivering before this method returns, and a generated owner frees the
+    /// subscriber slot by then regardless of which call cancels first, while an actor-confined owner
+    /// removes the registration's callbacks on its next turn. A custom `MainActor` host frees its slot
+    /// when its subscription is cancelled on the main actor. A call isolated to the main actor
+    /// (`isolation === MainActor.shared`) cancels it before returning, even when a call elsewhere came
+    /// first, while any call from another actor, a nonisolated function, or a destructor leaves it to
+    /// the next main-actor turn. A host registered through ``init(register:)`` frees its slot when its
+    /// token's `onCancel` returns, which the first call runs. A concurrent call can return before then
+    /// while the element it discarded waits for `onCancel` to return, and a call made from inside
+    /// `onCancel` returns at once while its discarded element waits for `onCancel` to return. Calling
+    /// this method again, or after the sequence has ended, changes nothing.
     ///
-    /// `isolation` is the caller's actor, which every call passes by default; ordinary calls spell this
-    /// `cancel()`. Call it when a consumer that keeps the sequence stops reading early, as
-    /// `defer { snapshots.cancel() }` does, because a task that stops reading gives the sequence no
+    /// `isolation` defaults to the caller's actor, so ordinary calls write `cancel()`. Call it when a
+    /// consumer that keeps the sequence stops reading early, such as with
+    /// `defer { snapshots.cancel() }`, because a task that stops reading gives the sequence no
     /// cancellation to observe.
     public func cancel(isolation: isolated (any Actor)? = #isolation) {
         lifetime.mailbox.cancel()
@@ -717,8 +718,8 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
     }
 }
 
-/// How an owner answered one registration: with a registration, or, for a closed owner, with its
-/// closed observation, which no registration follows.
+/// How an owner answered one registration, either with an active registration or, for a closed owner,
+/// with its closed observation and no registration.
 package enum SnapshotRegistration<Raw> {
     case registered(SnapshotSubscription)
     case closed(Raw)
@@ -726,35 +727,36 @@ package enum SnapshotRegistration<Raw> {
 
 /// A single-consumer stream of a `MainActor` owner's complete snapshots.
 ///
-/// It is read on the main actor, which lets it carry snapshots that are not `Sendable`. Read it with
-/// `next()`:
+/// The stream is read on the main actor, which lets it carry snapshots that are not `Sendable`. Read
+/// it with `next()`.
 ///
 /// ```swift
 /// var snapshots = try host.snapshots()
 /// while let snapshot = await snapshots.next() { show(snapshot) }
 /// ```
 ///
-/// It is deliberately not an `AsyncSequence`. The standard sequence operators run their closures off
-/// the main actor, which would move a confined snapshot off it. For `for await`, operators, or generic
-/// `AsyncSequence` code, register a `Sendable` projection, whose result is a ``SnapshotSequence``: a
-/// generated `MainActorHost` registers one with `snapshots(_:)`, and a raw `RuntimeMainActorHost` with
-/// `sendableSnapshots(_:)`, whose `snapshots(_:)` returns this confined stream of the projected values
-/// instead.
+/// The stream deliberately does not conform to `AsyncSequence`. The standard sequence operators run
+/// their closures off the main actor, which would move a confined snapshot off it. For `for await`,
+/// operators, or generic `AsyncSequence` code, register a `Sendable` projection to get a
+/// ``SnapshotSequence``. A generated `MainActorHost` registers one with `snapshots(_:)`, and a raw
+/// `RuntimeMainActorHost` registers one with `sendableSnapshots(_:)`, while its `snapshots(_:)`
+/// returns this confined stream of the projected values instead.
 ///
-/// Creating it registers one observer. The first element is the snapshot that was current at
+/// Creating the stream registers one observer. The first element is the snapshot that was current at
 /// registration unless a newer one has replaced it, and later elements have strictly increasing
-/// revisions. One pending snapshot is retained: a consumer that reads slowly receives the latest value
-/// and never an older one. It is noncopyable, so it has exactly one consumer.
+/// revisions. Only one pending snapshot is retained, so a consumer that reads slowly receives the
+/// latest value and never an older one. Because the stream is noncopyable, it has at most one
+/// consumer.
 ///
-/// It ends after the owner's closed snapshot, when the owner is released without closing, when
-/// ``cancel()`` is called, and when a read finds its task cancelled, whether it was cancelled
-/// before or during the read. A task that stops reading never gives it that chance. Ending it removes
-/// the registration at once. Releasing it before it ends, which can happen on another thread when an
-/// object that stores it is released there, stops delivery and frees its slot at once; a later
-/// main-actor turn removes the registration and then releases the snapshot it held unread, including
-/// the closed snapshot of an owner that has already released its callbacks, so that snapshot is never
-/// destroyed off the main actor. A stream kept beyond its loop, such as one an object stores, ends with
-/// ``cancel()``. It does not keep its owner alive.
+/// The stream ends after the owner's closed snapshot, when the owner is released without closing,
+/// when ``cancel()`` is called, or when a read finds its task cancelled, whether cancelled before or
+/// during the read. A task that stops reading never gives the stream a chance to observe task
+/// cancellation. Ending it removes the registration at once. Releasing it before it ends, which can
+/// happen on another thread when an object storing it is released there, stops delivery and frees
+/// its slot at once. A later main-actor turn removes the registration and then releases any unread
+/// snapshot, including the closed snapshot of an owner that has already released its callbacks, so
+/// that snapshot is never destroyed off the main actor. End a stream kept beyond its loop, such as
+/// one stored by an object, with ``cancel()``. The stream does not keep its owner alive.
 nonisolated public struct MainActorSnapshotSequence<Element>: ~Copyable {
     // Confined to the main actor, except for the waiter slot that a task cancellation
     // handler reaches from any thread.
@@ -777,8 +779,8 @@ nonisolated public struct MainActorSnapshotSequence<Element>: ~Copyable {
             withExtendedLifetime(displaced) {}
         }
 
-        /// Ends the stream on the main actor: records the cancellation and returns the element no
-        /// later read can return, for the caller to release once the stream is consistent.
+        /// Ends the stream on the main actor, records cancellation, and returns the element no later
+        /// read can observe so the caller can release it once the stream is consistent.
         func discard() -> Element? {
             cancel()
             let discarded = pending
@@ -912,10 +914,11 @@ nonisolated public struct MainActorSnapshotSequence<Element>: ~Copyable {
 
     /// Ends the stream and removes its registration before returning.
     ///
-    /// Every later `next()` returns `nil`, and a snapshot still unread is released before this
-    /// returns, unless the host is cancelling the registration's token at that moment, as a host of
-    /// your own that ends the stream from its `onCancel` does: the snapshot is then released once
-    /// that cancellation returns. Calling it again, or after the stream has ended, changes nothing.
+    /// Every later `next()` returns `nil`. Any snapshot still unread is released before this method
+    /// returns, unless the host is cancelling the registration's token at that moment, such as a
+    /// custom host that ends the stream from its `onCancel`. In that case, the snapshot is released
+    /// once that cancellation returns. Calling this method again, or after the stream has ended,
+    /// changes nothing.
     @MainActor public mutating func cancel() { end() }
 
     // Takes the element no read can return any more and cancels the token, releasing that element once
@@ -931,11 +934,11 @@ nonisolated public struct MainActorSnapshotSequence<Element>: ~Copyable {
         ended.cancel { withExtendedLifetime(discarded) {} }
     }
 
-    // A stream dropped before it ended, which can happen on another thread when an object that stores
-    // it is released there, stops delivery and frees its slot at once. The owner may have released
-    // its callbacks already, so the stream can hold the mailbox's last reference, and its unread
-    // element is not `Sendable`: the main actor removes the registration and then discards that
-    // element, in one later turn.
+    // A stream dropped before it ended, which can happen on another thread when an object storing it
+    // is released there, stops delivery and frees its slot at once. The owner may have released its
+    // callbacks already, so the stream can hold the mailbox's last reference, and its unread element
+    // is not `Sendable`. The main actor therefore removes the registration and discards that element
+    // in one later turn.
     deinit {
         guard let token else { return }
         token.close()
@@ -1202,8 +1205,8 @@ extension RuntimeIsolatedHost {
     ///
     /// `transform` runs on the owning actor when a snapshot is delivered. The sequence supports every
     /// `AsyncSequence` operator and may be consumed on any actor. Ending it on another actor stops
-    /// delivery and frees its slot at once; the owning actor releases `transform` on this host's next
-    /// turn, and when the host is released.
+    /// delivery and frees its slot at once, while the owning actor releases `transform` on this
+    /// host's next turn or when the host is released.
     public func sendableSnapshots<Element: Sendable>(
         _ transform: @escaping (Engine.Snapshot) -> Element,
         isolation: isolated Owner

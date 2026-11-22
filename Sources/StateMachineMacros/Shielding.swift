@@ -5,10 +5,11 @@ import SwiftSyntax
 ///
 /// Generation spells every candidate of ``Schema/shieldedSpellings`` through a placeholder. A use keeps
 /// an alias only where a generated scope around it declares a type named like one of the spelling's free
-/// names, which would otherwise capture that name; every other use gets the authored spelling back.
-/// An alias is declared only when some use keeps it, with the highest access among those uses: the
-/// access of the declaration whose signature holds the use, within every type that encloses it, or
-/// file-private for a use inside a body, which needs only visibility.
+/// names, which would otherwise capture that name. Every other use gets the authored spelling back.
+///
+/// An alias is declared only when some use keeps it, with the highest access among those uses. For a use
+/// in a signature, that is the declaration's access within every enclosing type. For a use inside a body,
+/// file-private access suffices for visibility.
 struct SpellingShield {
     /// A schema-level alias that some generated use needs.
     struct Alias {
@@ -83,7 +84,7 @@ struct SpellingShield {
         return (rewritten, kept, scopes.membersRead)
     }
 
-    /// The type names each generated scope declares, read once per scope: the members and generic
+    /// The type names each generated scope declares, read once per scope, covering the members and generic
     /// parameters of a type, the generic parameters of a function, and the type witnesses a restoring
     /// `Local` infers from its restoring resets.
     private struct ScopeNames {
@@ -141,8 +142,8 @@ struct SpellingShield {
         return nil
     }
 
-    /// The access a use requires of its alias: file-private inside a body, and otherwise the access of
-    /// the declaration that holds it within every enclosing declaration, bounded by the schema's.
+    /// The access a use requires of its alias, which is file-private inside a body and otherwise the access
+    /// of the declaration that holds it within every enclosing declaration, bounded by the schema's access.
     private func access(of node: Syntax) -> Schema.Access {
         var result = schemaAccess == .private ? Schema.Access.fileprivate : schemaAccess
         var held = false

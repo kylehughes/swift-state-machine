@@ -3,7 +3,7 @@ import os
 /// Owns physical execution separately from operation authority and outcome delivery.
 ///
 /// Hosts validate batch ownership and order before forwarding starts and cancellations.
-/// Callbacks synchronously consult or update the host; none runs inside a worker task.
+/// Callbacks synchronously consult or update the host, and none runs inside a worker task.
 package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     private struct Entry {
         let ticket: RuntimeTicket
@@ -24,7 +24,7 @@ package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
         }
     }
     private var waiters: [CheckedContinuation<Void, Never>] = []
-    // Mirrors the entry count for synchronous readers; it carries no authority.
+    // Mirrors the entry count for synchronous readers and carries no authority.
     private nonisolated let registered = OSAllocatedUnfairLock(initialState: 0)
 
     /// Creates an execution owner with synchronous host authority and settlement hooks.
@@ -56,7 +56,7 @@ package actor RuntimeCoordinator<Descriptor: Sendable, Outcome: Sendable> {
     /// Registers each authorized start without suspending between its authority checks.
     ///
     /// An already registered ticket is ignored. Hosts prevent replay of completed batches.
-    /// Revocation before registration skips the driver; revocation during registration
+    /// Revocation before registration skips the driver. Revocation during registration
     /// cancels its retained handle and still requires actual termination.
     package func start(_ works: [RuntimeWork<Descriptor>]) {
         for work in works where !entries.contains(where: { $0.ticket == work.ticket }) {

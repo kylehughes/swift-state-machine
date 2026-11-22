@@ -3,7 +3,7 @@
 /// Validation and generation both read these, so a name the parser accepts is the name the
 /// generator emits.
 extension Schema {
-    /// The generated companion type name for an authored function: `begin` to `Begin`.
+    /// The generated companion type name for an authored function, such as `Begin` for `begin`.
     static func companion(_ name: String) -> String {
         (name.prefix(1).uppercased() + name.dropFirst()).composed
     }
@@ -19,36 +19,36 @@ extension Schema {
     /// `Effect.<Edge>` names one type that all of them return.
     ///
     /// Edges declare the same effects when they list the same operations in `starts:` and `cancels:`
-    /// and the same events in `emits:`, in any order: a list declares what the edge may return, and
-    /// the reducer's returned array orders the effects.
+    /// and the same events in `emits:`, in any order. Each list declares what the edge may return,
+    /// while the reducer's returned array orders the effects.
     func sharesEffect(_ name: String) -> Bool {
         tables.sharedEffects.contains(name) || !tables.effectNames.contains(name)
     }
 
-    /// The spelling, inside the schema, of the type that declares an edge's effects: the short
-    /// `Effect.<Edge>` when it exists, and otherwise the namespace of the authored function's first source.
+    /// The spelling, inside the schema, of the type that declares an edge's effects, using the short
+    /// `Effect.<Edge>` when it exists and otherwise the namespace of the authored function's first source.
     func effectType(_ edge: Transition) -> String? {
         guard let companion = edge.effectNamespace else { return nil }
         if sharesEffect(edge.name) { return "Effect.\(companion)" }
         return "Effect.\(phaseType(edge.sources.first ?? edge.from)).\(companion)"
     }
 
-    /// Every spelling of an edge's effect type that names it: the phase-qualified name of each source of the
-    /// authored function, and the short name when it exists.
+    /// Every spelling of an edge's effect type that names it, covering the phase-qualified name of each
+    /// source of the authored function and the short name when it exists.
     func effectSpellings(_ edge: Transition) -> [String] {
         guard let companion = edge.effectNamespace else { return [] }
         let qualified = edge.sources.map { "Effect.\(phaseType($0)).\(companion)" }
         return (sharesEffect(edge.name) ? ["Effect.\(companion)"] : []) + qualified
     }
 
-    /// The keyed operations some edge lists in `cancels:`, in declaration order; `Effect` has their
-    /// cancellation cases.
+    /// The keyed operations some edge lists in `cancels:`, in declaration order. `Effect` declares
+    /// their cancellation cases.
     var cancelledOperations: [Operation] {
         let cancelled = Set(transitions.flatMap(\.cancels))
         return operations.filter { cancelled.contains($0.effect) }
     }
 
-    /// The phases with an edge that starts operations; each has an `Effect.<Phase>` namespace.
+    /// The phases with an edge that starts operations, each of which gets an `Effect.<Phase>` namespace.
     var effectPhases: [Phase] {
         let sources = Set(transitions.filter { $0.effectNamespace != nil }.map(\.from))
         return phases.filter { sources.contains($0.caseName) }
@@ -67,7 +67,7 @@ extension Schema {
         /// same ones.
         var effectNames: Set<String> = []
         var sharedEffects: Set<String> = []
-        /// Each operation and event by its effect case, and each operation by its name; the first declared.
+        /// Each operation and event by its effect case, and each operation by its name, keeping the first declared.
         var operations: [String: Operation] = [:]
         var operationsByName: [String: Operation] = [:]
         var events: [String: Event] = [:]
@@ -104,8 +104,8 @@ extension Schema {
                 phaseIndices[phase.caseName] = index
                 phaseTypes[phase.caseName] = phase.typeName
             }
-            // A named scope spans its `@Active(in:)` phases or every phase; an operation that names none has
-            // a private scope of its own, keyed by its name, active in its `activeIn:` phases.
+            // A named scope spans its `@Active(in:)` phases or every phase. An operation that names none
+            // has a private scope of its own, keyed by its name and active in its `activeIn:` phases.
             let every = phases.map(\.caseName)
             for scope in scopes where scopePhases[scope] == nil { scopePhases[scope] = scopeActiveIn[scope] ?? every }
             for operation in operations where scopePhases[operation.scopeKey] == nil {
@@ -194,7 +194,8 @@ extension Schema {
         return "Route.\(phaseType(route.from)).\(namespace)"
     }
 
-    /// Every spelling of a router's choice type: its phase-qualified name and, when it exists, its short name.
+    /// Every spelling of a router's choice type, including its phase-qualified name and its short name
+    /// when it exists.
     func choiceSpellings(_ route: Route) -> [String] {
         guard let namespace = route.namespace else { return [] }
         let qualified = "Route.\(phaseType(route.from)).\(namespace)"
@@ -208,26 +209,28 @@ extension Schema {
         return "Route.\(phaseType(route.from)).\(namespace)Result"
     }
 
-    /// The phases with a router that has edges to choose; each has a `Route.<Phase>` namespace.
+    /// The phases with a router that has edges to choose, each of which gets a `Route.<Phase>` namespace.
     var routePhases: [Phase] {
         let tables = tables
         return phases.filter { tables.byPhase[$0.caseName] != nil }
     }
 
-    /// The router that selects an edge: the first with edges to choose from the edge's source on its trigger.
+    /// The first router with edges to choose from the edge's source on its trigger, if any.
     func router(of edge: Transition) -> Route? {
         workCounter.work.routerLookups += 1
         return tables.byTrigger[edge.from]?[edge.trigger]
     }
 
-    /// Whether an edge's own method on `Owned` or `Observed` has the schema's access: one that no router
-    /// chooses, and on `Observed` an input edge, since delivery alone reaches a completion edge there.
+    /// Whether an edge's own method on `Owned` or `Observed` has the schema's access.
+    ///
+    /// This holds for an edge that no router chooses, and on `Observed` only for an input edge because
+    /// delivery alone reaches a completion edge there.
     func hasOwnMethod(_ edge: Transition, observed: Bool) -> Bool {
         router(of: edge) == nil && (!observed || edge.trigger.kind == .input)
     }
 
-    /// Whether a router has a method on `Owned` or `Observed`: one with edges to choose, and on `Observed`
-    /// an input router.
+    /// Whether a router has a method on `Owned` or `Observed`, requiring edges to choose and, on
+    /// `Observed`, an input trigger.
     func hasMethod(_ route: Route, observed: Bool) -> Bool {
         !route.choices.isEmpty && (!observed || route.trigger.kind == .input)
     }
@@ -244,8 +247,8 @@ extension Schema {
         return (tables.candidates[route.declaration] ?? []).map { transitions[$0] }
     }
 
-    /// The failure type of a router's `Owned` result's `rejected` case and of its `Observed` method's
-    /// contribution: the pinned failure, or the router's own.
+    /// The failure type for a router's `Owned` result's `rejected` case and its `Observed` method's
+    /// contribution, using the pinned failure if declared or the router's own failure otherwise.
     func routerFailure(_ route: Route) -> String? { route.pinnedFailure ?? route.failureType }
 
     /// What an edge's `Owned` method returns, with its own source spelled `source`.
@@ -268,8 +271,9 @@ extension Schema {
         }
     }
 
-    /// Whether a router's `Owned` method returns `Route.<Router>Result`: it can throw, or its candidate
-    /// edges return different types, however each spells the type it throws.
+    /// Whether a router's `Owned` method returns `Route.<Router>Result`, which is needed when it can
+    /// throw or when its candidate edges return different types regardless of how each spells the type
+    /// it throws.
     func needsOwnedResult(_ route: Route) -> Bool {
         guard route.namespace != nil else { return false }
         struct Result: Hashable {
@@ -291,7 +295,9 @@ extension Schema {
     // MARK: Preparation rejections
 
     /// The functions that throw a `PreparationRejection` case, as (name, source phase, failure type)
-    /// in declaration order; an authored function with several sources appears once per source.
+    /// in declaration order.
+    ///
+    /// An authored function with several sources appears once per source.
     var throwingFunctions: [(name: String, from: String, failure: String, declaration: Int)] {
         let edges = transitions.compactMap { edge in
             edge.failureType.map { (edge.name, edge.from, $0, edge.declaration) }
@@ -317,9 +323,10 @@ extension Schema {
         return Set(failures.filter { $0.value.count > 1 }.keys)
     }
 
-    /// The `PreparationRejection` case of a throwing function: its name, unless functions of that name
-    /// throw different types, as `distinguished` lists them, in which case it is prefixed with its source
-    /// phase: `draftSave`.
+    /// The `PreparationRejection` case name of a throwing function.
+    ///
+    /// Uses the function's own name unless functions of that name throw different types (as listed in
+    /// `distinguished`), in which case it is prefixed with its source phase, such as `draftSave`.
     static func rejectionCase(_ name: String, from: String, distinguished: Set<String>) -> String {
         distinguished.contains(name) ? (from + Schema.companion(name)).composed : name
     }
@@ -344,20 +351,20 @@ extension Schema {
     /// the owner's refusal through `ResetRejection`.
     var resetRejects: Bool { restoration?.failureType != nil }
 
-    /// The names an authored member of the schema may not take: every member the generator emits for
-    /// the selected owners, and the few names generated code spells without qualification.
+    /// The names an authored member of the schema may not take, covering every member the generator
+    /// emits for the selected owners and the few names generated code spells without qualification.
     ///
     /// A name is reserved only when something the schema generates declares or uses it, so a schema
     /// that lists only `.local` may declare its own `Shared`. Generated code spells standard-library
     /// types such as `Swift::Hashable` and runtime types such as `StateMachine::Limits` through module
-    /// selectors, so a schema may declare its own `Hashable`, `Result`, `Swift`, or `StateMachine`; the
-    /// short names authored transitions return are reserved whatever the owners.
+    /// selectors, so a schema may declare its own `Hashable`, `Result`, `Swift`, or `StateMachine`. The
+    /// short names authored transitions return are reserved regardless of the selected owners.
     var reservedNames: Set<String> {
         fixedGeneratedNames.union(operationTypeNames.map(\.name))
     }
 
-    /// The names the schema's own name may not take: every reserved name, and each type a generated
-    /// scope declares that generated code inside it reaches through the schema's name.
+    /// The names the schema's own name may not take, covering every reserved name and each type a
+    /// generated scope declares that generated code inside it reaches through the schema's name.
     ///
     /// `PendingCompletion` declares `Outcome` and `Rejection`, and its outcome's cases spell each
     /// operation's types from the schema's name.
@@ -367,8 +374,8 @@ extension Schema {
 
     /// The types the expansion declares at the schema's scope for its operations.
     ///
-    /// Each is paired with the operation that generates it: its request, its completion, and `Local`'s
-    /// work, for the owners that use them, and the generic struct a work specializes.
+    /// Each entry is paired with the operation that generates it, covering its request, its completion,
+    /// `Local`'s work for the owners that use them, and the generic struct a work type specializes.
     var operationTypeNames: [(name: String, operation: String)] {
         operations.flatMap { operation -> [(name: String, operation: String)] in
             var names: [String] = []
@@ -391,13 +398,12 @@ extension Schema {
         let reference: String
     }
 
-    /// The references that must name the standard library's `Void` or `Never`, in declaration order:
-    /// each type the macro read as one of them without being able to confirm it, such as an `Output`
-    /// spelled with a bare `Void`, or a type a function throws spelled with a bare `Never`.
+    /// The references that must name the standard library's `Void` or `Never`, in declaration order.
     ///
-    /// The macro cannot see a declaration outside the schema, an extension, or an inherited member, so
-    /// the expansion checks the type itself, spelled at the schema's scope where it resolves as the
-    /// author's declaration does.
+    /// Includes each type the macro read as `Void` or `Never` without being able to confirm it, such as
+    /// an `Output` spelled with a bare `Void` or a thrown type spelled with a bare `Never`. Because the
+    /// macro cannot see declarations outside the schema, extensions, or inherited members, the expansion
+    /// checks the type itself at the schema's scope where it resolves as the author's declaration does.
     var standardNameChecks: [StandardReference] {
         typeChecks.compactMap { check in
             guard case .isStandard(let name, _) = check.kind else { return nil }
@@ -408,15 +414,14 @@ extension Schema {
     /// The name of the witness function that checks a reference names the standard library's `Void` or `Never`.
     static func standardNameWitness(_ standard: String) -> String { "_stateMachineIsSwift\(standard)" }
 
-    /// The spellings the expansion checks do not name the standard library's `Never`, in declaration
-    /// order: each operation alias, event payload, and type an authored function throws that the macro
-    /// reads as a type with values without being able to confirm it, because it names a type the macro
-    /// cannot see into or reads through a name that something it cannot see could hide.
+    /// The spellings the expansion checks do not name the standard library's `Never`, in declaration order.
     ///
-    /// Such a type may be an alias of `Never`, and reading it as a type with values would give an
-    /// operation an input or key no transition can construct or an outcome that can never happen, an
-    /// event a payload no transition can construct, and a function a failure it can never throw, which
-    /// generated code would try to catch.
+    /// Includes each operation alias, event payload, and thrown type that the macro reads as a type with
+    /// values without being able to confirm it, because it names a type the macro cannot see into or
+    /// reads through a name that an external declaration could shadow. Such a type may be an alias of
+    /// `Never`, and reading it as a type with values would give an operation an input or key no
+    /// transition can construct or an outcome that can never happen, an event a payload no transition can
+    /// construct, and a function a failure it can never throw, which generated code would try to catch.
     var neverProbes: [String] {
         typeChecks.compactMap { check in
             guard case .isNotNever = check.kind else { return nil }
@@ -427,7 +432,9 @@ extension Schema {
     /// The witness functions the expansion declares for its checks, and the name each check calls.
     struct CheckPlan {
         /// Each check that a type is the standard library's `Void` or `Never`, by type and message,
-        /// with the name of its function; a `nil` message is the one that says the macro read it so.
+        /// paired with the name of its function.
+        ///
+        /// A `nil` message uses the default reading-mismatch text.
         private(set) var standards: [(standard: String, message: String?, function: String)] = []
         /// Each second stage of a check that a type is not `Never`, by message, with its function's name.
         private(set) var stages: [(message: String?, function: String)] = []
@@ -553,8 +560,9 @@ extension Schema {
     /// The witness functions the expansion declares for its checks.
     var checkPlan: CheckPlan { CheckPlan(typeChecks, counter: workCounter) }
 
-    /// Whether a function takes its payload as its own, so a caller gives it up: `consuming` or `__owned`,
-    /// with or without `sending`, or `sending` without an ownership. `__shared sending` lends it.
+    /// Whether a function takes ownership of its payload so a caller gives it up, covering `consuming`
+    /// or `__owned` (with or without `sending`) and `sending` without an ownership modifier.
+    /// `__shared sending` lends the payload instead.
     static func ownsPayload(ownership: String, convention: String) -> Bool {
         ownership == "consuming " || ownership == "__owned " || (ownership.isEmpty && convention.contains("sending "))
     }
@@ -564,25 +572,23 @@ extension Schema {
     /// alone so that the method is legal whatever type the payload is, a nonescaping closure or a
     /// noncopyable value among them, whenever the router and its edges are.
     ///
-    /// - When some function of the group takes the payload `@escaping`, which Swift allows of a function
-    ///   type alone, so the payload is copyable: none, and the method takes it escaping, so it can pass it
-    ///   to an edge that keeps it and lend it to a nonescaping router or edge, converting it at each call;
-    ///   `__shared` when a function of the group sends the payload, the one lending convention `sending`
-    ///   can join, so the method passes it on as `sending` and a caller that only borrows it can call the
-    ///   method. Neither repeats a `borrowing` the group spells: Swift 6.4 fails to compile a `borrowing`
-    ///   escaping parameter lent to a nonescaping one.
-    /// - None when some function of the group declares no ownership, which Swift requires of a
-    ///   noncopyable parameter, so the payload is copyable and passes as a plain parameter does, copied
-    ///   implicitly where it is needed twice; and none when the router takes the payload as its own,
-    ///   which an edge taking it after leaves to a copyable payload alone, as
-    ///   ``requiresCopyableRoutedPayload(_:)`` checks.
-    /// - Otherwise, when an edge the router may select takes the payload as its own, the ownership that
-    ///   passes it on: `consuming` when a function of the group spells `consuming`, so the payload is no
-    ///   nonescaping closure, which cannot be `consuming`, and `__owned` otherwise, as the group spells it,
-    ///   which any type can be.
-    /// - Otherwise, when every function only lends the payload, `borrowing`, so a caller that only borrows
-    ///   it can call the method; `__shared` when a function takes it `__shared sending`, the one lending
-    ///   convention that `sending` can join, which the method's own parameter then repeats.
+    /// - When some function of the group takes the payload `@escaping` (which Swift allows only on a
+    ///   function type, so the payload is copyable), no ownership modifier is added and the method takes
+    ///   it escaping so it can pass it to an edge that keeps it and lend it to a nonescaping router or
+    ///   edge, converting it at each call. If a function of the group also sends the payload, `__shared`
+    ///   is used (the one lending convention `sending` can join) so the method passes it on as `sending`
+    ///   and a borrowing caller can still invoke the method. Neither case repeats `borrowing`, because
+    ///   Swift 6.4 fails to compile a `borrowing` escaping parameter lent to a nonescaping one.
+    /// - No ownership modifier is used when some function of the group declares no ownership (which Swift
+    ///   requires of a noncopyable parameter, so the payload is copyable and copies implicitly where
+    ///   needed twice), or when the router takes the payload as its own (which an edge taking it after
+    ///   restricts to a copyable payload, checked by ``requiresCopyableRoutedPayload(_:)``).
+    /// - Otherwise, when an edge the router may select takes ownership of the payload, `consuming` is
+    ///   used when a function of the group spells `consuming` (so the payload cannot be a nonescaping
+    ///   closure), and `__owned` is used otherwise, which any type allows.
+    /// - Otherwise, when every function only lends the payload, `borrowing` is used so a borrowing caller
+    ///   can invoke the method, or `__shared` when a function takes it `__shared sending` (the one
+    ///   lending convention that `sending` can join), which the method's parameter then repeats.
     func routedOwnership(_ route: Route) -> String {
         let edges = branches(route)
         let ownerships = [route.payloadOwnership] + edges.map(\.payloadOwnership)
@@ -602,10 +608,11 @@ extension Schema {
         return conventions.contains { $0.contains("sending ") } ? "__shared " : "borrowing "
     }
 
-    /// Whether an `Owned` routed method checks that its payload is copyable: when every function of the
-    /// group declares an ownership and none takes the payload `@escaping`, so the payload may be
-    /// noncopyable, and the router takes the payload as its own while the edge it selects takes it after,
-    /// which only a copyable payload allows.
+    /// Whether an `Owned` routed method checks that its payload is copyable.
+    ///
+    /// This check is emitted when every function of the group declares an ownership modifier and none
+    /// takes the payload `@escaping` (so the payload may be noncopyable), and the router takes ownership
+    /// of the payload while the selected edge takes it afterward, which only a copyable payload allows.
     func requiresCopyableRoutedPayload(_ route: Route) -> Bool {
         let edges = branches(route)
         return route.namespace != nil && route.payloadType != nil
@@ -614,8 +621,8 @@ extension Schema {
             && Self.ownsPayload(ownership: route.payloadOwnership, convention: route.payloadConvention)
     }
 
-    /// The role of a completion parameter that the expansion compares with its declared type: the
-    /// output or failure a completion edge or router takes after its source, or its `request:`.
+    /// The role of a completion parameter that the expansion compares with its declared type, covering
+    /// the output or failure after its source or its `request:` parameter.
     enum CompletionRole: CaseIterable {
         case output, failure, request
 
@@ -665,7 +672,9 @@ extension Schema {
     }
 
     /// The local alias through which each check names the type it checks, so a spelling of any form
-    /// resolves as a type: a name the schema's source spells nowhere, so no spelling can name it.
+    /// resolves as a type.
+    ///
+    /// The chosen name appears nowhere in the schema's source, preventing collisions.
     var checkedAlias: String {
         var candidate = "_StateMachineChecked"
         var next = 1
@@ -784,18 +793,18 @@ extension Schema {
 
     // MARK: Spelling
 
-    /// The identity of a failure type: what a confirmed reading names, or the spelling of an unconfirmed one.
+    /// The identity of a failure type, using a confirmed reading when available or the spelling otherwise.
     enum FailureIdentity: Hashable {
         case reading(TypeKey)
         case spelled(String)
     }
 
-    /// The identity of a type an authored function throws, the same for every spelling of it that the
-    /// schema resolves alike: `Problem`, `Self.Problem`, `Flow.Problem`, and an alias of it that the
-    /// schema declares, with any comments or spacing.
+    /// The identity of a type an authored function throws, matching every spelling the schema resolves
+    /// alike (`Problem`, `Self.Problem`, `Flow.Problem`, and any schema-declared alias, regardless of
+    /// comments or spacing).
     ///
     /// A reading the macro cannot confirm is identified by its spelling alone, so two spellings share a
-    /// failure through it only when they are one spelling; an alias declared outside the schema is
+    /// failure through it only when they match lexically. An alias declared outside the schema is
     /// invisible to the macro, so it keys apart from the type it names. A router's `failure:` names the
     /// common failure explicitly.
     func failureKey(_ spelling: String) -> FailureIdentity {

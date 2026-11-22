@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the G0 language fixtures; all build/evidence output goes outside the checkout."""
+"""Compile the G0 language fixtures, placing all build and evidence output outside the checkout."""
 import argparse
 import hashlib
 import json
@@ -97,7 +97,7 @@ for mode,opt in [('debug','-Onone'),('release','-O')]:
     run(mode+'-executable',flags+[opt,'-parse-as-library','-I',directory,'-L',directory,'-lProbeCore',
             '-Xlinker','-rpath','-Xlinker',directory,client,ROOT/'Clients'/'Run.swift','-o',directory/'smoke'])
     if (directory/'smoke').exists(): run(mode+'-execute',[directory/'smoke'])
-    # Force an interface-only import: no binary Swift module is present in this directory.
+    # Force an interface-only import by keeping binary Swift modules out of this directory.
     interface_dir=directory/'interface-only'
     interface_dir.mkdir(exist_ok=True)
     shutil.copy2(directory/'ProbeCore.swiftinterface',interface_dir/'ProbeCore.swiftinterface')

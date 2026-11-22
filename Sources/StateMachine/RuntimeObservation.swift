@@ -2,7 +2,7 @@ import Observation
 
 /// The Observation tokens of one `MainActor` owner.
 ///
-/// Each token stands for one value a reader can track: the snapshot, the running count, the subscriber
+/// Each token stands for one tracked value, covering the snapshot, the running count, the subscriber
 /// count, and the retained completions. A read registers only its own token, so a change to one value
 /// does not invalidate a reader of another. Where the Observation framework is unavailable, reading and
 /// reporting do nothing, and the registrar is never created.
@@ -28,7 +28,7 @@ import Observation
     }
 
     // The key paths Observation tracks. Each is a stored property with its own storage, so the four key
-    // paths stay distinct however the getters are optimized or linked; the stored values are never read.
+    // paths stay distinct however the getters are optimized or linked, and the stored values are never read.
     private let snapshot: UInt8 = 0
     private let runningCount: UInt8 = 0
     private let subscriberCount: UInt8 = 0

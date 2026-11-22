@@ -2,9 +2,10 @@ import StateMachine
 
 /// A generated transfer list whose downloads are keyed by file and whose edges log what they do.
 ///
-/// Each file's download is its own work: starting a file again replaces only that file's download,
-/// and cancelling a file revokes only its work. Going offline leaves `Browsing`, which revokes every
-/// download. The `Logged` event carries a line for the app's log in each batch that needs one.
+/// Each file's download is its own work, so starting a file again replaces only that file's
+/// download and cancelling a file revokes only its work. Going offline leaves `Browsing`, which
+/// revokes every download. The `Logged` event carries a line for the app's log in each batch that
+/// needs one.
 @StateMachine(mode: .shared)
 nonisolated public enum GeneratedTransfers: Sendable, Equatable {
     /// The files and the transfers in progress.
@@ -19,7 +20,7 @@ nonisolated public enum GeneratedTransfers: Sendable, Equatable {
             self.failures = failures
         }
     }
-    /// No transfer can run; the downloaded files stay.
+    /// No transfer can run while offline, though downloaded files stay available.
     public struct Offline: Sendable, Equatable {
         /// The downloaded contents by file identifier.
         public let files: [Int: String]
@@ -66,7 +67,7 @@ nonisolated public enum GeneratedTransfers: Sendable, Equatable {
     fileprivate static func download(_ source: Browsing, _ id: Int) -> Change<Browsing, Effect.Download> {
         Change(source, effects: [.logged("download \(id)"), .download(key: id, input: "file-\(id)")])
     }
-    /// Cancels one file's download; a file without one cancels nothing.
+    /// Cancels one file's download, doing nothing for a file without an active download.
     @Transition(on: Input.cancel, cancels: [Download.self])
     fileprivate static func cancel(_ source: Browsing, _ id: Int) -> Change<Browsing, Effect.Cancel> {
         Change(source, effects: [.cancelDownload(key: id)])

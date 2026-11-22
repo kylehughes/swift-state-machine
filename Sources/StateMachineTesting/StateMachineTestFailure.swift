@@ -1,6 +1,6 @@
 /// A failed expectation of a `StateMachineTesting` helper, with the source location of the call.
 ///
-/// Helpers throw it instead of recording an issue, so they work with any test framework: Swift
+/// Helpers throw it instead of recording an issue so they work with any test framework. Swift
 /// Testing and XCTest both report a thrown error as a failure of the test that threw it, and the
 /// description begins with the location of the helper call.
 nonisolated public struct StateMachineTestFailure: Error, Sendable, Equatable, CustomStringConvertible {

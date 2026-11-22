@@ -35,7 +35,7 @@ nonisolated public enum GeneratedNote {
         case edit(String)
         case cancel
     }
-    /// One confined operation that cannot fail; no Sendable conformance is imposed on its input or outcome.
+    /// One confined operation that cannot fail and imposes no `Sendable` requirement on its input or outcome.
     @Operation(activeIn: [Saving.self])
     public enum Save {
         /// The immutable input.
@@ -55,7 +55,7 @@ nonisolated public enum GeneratedNote {
     fileprivate static func edit(_ source: Draft, _ text: String) -> Draft {
         Draft(text: text)
     }
-    /// Editing while saving abandons the save: leaving `Saving` revokes its work.
+    /// Editing while saving abandons the save because leaving `Saving` revokes its work.
     @Transition(on: Input.edit)
     fileprivate static func edit(_ source: Saving, _ text: String) -> Draft {
         Draft(text: text)

@@ -3,12 +3,12 @@ import StateMachine
 /// Records which declared edges, routers, and phases scripted runs of one owner type exercised, and
 /// reports the rest.
 ///
-/// Coverage is bound to an owner type, so only runs of that owner count toward it: a graph of another
-/// schema, even one with identical structure, cannot be recorded. Record the history of each
+/// Coverage is bound to an owner type, so only runs of that owner count toward it, and a graph of
+/// another schema cannot be recorded even with identical structure. Record the history of each
 /// ``ManualMachineTest`` that a test drives, then read ``unexercisedEdges``, ``unexercisedRouters``,
 /// ``unexercisedRejectingRouters``, and ``unvisitedPhases``, or require coverage with
 /// ``requireCoverage(excluding:includingRejectingRouters:fileID:filePath:line:column:)``, which also
-/// fails for every invariant a recorded run violated:
+/// fails for every invariant a recorded run violated.
 ///
 /// ```swift
 /// var coverage = GraphCoverage(for: GeneratedTransfers.Local.self)
@@ -25,7 +25,7 @@ import StateMachine
 /// edge, that the owner reports for that call, so a route counts as declining only once a test saw it
 /// decline.
 nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: Sendable {
-    /// The graph the coverage measures: the owner's.
+    /// The owner's graph that this coverage tracks.
     public var graph: StateMachineGraph { Owner.graph }
     /// The identifiers of the edges that recorded runs exercised.
     public private(set) var exercisedEdgeIDs: Set<String> = []
@@ -103,11 +103,11 @@ nonisolated public struct GraphCoverage<Owner: LocalStateMachine & ~Copyable>: S
     /// edge and a router that leave one phase cannot share a name. A router counts as exercised once a
     /// step takes one of its candidate edges.
     ///
-    /// By default it requires nothing of rejections: a router that declined, or an edge or router whose
-    /// function can throw, is not required to have refused an input, and a router without candidates,
-    /// which always declines, is not required at all. With `includingRejectingRouters`, it also requires
-    /// every router without candidates, except those in `excluded`, to have declined in a recorded run,
-    /// as ``unexercisedRejectingRouters`` lists them.
+    /// By default this requires nothing of rejections. A router that declined, or an edge or router
+    /// whose function can throw, is not required to have refused an input, and a router without
+    /// candidates (which always declines) is not required at all. With `includingRejectingRouters`,
+    /// every router without candidates except those in `excluded` must have declined in a recorded
+    /// run, matching ``unexercisedRejectingRouters``.
     ///
     /// The failure lists each unexercised edge and router, each required rejecting router that never
     /// declined, each unvisited phase, each violation, the number of changes made inside `withOwner`

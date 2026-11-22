@@ -5,16 +5,16 @@ import StateMachine
 /// An `ObservableObject` that drives one `MainActor` owner and publishes its complete snapshot.
 ///
 /// The Combine counterpart of ``StateMachinePresentation``, with the same driving operations and a
-/// publisher of the snapshots it shows, ``presentedSnapshots``, for apps that deploy before iOS 17. It
-/// supports every deployment target of the package, including iOS 16. Create it with a generated
-/// `MainActorHost`, read ``snapshot`` from a view, and call ``send(_:)`` from its actions. An accepted input
-/// is visible in the same turn; snapshots that arrive later through the subscription, such as an
-/// operation's result, are published as they are delivered. Released on another thread, it closes its
-/// registration's gate at once, which stops a generated owner's delivery, and leaves the rest to a later
-/// main-actor turn, which finishes the publisher's subscribers, cancels its subscription, and once that
-/// cancellation has returned releases its snapshot and its owner, on the main actor.
+/// publisher of the snapshots it shows, ``presentedSnapshots``, for apps that deploy before iOS 17.0.
+/// It supports every deployment target of the package, including iOS 16.0. Create it with a generated
+/// `MainActorHost`, read ``snapshot`` from a view, and call ``send(_:)`` from its actions. An accepted
+/// input is visible in the same turn, while snapshots arriving later through the subscription, such
+/// as an operation's result, are published as they are delivered. Released on another thread, it
+/// closes its registration's gate at once to stop a generated owner's delivery, and leaves the rest
+/// to a later main-actor turn, which finishes the publisher's subscribers, cancels its subscription,
+/// and releases its snapshot and owner on the main actor once that cancellation returns.
 @MainActor public final class StateMachineObservableObject<Host: MainActorStateMachineHost>: ObservableObject {
-    /// The latest complete snapshot; independently published phase fields cannot diverge.
+    /// The latest complete snapshot, kept whole so phase fields cannot diverge.
     ///
     /// `objectWillChange` announces each change before it is made. The presentation keeps the snapshot
     /// in storage that a main-actor turn empties when the presentation is released, so its stored
@@ -24,18 +24,18 @@ import StateMachine
     ///
     /// It becomes `true` when a registration that creation or ``resumeObserving()`` made is live, once
     /// the presentation shows the owner's snapshot that the registration delivered. A registration that
-    /// ends before that, as one a closed owner finishes inside the registration call, publishes nothing.
-    /// It becomes `false` when the owner finishes the registration, by closing or being released, and
-    /// when ``stopObserving()`` or ``close()`` ends it, each time once the presentation's cancellation of
-    /// the registration's subscription has returned, so a host of your own that frees its slot when its
-    /// subscription is cancelled has the slot free by then, also when the host ends the registration from
-    /// inside its own cancellation of that subscription.
+    /// ends before that, such as one a closed owner finishes inside the registration call, publishes
+    /// nothing. It becomes `false` when the owner finishes the registration by closing or being
+    /// released, or when ``stopObserving()`` or ``close()`` ends it, each time once the presentation's
+    /// cancellation of the registration's subscription has returned. A custom host that frees its slot
+    /// when its subscription is cancelled therefore has the slot free by then, including when the host
+    /// ends the registration from inside its own cancellation of that subscription.
     @Published public private(set) var isObserving = false
     /// Why the presentation could not register with its owner, or `nil` when it registered.
     ///
-    /// A failed registration leaves ``isObserving`` `false`; the presentation still shows the
+    /// A failed registration leaves ``isObserving`` `false`, while the presentation still shows the
     /// owner's snapshot at creation and every change made through it. A later ``resumeObserving()``
-    /// that registers sets it to `nil`; one that is refused throws and leaves it unchanged.
+    /// that registers sets this to `nil`. One that is refused throws and leaves it unchanged.
     @Published public private(set) var observationFailure: SubscriptionFailure?
     /// The owner, for reconciliation and shutdown that the presentation does not wrap.
     public var host: Host { core.host! }
@@ -45,13 +45,13 @@ import StateMachine
     // The subscribers of `presentedSnapshots`. It holds no snapshot.
     private let feed = PresentationFeed<Host.Snapshot>()
 
-    /// Shows the owner's current snapshot and tries to reserve one subscriber slot for updates; this
-    /// starts no work.
+    /// Shows the owner's current snapshot and tries to reserve one subscriber slot for updates without
+    /// starting work.
     ///
-    /// Creation never fails. If the owner refuses another registration, ``isObserving`` is
-    /// `false`, ``observationFailure`` holds the reason, and the presentation shows the snapshot it read
-    /// at creation, even when the owner delivered a newer one before refusing; ``resumeObserving()``
-    /// registers again.
+    /// Creation never fails. If the owner refuses another registration, ``isObserving`` is `false`,
+    /// ``observationFailure`` holds the reason, and the presentation shows the snapshot read at
+    /// creation even when the owner delivered a newer one before refusing. Call ``resumeObserving()``
+    /// to register again.
     public init(_ host: Host) {
         core = DrivingCore(host)
         core.surface = self
@@ -65,9 +65,9 @@ import StateMachine
     ///
     /// It registers exactly as creation does. The presentation keeps the snapshot it shows, then shows
     /// the owner's current snapshot that the registration delivers, if it is newer, and ``isObserving``
-    /// becomes `true`. A refusal throws at once and changes nothing: the presentation shows the same
+    /// becomes `true`. A refusal throws at once and changes nothing. The presentation keeps the same
     /// snapshot, ``isObserving`` and ``observationFailure`` keep their values, and nothing the owner
-    /// delivered while refusing is shown. A closed owner, as after ``close()``, finishes the new
+    /// delivered while refusing is shown. A closed owner, such as after ``close()``, finishes the new
     /// registration inside the call, so it returns with ``isObserving`` `false`. While a registration
     /// is live or still being made, it returns without registering.
     public func resumeObserving() throws(SubscriptionFailure) { try core.register() }
@@ -119,12 +119,12 @@ import StateMachine
     /// the owner delivered inside that call is released only once that cancellation has returned.
     public func stopObserving() { core.end() }
 
-    // A presentation can be released on another thread, as when an object that stores it is released
-    // there. The registration's gate closes at once, which stops delivery and frees a generated owner's
-    // slot; one later main-actor turn then finishes the publisher's subscribers and cancels the
-    // subscription, which removes the registration and clears the token, and once every cancellation the
-    // presentation started has returned releases the shown snapshot and the owner on the main actor. The
-    // core holds those values alone, so they are released there even when that turn runs before this
+    // A presentation can be released on another thread when an object storing it is released there.
+    // The registration's gate closes at once to stop delivery and free a generated owner's slot. One
+    // later main-actor turn then finishes the publisher's subscribers, cancels the subscription to
+    // remove the registration and clear the token, and releases the shown snapshot and owner on the
+    // main actor once every cancellation the presentation started has returned. The core holds those
+    // values alone, so they are released on the main actor even when that turn runs before this
     // presentation's own storage is destroyed.
     deinit {
         core.gate.close()
@@ -140,10 +140,10 @@ import StateMachine
     /// A Combine publisher of a `Sendable` projection of each snapshot the presentation shows, which
     /// `transform` computes on the main actor, for a snapshot that is not `Sendable`.
     ///
-    /// It publishes as ``presentedSnapshots`` does: the projection of the snapshot shown when a
-    /// subscriber attaches, then of each newly shown snapshot, in the order and at the times that
-    /// ``PresentationPublisher`` describes. It stays open across ``stopObserving()`` and finishes once
-    /// the presentation is released.
+    /// It follows the same publication rules as ``presentedSnapshots``, emitting the projection of the
+    /// snapshot shown when a subscriber attaches and then each newly shown snapshot in the order and
+    /// at the times that ``PresentationPublisher`` describes. It stays open across ``stopObserving()``
+    /// and finishes once the presentation is released.
     public func presentedSnapshots<Projection: Sendable>(
         projecting transform: @escaping @MainActor (Host.Snapshot) -> Projection
     ) -> PresentationPublisher<Projection> {
@@ -168,32 +168,31 @@ extension StateMachineObservableObject where Host.Snapshot: Sendable {
     /// A Combine publisher of the snapshots the presentation shows.
     ///
     /// It publishes the snapshot shown when a subscriber attaches, then each newly shown snapshot. A
-    /// change the subscriber has demand for
-    /// arrives after `objectWillChange` and before ``snapshot`` returns it; a buffered one arrives once
-    /// the subscriber has demand again, as ``PresentationPublisher`` describes.
+    /// change the subscriber has demand for arrives after `objectWillChange` and before ``snapshot``
+    /// returns it, while a buffered one arrives once the subscriber has demand again, as
+    /// ``PresentationPublisher`` describes.
     ///
-    /// It belongs to the presentation, not to its registration, so it stays open after
+    /// It belongs to the presentation rather than to its registration, so it stays open after
     /// ``stopObserving()``, and ``isObserving`` reports whether the registration is live. Once the
-    /// presentation is released, it finishes, and a subscriber that attaches after that receives
-    /// `.finished` at once. A snapshot that is not `Sendable` is published through
-    /// ``presentedSnapshots(projecting:)``.
+    /// presentation is released, it finishes, and any subscriber attaching afterward receives
+    /// `.finished` at once. Publish a non-`Sendable` snapshot through ``presentedSnapshots(projecting:)``.
     public var presentedSnapshots: PresentationPublisher<Host.Snapshot> { PresentationPublisher(feed) { $0 } }
 }
 
 /// An `@Observable` model that drives one `MainActor` owner and exposes its complete snapshot.
 ///
-/// Create it with a generated `MainActorHost`, read ``snapshot`` from a view, and call ``send(_:)`` from its
-/// actions. An accepted input is visible in the same turn; snapshots that arrive later through the
-/// subscription, such as an operation's result, are exposed as they are delivered. Only ``snapshot``,
-/// ``isObserving``, and ``observationFailure`` are tracked; the owner and its authority are excluded from
-/// observation. It requires iOS 17 or a matching release; ``StateMachineObservableObject`` has the same
-/// driving operations for earlier ones. Released on another thread, it closes its registration's gate at
-/// once, which stops a generated owner's delivery, and leaves the rest to a later main-actor turn, which
-/// cancels its subscription and once that cancellation has returned releases its snapshot and its owner,
-/// on the main actor.
+/// Create it with a generated `MainActorHost`, read ``snapshot`` from a view, and call ``send(_:)``
+/// from its actions. An accepted input is visible in the same turn, while snapshots arriving later
+/// through the subscription, such as an operation's result, are exposed as they are delivered. Only
+/// ``snapshot``, ``isObserving``, and ``observationFailure`` are tracked, excluding the owner and its
+/// authority from observation. Requires iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0,
+/// or Mac Catalyst 17.0 and later. Use ``StateMachineObservableObject`` for earlier OS releases.
+/// Released on another thread, it closes its registration's gate at once to stop a generated owner's
+/// delivery, and leaves the rest to a later main-actor turn, which cancels its subscription and
+/// releases its snapshot and owner on the main actor once that cancellation returns.
 @available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, macCatalyst 17.0, *)
 @MainActor @Observable public final class StateMachinePresentation<Host: MainActorStateMachineHost> {
-    /// The latest complete snapshot; independently observed phase fields cannot diverge.
+    /// The latest complete snapshot, kept whole so observed phase fields cannot diverge.
     ///
     /// The model keeps the snapshot in storage that a main-actor turn empties when the model is
     /// released, so its stored properties never hold a snapshot of their own.
@@ -205,18 +204,18 @@ extension StateMachineObservableObject where Host.Snapshot: Sendable {
     ///
     /// It becomes `true` when a registration that creation or ``resumeObserving()`` made is live, once
     /// the model exposes the owner's snapshot that the registration delivered. A registration that ends
-    /// before that, as one a closed owner finishes inside the registration call, changes nothing. It
-    /// becomes `false` when the owner finishes the registration, by closing or being released, and when
-    /// ``stopObserving()`` or ``close()`` ends it, each time once the model's cancellation of the
-    /// registration's subscription has returned, so a host of your own that frees its slot when its
-    /// subscription is cancelled has the slot free by then, also when the host ends the registration from
-    /// inside its own cancellation of that subscription.
+    /// before that, such as one a closed owner finishes inside the registration call, changes nothing.
+    /// It becomes `false` when the owner finishes the registration by closing or being released, or
+    /// when ``stopObserving()`` or ``close()`` ends it, each time once the model's cancellation of the
+    /// registration's subscription has returned. A custom host that frees its slot when its subscription
+    /// is cancelled therefore has the slot free by then, including when the host ends the registration
+    /// from inside its own cancellation of that subscription.
     public private(set) var isObserving = false
     /// Why the model could not register with its owner, or `nil` when it registered.
     ///
-    /// A failed registration leaves ``isObserving`` `false`; the model still exposes the
-    /// owner's snapshot at creation and every change made through it. A later ``resumeObserving()``
-    /// that registers sets it to `nil`; one that is refused throws and leaves it unchanged.
+    /// A failed registration leaves ``isObserving`` `false`, while the model still exposes the owner's
+    /// snapshot at creation and every change made through it. A later ``resumeObserving()`` that
+    /// registers sets this to `nil`. One that is refused throws and leaves it unchanged.
     public private(set) var observationFailure: SubscriptionFailure?
     /// The owner, for reconciliation and shutdown that the model does not wrap.
     public var host: Host { core.host! }
@@ -224,13 +223,13 @@ extension StateMachineObservableObject where Host.Snapshot: Sendable {
     // model is released, so its stored properties hold none of them.
     @ObservationIgnored private let core: DrivingCore<StateMachinePresentation>
 
-    /// Shows the owner's current snapshot and tries to reserve one subscriber slot for updates; this
-    /// starts no work.
+    /// Shows the owner's current snapshot and tries to reserve one subscriber slot for updates without
+    /// starting work.
     ///
-    /// Creation never fails, so the model can initialize a view's `@State`. If the owner refuses another registration, ``isObserving`` is
-    /// `false`, ``observationFailure`` holds the reason, and the model exposes the snapshot it read
-    /// at creation, even when the owner delivered a newer one before refusing; ``resumeObserving()``
-    /// registers again.
+    /// Creation never fails, so the model can initialize a view's `@State`. If the owner refuses
+    /// another registration, ``isObserving`` is `false`, ``observationFailure`` holds the reason, and
+    /// the model exposes the snapshot read at creation even when the owner delivered a newer one before
+    /// refusing. Call ``resumeObserving()`` to register again.
     public init(_ host: Host) {
         core = DrivingCore(host)
         core.surface = self
@@ -242,11 +241,11 @@ extension StateMachineObservableObject where Host.Snapshot: Sendable {
     ///
     /// It registers exactly as creation does. The model keeps the snapshot it exposes, then exposes
     /// the owner's current snapshot that the registration delivers, if it is newer, and ``isObserving``
-    /// becomes `true`. A refusal throws at once and changes nothing: the model exposes the same
+    /// becomes `true`. A refusal throws at once and changes nothing. The model keeps the same
     /// snapshot, ``isObserving`` and ``observationFailure`` keep their values, and nothing the owner
-    /// delivered while refusing is exposed. A closed owner, as after ``close()``, finishes the new
-    /// registration inside the call, so it returns with ``isObserving`` `false`. While a registration
-    /// is live or still being made, it returns without registering.
+    /// delivered while refusing is exposed. A closed owner, such as after ``close()``, finishes the
+    /// new registration inside the call, so it returns with ``isObserving`` `false`. While a
+    /// registration is live or still being made, it returns without registering.
     public func resumeObserving() throws(SubscriptionFailure) { try core.register() }
 
     /// Admits one input and exposes its accepted snapshot.
@@ -296,12 +295,12 @@ extension StateMachineObservableObject where Host.Snapshot: Sendable {
     /// owner delivered inside that call is released only once that cancellation has returned.
     public func stopObserving() { core.end() }
 
-    // A model can be released on another thread, as when an object that stores it is released
-    // there. The registration's gate closes at once, which stops delivery and frees a generated owner's
-    // slot; one later main-actor turn then cancels the subscription, which removes the registration and
-    // clears the token, and once every cancellation the model started has returned releases the exposed
-    // snapshot and the owner on the main actor. The core holds those values alone, so they are released
-    // there even when that turn runs before this model's own storage is destroyed.
+    // A model can be released on another thread when an object storing it is released there. The
+    // registration's gate closes at once to stop delivery and free a generated owner's slot. One later
+    // main-actor turn then cancels the subscription to remove the registration and clear the token,
+    // and releases the exposed snapshot and owner on the main actor once every cancellation the model
+    // started has returned. The core holds those values alone, so they are released on the main actor
+    // even when that turn runs before this model's own storage is destroyed.
     deinit {
         core.gate.close()
         let core = core
@@ -349,22 +348,24 @@ extension StateMachinePresentation: DrivingSurface {
 ///   registration is `live` once its first snapshot is shown.
 ///
 /// Every cancellation of a registration the presentation let go is counted in `cancelling` until it
-/// has returned, from the moment the presentation let it go, also when that is inside the registration
-/// call, before the owner returned a token. A snapshot the presentation will not show, as one delivered
-/// through a registration that is no longer the presentation's or staged by a registration it let go
-/// or the owner refused, is kept until `cancelling` is zero and then released, so its destructor finds
-/// the slot free; the shown snapshot and the owner of a released presentation are released then too.
-/// `isObserving` is `true` while a registration is live; once published `true`, it stays `true` until
-/// every cancellation the presentation started has returned, but a cancellation alone never makes it
-/// `true`. An installed registration becomes live only once no assignment is in progress, so the
-/// snapshot it delivered, or a newer one, is already shown when the presentation first reports it.
+/// has returned, from the moment the presentation let it go, including inside the registration call
+/// before the owner returned a token. A snapshot the presentation will not show, such as one
+/// delivered through a replaced registration or staged by a registration it let go or the owner
+/// refused, is kept until `cancelling` is zero and then released so its destructor finds the slot
+/// free. The shown snapshot and owner of a released presentation are released then too.
 ///
-/// A snapshot that arrives while another is being assigned waits for that assignment, tagged by where
-/// it came from: a receipt of a change made through the presentation, or a delivery of one registration.
+/// `isObserving` is `true` while a registration is live. Once published `true`, it stays `true`
+/// until every cancellation the presentation started has returned, though a cancellation alone never
+/// makes it `true`. An installed registration becomes live only once no assignment is in progress,
+/// so the snapshot it delivered, or a newer one, is already shown when the presentation first
+/// reports it.
+///
+/// A snapshot that arrives while another is being assigned waits for that assignment, tagged as
+/// either a receipt of a change made through the presentation or a delivery from one registration.
 /// Ending a registration detaches its waiting delivery, whose publication was never announced, before
-/// any callout, and keeps it until the cancellation has returned, while a waiting receipt is still
-/// shown. A delivery is shown only while its registration is the presentation's, which is read again
-/// after its revision is, since reading it can run a snapshot's own code.
+/// any callout and keeps it until the cancellation has returned, while a waiting receipt is still
+/// shown. A delivery is shown only while its registration is the presentation's, checked again after
+/// reading its revision since reading it can run a snapshot's own code.
 @MainActor private final class DrivingCore<Surface: DrivingSurface> {
     typealias Host = Surface.Host
     typealias Snapshot = Host.Snapshot
@@ -397,8 +398,8 @@ extension StateMachinePresentation: DrivingSurface {
     nonisolated let gate = PresentationGate()
     private(set) var host: Host?
     private(set) var snapshot: Snapshot?
-    // The snapshots that arrived during an assignment and wait for it, each with its revision: the
-    // newest receipt, and a delivery newer than it, if one arrived after it.
+    // The snapshots that arrived during an assignment and wait for it, each with its revision, holding
+    // the newest receipt and any newer delivery that arrived after it.
     private var deferredReceipt: Waiting?
     private var deferredDelivery: Waiting?
     // The revision of the newest snapshot admitted for showing, and of the newest whose publication
@@ -454,8 +455,8 @@ extension StateMachinePresentation: DrivingSurface {
         install(token, for: attempt)
     }
 
-    /// Lets the registration go: cancels the token the presentation holds, or, inside the registration
-    /// call, leaves that call to cancel the token the owner returns, and reports the end once every
+    /// Lets the registration go by cancelling the held token or, inside the registration call,
+    /// leaving that call to cancel the token the owner returns, and reports the end once every
     /// cancellation has returned.
     //
     // Everything the ending registration owns is detached, and its cancellation counted, before the
@@ -476,9 +477,9 @@ extension StateMachinePresentation: DrivingSurface {
             gate.current = nil
         }
         let staged = ending?.end()
-        // A delivery waiting for the assignment in progress was never announced, so it is not shown; the
-        // receipt of a change made through the presentation still is. Without a registration to end, a
-        // waiting delivery is the seed of one the owner finished.
+        // A delivery waiting for the assignment in progress was never announced, so it is not shown,
+        // while the receipt of a change made through the presentation still is. Without a registration
+        // to end, a waiting delivery is the seed of one the owner finished.
         var delivery: Waiting?
         if let waiting = deferredDelivery, ending == nil || waiting.attempt === ending {
             deferredDelivery = nil
@@ -493,8 +494,9 @@ extension StateMachinePresentation: DrivingSurface {
 
     /// Shows a snapshot only when it is newer, so a delayed delivery cannot regress the model.
     //
-    // The revision is read once, before the watermark: reading it can run a snapshot's own code, which
-    // can send another input and apply a newer snapshot, which the comparison then sees.
+    // The revision is read once before comparing against the watermark, because reading it can run a
+    // snapshot's own code that sends another input and applies a newer snapshot, which the comparison
+    // then sees.
     func apply(_ next: Snapshot, from origin: Origin = .presentation) {
         let revision = next.revision
         var attempt: Attempt?
@@ -516,8 +518,8 @@ extension StateMachinePresentation: DrivingSurface {
         guard revision > watermark else { return }
         watermark = revision
         guard !publishing else {
-            // Each arrival is newer than every snapshot waiting. A receipt replaces both; a delivery
-            // replaces only a waiting delivery, so the receipt is still shown if the observation ends.
+            // Each arrival is newer than every snapshot waiting. A receipt replaces both, while a
+            // delivery replaces only a waiting delivery so the receipt is still shown if observation ends.
             let waiting = Waiting(snapshot: next, revision: revision, attempt: attempt)
             var replaced: [Waiting?] = [exchange(&deferredDelivery, with: nil)]
             switch origin {
@@ -544,9 +546,9 @@ extension StateMachinePresentation: DrivingSurface {
         release(displaced)
     }
 
-    /// Disposes of the core of a released presentation, on the main actor: lets its registration go,
-    /// and once every cancellation has returned, including one inside which a host of your own delivers
-    /// a snapshot, releases the snapshots and the owner.
+    /// Disposes of the core of a released presentation on the main actor by releasing its
+    /// registration and, once every cancellation has returned (including one inside which a custom
+    /// host delivers a snapshot), releasing the snapshots and the owner.
     func dispose() {
         disposing = true
         end()
@@ -586,16 +588,16 @@ extension StateMachinePresentation: DrivingSurface {
         if let seed { apply(seed, from: .observation(attempt)) }
         becomeLive()
     }
-    // Makes the installed registration live, unless an assignment is in progress: the seed it delivered,
-    // or a newer snapshot, is then shown, and the assignment makes it live once it completes.
+    // Makes the installed registration live unless an assignment is in progress, in which case the
+    // seed it delivered or a newer snapshot is shown and the assignment makes it live once complete.
     private func becomeLive() {
         guard !publishing, case .installed(let attempt, let token, live: false) = registration else { return }
         registration = .installed(attempt, token, live: true)
         report()
     }
-    // Stages a delivery while the owner is still making the registration, shows one of the installed
-    // registration, and keeps any other until no cancellation is running: a host of your own can deliver
-    // from inside the cancellation that ends the registration, and after the presentation was released.
+    // Stages a delivery while the owner is still making the registration, shows one for the installed
+    // registration, and keeps any other until no cancellation is running because a custom host can
+    // deliver from inside the cancellation that ends the registration or after release.
     private func receive(_ next: Snapshot, from attempt: Attempt) {
         switch registration {
         case .registering(let current) where current === attempt:
@@ -663,10 +665,10 @@ extension StateMachinePresentation: DrivingSurface {
         )
         withExtendedLifetime((released, owned)) {}
     }
-    // Reports whether a registration is live, or one that was reported live is still being cancelled,
-    // when that changed. An observer of the assignment runs before the property changes and can end or
-    // resume the observation, so a report made meanwhile waits: the assignment in progress finishes, and
-    // then this reads the state again and reports it if it differs from what was assigned.
+    // Reports whether a registration is live, or whether one that was reported live is still being
+    // cancelled, when that changes. An observer of the assignment runs before the property changes and
+    // can end or resume the observation, so a report made meanwhile waits until the assignment in
+    // progress finishes, then reads the state again and reports it if it differs from what was assigned.
     private func report() {
         guard !reporting, let surface else { return }
         reporting = true

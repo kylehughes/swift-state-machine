@@ -463,7 +463,7 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
     private var registrationOrder: [String] = []
     // Hand-offs each saved publisher has made to the main actor (H3), so a release can wait for the seeds.
     private var handOffs: [Int] = [0, 0]
-    // A release held after a release notice (E11): the worker continues when this is signalled.
+    // A release held after a release notice (E11). The worker continues when this is signaled.
     private var noticeHold: ExplorerNoticeHold?
 
     init?(_ kind: ExplorerPassiveKind, verbose: Bool = false) {

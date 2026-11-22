@@ -6,36 +6,36 @@ import os
 ///
 /// Creating the publisher registers one observer, so it holds one of the owner's subscriber slots
 /// from creation. Its subscriber receives the snapshot current at registration, unless a newer one
-/// has replaced it, and then each newer snapshot as its demand allows: the publisher keeps one pending
-/// snapshot and replaces it with a newer one, so a subscriber that requests slowly receives the latest
-/// value and never an older one. The value a unit of demand reaches is the newest the owner had
-/// handed over when the publisher claimed that unit, or a newer one, even when it is still on its way
-/// to the main actor when the subscriber asks. After the owner's closed snapshot, the publisher
-/// finishes; the closed snapshot waits for demand. An owner released without closing first processes
-/// every batch it accepted and delivers each here as usual; then the publisher finishes at once,
-/// without a closed snapshot, and discards every ordinary value it has not yet delivered, even while a
-/// delivery is still projecting a snapshot, so demand first made after that receives only the
-/// completion, and a unit of demand that a discarded value would have spent is kept. The release ends
-/// every publisher of the owner at one instant: once any of them can finish for it, none of them
-/// begins an ordinary delivery.
+/// has replaced it, and then each newer snapshot as demand allows. The publisher keeps only one
+/// pending snapshot and replaces it with any newer one, so a subscriber that requests slowly
+/// receives the latest value and never an older one. The value a unit of demand reaches is the
+/// newest the owner had handed over when the publisher claimed that unit, or a newer one, even when
+/// it is still on its way to the main actor when the subscriber asks.
 ///
-/// The publisher has one subscriber. A later subscriber receives `.finished` at once. Cancelling the
-/// subscription frees the slot before it returns, from any thread, and so does releasing a publisher
-/// that was never subscribed. No value or completion is delivered after a cancellation that returned
-/// before the publisher decided that delivery, including one made by the destructor of a value the
-/// publisher released while deciding it; a cancellation on another thread that races a delivery
-/// already decided on the main actor can return before that delivery.
+/// After the owner's closed snapshot, which waits for demand, the publisher finishes. An owner
+/// released without closing first processes every batch it accepted and delivers each here as usual,
+/// then the publisher finishes at once without a closed snapshot and discards every undelivered
+/// ordinary value, even while a delivery is still projecting a snapshot. Demand first made after
+/// that receives only the completion, and any unit of demand that a discarded value would have spent
+/// is kept. Release ends every publisher of the owner at one instant, so once any of them can finish
+/// for it, none begins an ordinary delivery.
 ///
-/// Subscription, delivery, and completion happen on the main actor. The publisher delivers at most 32
-/// values in one main-actor turn, counting every delivery of that turn, whether it comes from the
-/// subscription, a value the owner hands over, or a request for demand, and continues on a later turn
-/// with the outstanding demand, the pending value, and the finish, so neither a subscriber that makes
-/// the owner hand over another value from each one it receives nor an owner that hands over many
-/// values in one turn can hold the main actor; a cancellation between those turns delivers nothing
-/// more. Subscribing off the main actor stops the program instead of racing; requesting
-/// demand and cancelling are accepted from any thread. An owner released on another thread while the
-/// main actor delivers a value it decided before the release can return before that delivery, as a
-/// cancellation can.
+/// The publisher has one subscriber, and any later subscriber receives `.finished` at once.
+/// Cancelling the subscription frees the slot before returning from any thread, as does releasing a
+/// publisher that was never subscribed. No value or completion is delivered after a cancellation
+/// that returned before the publisher decided that delivery, including one made by the destructor of
+/// a value released while deciding it. A cancellation on another thread that races a delivery
+/// already decided on the main actor can still return before that delivery runs.
+///
+/// Subscription, delivery, and completion happen on the main actor. The publisher delivers at most
+/// 32 values in one main-actor turn, counting deliveries from subscription, owner hand-offs, and
+/// demand requests together, and continues on a later turn with the outstanding demand, pending
+/// value, and finish. Neither a subscriber that triggers another value on each receipt nor an owner
+/// that hands over many values in one turn can hold the main actor, and a cancellation between those
+/// turns delivers nothing more. Subscribing off the main actor stops the program instead of racing,
+/// while requesting demand and cancelling are accepted from any thread. An owner released on another
+/// thread while the main actor delivers a value decided before the release can return before that
+/// delivery, just as a cancellation can.
 ///
 /// `Output` is `Sendable`, because a Combine pipeline can move each value to another thread, as
 /// `receive(on:)` does. An owner whose snapshots are not `Sendable` publishes a `Sendable` projection.
@@ -76,8 +76,8 @@ import os
             }
         }
 
-        /// Adds demand from outside the delivery loop, and reports whether the caller must schedule a
-        /// delivery turn: the first such addition since the last turn reserves the next one.
+        /// Adds demand from outside the delivery loop and reports whether the caller must schedule a
+        /// delivery turn, since the first addition since the last turn reserves the next one.
         func reserve(_ demand: Subscribers.Demand) -> Bool {
             guard demand > 0 else { return false }
             while true {
@@ -146,15 +146,15 @@ import os
 
         init(_ registration: Registration) { self.registration = registration }
 
-        /// Stops the owner's delivery and frees its slot, when the owner admits through the
-        /// registration's gate; ``cancel()`` follows.
+        /// Stops the owner's delivery and frees its slot when the owner admits through the
+        /// registration's gate, ahead of ``cancel()``.
         func close() {
             switch registration {
             case .shared(let token): token.gate?.close()
             case .mainActor(_, let gate): gate.close()
             }
         }
-        // Closing a main-actor registration's gate frees its slot at once; the token removes it on the main actor.
+        // Closing a main-actor registration's gate frees its slot at once, and the token removes it on the main actor.
         func cancel() {
             switch registration {
             case .shared(let token): token.cancel()
@@ -168,7 +168,7 @@ import os
 
     /// The pending snapshot and the subscriber, confined to the main actor.
     ///
-    /// Every delivery decision is one step of ``drain()``: it claims one unit of the subscriber's
+    /// Every delivery decision is one step of ``drain()``. It claims one unit of the subscriber's
     /// demand, then takes the newest value and any finish from the ingress and applies the owner's
     /// release, releasing the values that replaces, and repeats that until a pass releases nothing,
     /// since a released value's destructor can hand over another value, release the owner, request
@@ -176,13 +176,13 @@ import os
     /// release again before delivering an ordinary value, with no client code in between. No decision
     /// rests on a fact read before client code ran.
     @MainActor fileprivate final class Channel {
-        // The owner's lifetime gate, which every publisher of the owner shares: open until the owner is
-        // released without closing, which closes it once, before it notifies any registration, so after
-        // one publisher of the owner can finish, no publisher of it can begin an ordinary delivery. Every
-        // value and finish the owner delivered before that release reaches the ingress first, so a step
-        // that finds the gate closed and then takes the ingress has everything the owner promised. A
-        // `Sendable` owner closes it even while a delivery is in progress; a confined owner's deliveries
-        // run in its own turn.
+        // The owner's lifetime gate, shared by every publisher of the owner. It stays open until the
+        // owner is released without closing, which closes it once before notifying any registration so
+        // after one publisher can finish, no publisher can begin an ordinary delivery. Every value and
+        // finish the owner delivered before that release reaches the ingress first, so a step that
+        // finds the gate closed and then takes the ingress has everything the owner promised. A
+        // `Sendable` owner closes it even while a delivery is in progress, while a confined owner's
+        // deliveries run in its own turn.
         private let source: RuntimeRegistrationGate
         // The hand-off from a `Sendable` owner. A scheduled hand-off turn retains it while it holds a
         // value or a finish, so a value is never lost when the owner releases the callbacks.
@@ -216,8 +216,8 @@ import os
             drain()
         }
 
-        // Returns the value that will not reach the subscriber, for the caller to release once the
-        // channel is consistent: the displaced pending value, or `value` itself after the finish.
+        // Returns the value that will not reach the subscriber, either the displaced pending value or
+        // `value` itself after the finish, for the caller to release once the channel is consistent.
         private func stage(_ value: Output, final: Bool) -> Output? {
             guard !finished, !ended else { return value }
             let displaced = pending
@@ -303,22 +303,22 @@ import os
                 drain()
             }
         }
-        // Gives up the rest of the turn's allowance; the refill continues.
+        // Gives up the rest of the turn's allowance so the refill continues on a later turn.
         private func yieldTurn() {
             remaining = 0
             scheduleRefill()
         }
 
-        // The owner was released without closing; its lifetime gate is already closed.
+        // The owner was released without closing, and its lifetime gate is already closed.
         func released() { drain() }
 
-        // One delivery loop at a time: a value offered while the subscriber is receiving waits for it.
-        // Each pass is one step. The unit of demand is claimed first, so the value that spends it is
-        // the newest the owner had handed over by then, or a newer one; a unit that no value spends,
-        // because none is pending or the owner's release discarded it, is returned. Once the turn's
-        // allowance is spent the loop stops, leaving the demand and the pending value for the refill,
-        // so a subscriber that makes the owner hand over another value from each one it receives
-        // cannot hold the main actor.
+        // One delivery loop runs at a time, so any value offered while the subscriber is receiving
+        // waits for it. Each pass is one step. One unit of demand is claimed first so the value
+        // spending it is the newest the owner had handed over by then or newer. A unit that no value
+        // spends, because none is pending or the owner's release discarded it, is returned. Once the
+        // turn's allowance is spent the loop stops, leaving the demand and pending value for the
+        // refill, so a subscriber that makes the owner hand over another value from each one it
+        // receives cannot hold the main actor.
         private func drain() {
             guard !delivering, !ended, let control, let downstream else { return }
             delivering = true
@@ -331,7 +331,7 @@ import os
                 guard remaining > 0 else { return }
                 let claimed = control.claim()
                 guard settle() else {
-                    // Destructors kept handing over values; a later turn continues.
+                    // Destructors kept handing over values, so a later turn continues.
                     if claimed { control.add(.max(1)) }
                     yieldTurn()
                     return
@@ -356,7 +356,7 @@ import os
                     return
                 }
                 // Demand first made after the release cannot have been claimed before this check,
-                // so it never reaches an ordinary value; the next pass settles the finish.
+                // so it never reaches an ordinary value, and the next pass settles the finish.
                 if !pendingIsFinal, !source.isOpen {
                     control.add(.max(1))
                     continue
@@ -378,7 +378,7 @@ import os
                 var released: [Output] = []
                 if let ingress { released += absorb(ingress.take()) }
                 // The release follows everything the owner delivered, so the ingress is taken again
-                // after the closed gate is seen: a closed snapshot delivered before it is kept.
+                // after the closed gate is seen to keep any closed snapshot delivered before it.
                 if !source.isOpen {
                     if let ingress { released += absorb(ingress.take()) }
                     if let discarded = settleFinish() { released.append(discarded) }
@@ -412,10 +412,10 @@ import os
     /// Registers with a `MainActor` owner through `register`, projecting each snapshot with `transform`.
     ///
     /// `isFinal` reports whether a snapshot is the owner's closed snapshot. `ownerLifetime` is the
-    /// owner's own gate, which it closes once, first, when it is released without closing, before it
-    /// cancels any worker or releases any callback; it finishes the registration on a later main-actor
-    /// turn. A delivery runs inside the owner's own turn, which retains it, so no delivery is in progress
-    /// when the owner is released.
+    /// owner's own gate, which it closes once, first, when released without closing, before
+    /// cancelling any worker or releasing any callback. It then finishes the registration on a later
+    /// main-actor turn. A delivery runs inside the owner's own turn, which retains it, so no
+    /// delivery is in progress when the owner is released.
     package init<Raw>(
         mainActor transform: @escaping @MainActor (Raw) -> Output,
         isFinal: @escaping @MainActor (Raw) -> Bool,
@@ -458,7 +458,7 @@ import os
     /// on the owner's delivery path before it moves to the main actor.
     ///
     /// `isFinal` reports whether a snapshot is the owner's closed snapshot. `ownerLifetime` is the
-    /// owner's own gate, which every publisher of that owner shares: an owner released without closing
+    /// owner's own gate, shared by every publisher of that owner. An owner released without closing
     /// closes it once, first, even while a delivery is still in progress, so a delivery cannot keep
     /// the publisher open after its owner is gone. The owner then runs the third callback, which wakes
     /// the channel on the main actor.
@@ -484,8 +484,8 @@ import os
     /// Registers with an actor owner through `register`, which awaits the actor.
     ///
     /// `isFinal` reports whether a snapshot is the owner's closed snapshot. `ownerLifetime` is the
-    /// owner's own gate, which an owner released without closing closes once, first, before it cancels
-    /// any worker or releases any callback; it then runs the third callback.
+    /// owner's own gate, which an owner released without closing closes once, first, before
+    /// cancelling any worker or releasing any callback, and then runs the third callback.
     package init<Raw>(
         actor transform: @escaping @Sendable (Raw) -> Output,
         isFinal: @escaping @Sendable (Raw) -> Bool,
@@ -509,10 +509,10 @@ import os
 /// Forwards a `Sendable` owner's callbacks to the main actor, keeping only the latest snapshot.
 ///
 /// The channel takes what it holds at the start of every delivery step, and a hand-off turn on the
-/// main actor takes it when no step runs; the turn stays scheduled while the ingress holds a value or
-/// a finish, and retains the ingress until then. Its state sits behind one lock: a change takes the
-/// value it replaces out of the state and releases it after unlocking, so a call that reads whether
-/// the owner finished never holds a value.
+/// main actor takes it when no step runs. The turn stays scheduled while the ingress holds a value or
+/// a finish, and retains the ingress until then. Its state sits behind one lock, and each change
+/// takes any replaced value out of the state and releases it after unlocking, so a call checking
+/// whether the owner finished never holds a value.
 nonisolated private final class SnapshotPublisherIngress<Output: Sendable>: Sendable {
     /// What the owner handed over since the channel last took it.
     struct Handed: Sendable {
@@ -580,7 +580,7 @@ extension SnapshotPublisher: @MainActor Publisher {
     /// Attaches the publisher's one subscriber, or finishes a later one at once.
     public func receive<S: Subscriber>(subscriber: S) where S.Input == Output, S.Failure == Never {
         // Combine does not check isolation, so a subscription off the main actor stops here rather than
-        // racing. The check asserts the isolation this method already requires; it decides nothing.
+        // racing. This check asserts the isolation the method already requires and decides nothing.
         MainActor.assumeIsolated {}
         channel.attach(AnySubscriber(subscriber), lifetime: lifetime)
     }

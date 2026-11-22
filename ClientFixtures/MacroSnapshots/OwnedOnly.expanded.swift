@@ -22,7 +22,7 @@ fileprivate struct _OperationKeyIsHashable<Value: Swift::Hashable & Swift::Senda
 fileprivate struct _EffectIsCopyable<Value> {
 }
 
-/// The schema, for generated code that names it where a value of its name could take the name.
+/// The schema type, used by generated code where a local value could shadow its name.
 internal typealias _StateMachineSchema = UniqueCounter
 
 fileprivate typealias _StateMachineScopeID = StateMachine::RuntimeScopeID

@@ -88,7 +88,7 @@ def main():
         observation.update({"command": command, "exit": build["exit"], "build": build})
         save()
         if build["exit"] != 0:
-            raise RuntimeError("Platform build failed: " + name + "; see " + str(evidence))
+            raise RuntimeError("Platform build failed: " + name + ". See " + str(evidence))
         observation["classifications"]["build"] = "build-validated"
         save()
         builds = target_modules(scratch, targets, triple, allow_visionos_plan=name == "visionos", allowed=targets)
@@ -127,7 +127,7 @@ def main():
                                 "interface_import": consumer})
             save()
             if consumer["exit"] != 0:
-                raise RuntimeError("Interface-only public-call compilation failed: " + name + "; see " + str(evidence))
+                raise RuntimeError("Interface-only public-call compilation failed: " + name + ". See " + str(evidence))
             observation["classifications"]["interface"] = "text-interface-public-call-validated"
         library = evidence / (name + "-PlatformCheck.dylib")
         link = run_observed(common + ["-emit-library", "-parse-as-library", "-Xlinker", "-fatal_warnings",
@@ -136,7 +136,7 @@ def main():
         observation["link"] = link
         save()
         if link["exit"] != 0 or not library.is_file():
-            raise RuntimeError("Public-call consumer link failed: " + name + "; see " + str(evidence))
+            raise RuntimeError("Public-call consumer link failed: " + name + ". See " + str(evidence))
         symbols = run_observed(["xcrun", "nm", "-gU", str(library)], evidence / (name + "-symbols.log"))
         observation["symbols"] = symbols
         save()

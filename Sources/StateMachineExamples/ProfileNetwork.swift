@@ -1,19 +1,19 @@
 import Foundation
 import StateMachine
 
-/// A typed URLSession driver using the endpoint's `userID` query parameter.
+/// A typed `URLSession` driver using the endpoint's `userID` query parameter.
 ///
-/// Identifiers remain query data. A valid request URL receives one URLSession data call
-/// and at most one decode; URLSession controls wire-level retries and redirects.
+/// Identifiers remain query data. A valid request URL receives one `URLSession` data call
+/// and at most one decode, while `URLSession` controls wire-level retries and redirects.
 nonisolated public struct ProfileHTTPClient: Sendable {
     private let baseURL: URL
     private let session: URLSession
-    /// Selects the endpoint and URLSession used by every request.
+    /// Selects the endpoint and `URLSession` used by every request.
     public init(baseURL: URL, session: URLSession = .shared) {
         self.baseURL = baseURL
         self.session = session
     }
-    /// Fetch retains this endpoint and session; the separate audit operation reports unavailable.
+    /// Drivers whose `fetch` retains this endpoint and session while `audit` reports unavailable.
     public var drivers: ReferenceProfile.Drivers {
         ReferenceProfile.Drivers(
             fetch: { request in
@@ -66,7 +66,7 @@ public actor ControlledProfileNetwork {
     private var observers: [CheckedContinuation<Request, Never>] = []
     /// Creates an empty event-driven network fake.
     public init() {}
-    /// Fetch suspends until explicitly completed; the separate audit operation reports unavailable.
+    /// Drivers whose `fetch` suspends until explicitly completed while `audit` reports unavailable.
     public nonisolated var drivers: ReferenceProfile.Drivers {
         ReferenceProfile.Drivers(fetch: { await self.fetch($0) }, audit: { _ in .failure(.unavailable) })
     }
@@ -88,7 +88,7 @@ public actor ControlledProfileNetwork {
     }
     /// The number of registered requests not explicitly completed.
     public var inFlightCount: Int { inFlight.count }
-    /// Completes exactly this registered request once; duplicate identities return false.
+    /// Completes this registered request once, returning `false` for duplicate or unknown identities.
     @discardableResult public func complete(_ id: RequestID, with result: Result<Profile, ProfileFailure>) -> Bool {
         guard let index = inFlight.firstIndex(where: { $0.request.id == id }) else { return false }
         inFlight.remove(at: index).continuation.resume(returning: result)

@@ -10,7 +10,7 @@ import StateMachineUI
     public let presentation: StateMachineObservableObject<GeneratedProfile.MainActorHost>
     private let request: ProfileRequest
 
-    /// Creates a screen with immutable execution dependencies; initialization starts no request.
+    /// Creates a screen with immutable execution dependencies without starting a request.
     public init(
         request: ProfileRequest,
         drivers: GeneratedProfile.MainActorDrivers,
@@ -25,7 +25,7 @@ import StateMachineUI
             )
         )
     }
-    /// Accepts a load immediately in this MainActor turn and publishes its receipt synchronously.
+    /// Accepts a load immediately in this `MainActor` turn and publishes its receipt synchronously.
     @discardableResult public func load() throws(GeneratedProfile.SendRejection) -> GeneratedProfile.Receipt {
         try presentation.send(.load(request))
     }

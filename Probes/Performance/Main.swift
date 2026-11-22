@@ -58,7 +58,7 @@ nonisolated enum PerformanceMain {
             }
         }
         // The same process runs a full-size validated warmup, then its measured repetitions.
-        // Each iteration owns and tears down a fresh owner; JSON stays outside measurement windows.
+        // Each iteration owns and tears down a fresh owner. JSON encoding stays outside measurement windows.
         for iteration in -1 ..< repetitions {
             #if PERFORMANCE_LOCK_INSTRUMENTED
             typealias Action = @convention(c) () -> Void
@@ -84,7 +84,7 @@ nonisolated enum PerformanceMain {
                 row.memory["baseline"] = baseline
                 row.memory["afterWorkloadTeardown"] = after
                 row.notes.append(
-                    "Allocation-only process: latency samples disabled. Window includes control bookkeeping and ResultRow storage; compare held/released checkpoints and process heap data, not only window-live counts. Entry counts cover the listed allocator entrypoints, not every possible process allocation."
+                    "Allocation-only process with latency samples disabled. The measurement window includes control bookkeeping and ResultRow storage, so compare held and released checkpoints alongside process heap data rather than window-live counts alone. Entry counts cover the listed allocator entrypoints rather than every possible process allocation."
                 )
             }
             if args.contains("--instrumented") {
@@ -99,7 +99,7 @@ nonisolated enum PerformanceMain {
                     row.lockBodyNanoseconds[name] = (0 ..< total).map { sample(UInt32(kind), $0) }
                 }
                 row.notes.append(
-                    "Separate hash-matched nonshipping core: lock-body timestamps exclude acquisition/unlock. C clock calls and timestamp return values perturb the body; clockCalibration records paired reads. Recorder runs after unlocking. These are not shipping latency samples."
+                    "Separate hash-matched nonshipping core. Lock-body timestamps exclude acquisition and unlock. C clock calls and timestamp return values perturb the body, and clockCalibration records paired reads. The recorder runs after unlocking. These are not shipping latency samples."
                 )
             }
             #if PERFORMANCE_LOCK_INSTRUMENTED

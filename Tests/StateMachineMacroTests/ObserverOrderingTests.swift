@@ -37,7 +37,7 @@ import os
         )
         let subscription = try await owner.subscribe { snapshot in
             guard case .loading = snapshot, observed.withLock({ $0 == nil }) else { return }
-            // The bound only limits a failing run; a passing run is signalled at once.
+            // The bound only limits a failing run. A passing run is signaled at once.
             let result = started.wait(timeout: .now() + 5)
             observed.withLock { $0 = result }
         }

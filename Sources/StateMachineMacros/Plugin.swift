@@ -45,7 +45,7 @@ struct OperationMacro: PeerMacro, MemberMacro {
         conformingTo protocols: [TypeSyntax],
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
-        // The schema diagnoses a misplaced marker; an operation is always an enum.
+        // The schema diagnoses a misplaced marker because an operation is always an enum.
         guard let namespace = declaration.as(EnumDeclSyntax.self) else { return [] }
         let declared = Set(
             namespace.memberBlock.members.compactMap { $0.decl.as(TypeAliasDeclSyntax.self)?.name.unescaped }
@@ -81,7 +81,7 @@ struct EventMacro: PeerMacro, MemberMacro {
         conformingTo protocols: [TypeSyntax],
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
-        // The schema diagnoses a misplaced marker; an event is always an enum.
+        // The schema diagnoses a misplaced marker because an event is always an enum.
         guard let namespace = declaration.as(EnumDeclSyntax.self),
             !namespace.memberBlock.members.contains(where: {
                 $0.decl.as(TypeAliasDeclSyntax.self)?.name.unescaped == "Payload"

@@ -22,14 +22,14 @@ predecessor from the caller and returns the successor. This prevents a second
 transition from the same owned value.
 
 Recoverable rejection must return the original owner. ``Advance/rejected(_:_:)``
-carries that owner with the typed failure; ``Advance/advanced(_:effects:)``
+carries that owner with the typed failure. ``Advance/advanced(_:effects:)``
 carries the complete successor and every effect in authored order. Dropping
 either result disposes of the value it contains.
 
 Switch on `.rejected(let failure, let original)` to inspect the error and retry
 with the recovered owner, or `.advanced(let next, let effects)` to continue from
-the successor. An infallible edge that starts operations returns `Change`:
-retain its `effects`, then pass its `next` to another consuming edge. An edge
+the successor. An infallible edge that starts operations returns `Change`.
+Retain its `effects`, then pass its `next` to another consuming edge. An edge
 that starts nothing returns the successor owner directly. Either transfer
 leaves no way to use the same successor again.
 
@@ -51,30 +51,31 @@ decision. A defective effect plan travels inside the proposal and is reported by
 not create another owner, and a receipt does not reserve the current state for
 later use.
 
-An observation prepares only the edges a caller may choose. A completion edge is
-not one of them: a managed owner admits a completion only from its own driver's
-result, and a `Local` owner only through `deliver`, `reconcile(id:)`, or
-`retryAdmission(id:)`. A caller therefore cannot commit a result that no driver
-produced, and the first retained outcome is the only one that can commit.
+An observation prepares only the edges a caller may choose, which excludes
+completion edges. A managed owner admits a completion only from its own driver's
+result, and a `Local` owner admits one only through `deliver`, `reconcile(id:)`,
+or `retryAdmission(id:)`. A caller therefore cannot commit a result that no
+driver produced, and the first retained outcome is the only one that can commit.
 
 ## Keep construction separate from authority
 
 Domain payload initializers validate data. Facade proof constructors remain
 private or fileprivate. Live provenance, prepared transitions, and operation
-capabilities are not persistence formats; restoration creates fresh authority
+capabilities are not persistence formats. Restoration creates fresh authority
 from validated data.
 
 Shared payloads must satisfy both Swift's `Sendable` checking and the domain's
 value-semantics contract. `Sendable` alone does not promise that a reference
 points to an immutable historical value. Domain authors remain responsible for
 validation, declared dependencies, and effect-free preparation. A driver's
-sealed completion identifies its operation; it cannot prove the driver supplied
-an honest result.
+sealed completion identifies its operation, though it cannot prove the driver
+supplied an honest result.
 
 ## Preserve value semantics under actor isolation
 
 Actor confinement does not detach references when a payload is copied. This
-example compiles, but its payload violates the historical-value contract:
+example compiles, even though its payload violates the historical-value
+contract.
 
 ```swift
 @MainActor
@@ -99,5 +100,5 @@ func copiesStillAlias() -> Bool {
 Both accesses occur on the same actor, yet changing one copy changes what the
 other copy observes. Store the `String` directly, retain immutable data, or
 construct a detached value projection before recording a snapshot. Isolated
-hosting removes the need to transfer every payload between actors; it does not
-remove the value-semantics requirement.
+hosting removes the need to transfer every payload between actors, but it does
+not remove the value-semantics requirement.

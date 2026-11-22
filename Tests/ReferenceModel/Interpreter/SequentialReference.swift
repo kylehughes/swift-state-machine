@@ -123,7 +123,7 @@ struct ReferenceConfiguration: Sendable {
 }
 struct ReferenceBatch: Equatable, Sendable {
     let snapshot: ReferenceSnapshot
-    /// The revoked operations the batch cancels: all but retired work whose outcome was retained.
+    /// The revoked operations cancelled by the batch, excluding retired work whose outcome was retained.
     let cancelled: [UInt64]
     let starts: [ReferenceTicket]
     let terminal: Bool
@@ -174,8 +174,8 @@ struct ReferenceSubscriber: Equatable, Sendable {
 
 /// IDs are abstract symbols within a history.
 ///
-/// Callers assign distinct owner symbols;
-/// local symbols are checked, never wrapped. This is a test oracle, not a sealed facade.
+/// Callers assign distinct owner symbols, and local symbols are checked rather than wrapped.
+/// This is a test oracle, not a sealed facade.
 struct SequentialReference: Sendable {
     let owner: UInt64
     let configuration: ReferenceConfiguration
@@ -333,7 +333,7 @@ struct SequentialReference: Sendable {
             !plan.reset && !plan.retires.contains(ticket.operation)
                 && !plan.invalidates.contains(where: { ticket.activations[$0] != nil })
         }
-        // Policy is evaluated against a prospective ledger; nothing below mutates live state on rejection.
+        // Policy runs against a prospective ledger so nothing below mutates live state on rejection.
         var prospectiveStarts: [ReferenceStart] = []
         for start in plan.starts {
             let oldGroup = remaining.filter { $0.start.scope == start.scope && $0.start.kind == start.kind }

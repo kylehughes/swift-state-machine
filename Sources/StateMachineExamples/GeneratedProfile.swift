@@ -72,7 +72,7 @@ nonisolated public enum GeneratedProfile: Sendable {
     }
     /// Why saved data cannot be restored.
     public enum RestoreRejection: Error, Sendable {
-        /// The saved request has no task to resume; restoring cannot fabricate one.
+        /// The saved request has no task to resume, and restoring cannot fabricate one.
         case interruptedLoading
     }
     /// Validates saved data into a resting phase, rejecting an interrupted load.
@@ -114,7 +114,7 @@ nonisolated public enum GeneratedProfile: Sendable {
         guard source.userID == request.userID else { throw .wrongUser }
         return Change(Loading(request: request), effects: [.fetch(request)])
     }
-    /// Cancels the load: leaving `Loading` revokes the work that was active there.
+    /// Cancels the load by leaving `Loading`, which revokes the work that was active there.
     @Transition(on: Input.cancel)
     fileprivate static func cancel(_ source: Loading) -> Idle {
         Idle(userID: source.request.userID)

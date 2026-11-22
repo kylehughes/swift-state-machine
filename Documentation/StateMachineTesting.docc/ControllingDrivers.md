@@ -10,7 +10,7 @@ input the host passed, and finishes the call with a result, or leaves it
 running. Every step is an explicit hand-off, so a test needs no sleeps or
 yields to put events in order.
 
-The examples in this article test one search graph whose fetch can fail:
+The examples in this article test one search graph whose fetch can fail.
 
 ```swift
 import StateMachine
@@ -73,7 +73,7 @@ host starts one. A ``ControlledDriver/Call`` carries the
 ``ControlledDriver/Call/input`` the host passed, and the test ends it once with
 ``ControlledDriver/Call/succeed(_:)``, ``ControlledDriver/Call/fail(_:)``, or
 ``ControlledDriver/Call/finish(_:)``. Each reports whether it ended the call, so
-a second attempt returns `false` and changes nothing:
+a second attempt returns `false` and changes nothing.
 
 ```swift
 @Test(.timeLimit(.minutes(1)))
@@ -118,7 +118,7 @@ When the host cancels the call's task, ``ControlledDriver/Call/isCancelled``
 becomes `true` and ``ControlledDriver/Call/waitForCancellation(fileID:filePath:line:column:)``
 returns, and the call keeps running until the test finishes it. A test can
 therefore deliver a result after cancellation and observe that the host
-discards it:
+discards it.
 
 ```swift
 @Test(.timeLimit(.minutes(1)))
@@ -146,13 +146,13 @@ func aResultAfterCancellationIsDiscarded() async throws {
 Cancelling revokes the fetch's authority at once, but the driver's task is still
 running, which is why `runningCount` stays at one until the test finishes the
 call. A call that the test never finishes never returns, and the host's
-`shutdown()` waits for it; `shutdown(deadline:)` reports it among the
+`shutdown()` waits for it. Calling `shutdown(deadline:)` reports it among the
 outstanding executions instead.
 
 ## Choose the driver's form
 
 One `run` serves every driver shape, and the type the host expects selects the
-overload:
+overload.
 
 - A fallible operation's driver returns `Result<Output, Failure>`, and when
   `Failure` is `Never` the driver returns the output directly.
@@ -160,7 +160,7 @@ overload:
   no argument, and its calls end with `succeed()` when the output is `Void`
   too.
 - An `IsolatedHost` driver receives its owning actor before its input, so the
-  same driver serves a host confined to an actor:
+  same driver serves a host confined to an actor.
 
 ```swift
 actor SearchSession {
@@ -197,7 +197,7 @@ before the input. Each ``KeyedControlledDriver/Call`` also carries the
 ``KeyedControlledDriver/Call/key`` the host started it for, so a test can finish
 one key's work and leave another's running.
 ``KeyedControlledDriver/nextStarted(for:fileID:filePath:line:column:)`` waits
-for the oldest call for one key and leaves other keys' calls queued:
+for the oldest call for one key and leaves other keys' calls queued.
 
 ```swift
 @StateMachine(mode: .shared)
@@ -275,7 +275,7 @@ instead.
 A ``MainActorControlledDriver`` serves a `MainActorHost` whose inputs and
 outputs need not be `Sendable`, such as one of an `isolated` schema. The driver,
 its calls, and their values stay on the main actor, so the test that awaits
-them runs there too:
+them runs there too.
 
 ```swift
 @StateMachine(mode: .isolated)
@@ -329,14 +329,14 @@ func aSaveKeepsItsDraftOnTheMainActor() async throws {
 
 An ``IsolatedControlledDriver`` serves an `IsolatedHost` whose inputs and
 outputs need not be `Sendable`. The driver is confined to the actor that owns
-the host: the actor stores it, the host's driver closure reaches it through the
+the host. The actor stores it, the host's driver closure reaches it through the
 actor it receives, and the test awaits
 ``IsolatedControlledDriver/nextStarted(isolation:fileID:filePath:line:column:)``
 on that actor, so the driver's calls and their values never leave it. Every
 member that reaches a call, from `nextStarted()` to a call's
 ``IsolatedControlledDriver/Call/input(isolation:)`` and
 ``IsolatedControlledDriver/Call/succeed(_:isolation:)``, takes the owning actor,
-which a call on that actor passes by default:
+which a call on that actor passes by default.
 
 ```swift
 actor Editor {
@@ -383,8 +383,8 @@ waits on the same actor for the host to cancel a call's task.
 
 An autoclosure, such as the argument of `#expect` or the right side of `&&`, is
 not isolated to the owning actor, so a member that takes the actor by default
-does not compile there; neither do an `IsolatedHost`'s `runningCount()`,
-`subscriberCount()`, and `isQuiescent()`. Read the value into a local first:
+does not compile there. The same applies to an `IsolatedHost`'s `runningCount()`,
+`subscriberCount()`, and `isQuiescent()`. Read the value into a local first.
 
 ```swift
 extension Editor {
@@ -410,7 +410,7 @@ to the owning actor as an ``IsolatedControlledDriver`` is, and each
 ``KeyedIsolatedControlledDriver/Call`` carries the
 ``KeyedIsolatedControlledDriver/Call/key`` the host started it for, so
 ``KeyedIsolatedControlledDriver/nextStarted(for:isolation:fileID:filePath:line:column:)``
-waits on that actor for one key's call and leaves the other keys' calls queued:
+waits on that actor for one key's call and leaves the other keys' calls queued.
 
 ```swift
 @StateMachine(mode: .isolated)
@@ -489,7 +489,7 @@ func closingOneBookOnItsActorLeavesTheOtherOpening() async throws {
 Key equality runs on the owning actor, and a call goes to the oldest waiting
 test whose key it matches. A key type of the app's own runs its equality there
 too, and a comparison that starts another call or wait on the actor, or cancels
-the waiting task, cannot change which call each wait receives: the driver takes
+the waiting task, cannot change which call each wait receives. The driver takes
 starts and waits in the order they happened, and a wait cancelled during its
 comparison takes nothing.
 
@@ -500,7 +500,7 @@ A ``KeyedMainActorControlledDriver`` serves a keyed operation of a
 calls and their values on the main actor, as a ``MainActorControlledDriver``
 does, and matches keys as a ``KeyedIsolatedControlledDriver`` does with the main
 actor as its owner. Its `run` is the operation's driver as written, so the
-`Reader` graph above runs on the main actor without an actor of the test's own:
+`Reader` graph above runs on the main actor without an actor of the test's own.
 
 ```swift
 @MainActor @Test(.timeLimit(.minutes(1)))
@@ -528,7 +528,7 @@ func closingOneBookOnTheMainActorLeavesTheOtherOpening() async throws {
 ```
 
 A call's ``KeyedMainActorControlledDriver/Call/key`` may be read from any
-context; its other members are isolated to the main actor.
+context. Its other members are isolated to the main actor.
 
 ## Fail a wait that cannot end
 
@@ -536,11 +536,13 @@ context; its other members are isolated to the main actor.
 polling. When the waiting task is cancelled first, for example by a test's time
 limit, each throws a ``StateMachineTestFailure`` located at the call, so the test
 reports which wait never ended instead of hanging. A wait in a task that is
-already cancelled throws at once and takes nothing. `waitForCancellation()` reports
-whichever of the two cancellations reaches it first: a wait begins once it has
-armed its task's cancellation handler, a wait whose task is cancelled before it
-begins throws, and otherwise a wait that begins after the host cancelled the
-call returns at once. Once `isCancelled` reads `true`, every wait that had
-begun returns, even if its task is cancelled afterward. A call that has
-started but that the test has not yet received stays queued for the next
-`nextStarted()`, or for the next `nextStarted(for:)` of its key.
+already cancelled throws at once and takes nothing.
+
+`waitForCancellation()` reports whichever of the two cancellations reaches it
+first. A wait begins once it has armed its task's cancellation handler. If its
+task is cancelled before it begins, the wait throws. Otherwise, a wait that
+begins after the host cancelled the call returns at once. Once `isCancelled`
+reads `true`, every wait that had begun returns, even if its task is cancelled
+afterward. A call that has started but that the test has not yet received stays
+queued for the next `nextStarted()`, or for the next `nextStarted(for:)` of its
+key.

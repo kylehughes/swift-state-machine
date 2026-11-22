@@ -1,7 +1,7 @@
 /// Elements in the order they arrived, from which a matcher takes the oldest, or the oldest that is
 /// still live, in constant amortized work.
 ///
-/// A matched element is not removed where it stands: the caller's liveness test rejects it, and the
+/// A matched element is not removed in place. Instead, the caller's liveness test rejects it and the
 /// queue drops it once its head reaches it. An element that the liveness test once rejects stays
 /// ended. Every scan advances the head past the ended elements it passed, and a scan that stops early
 /// keeps only the live elements it passed, so no later scan passes the same ended element again. The

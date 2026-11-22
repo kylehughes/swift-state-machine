@@ -509,7 +509,7 @@ struct AuthoredTextTests {
         func refusal(_ role: String) -> String {
             "Write the bare name of the replacement \(role) in 'renamed:': the generated methods repeat this deprecation as written, so it must name another \(role) that has a generated public method wherever this one has."
         }
-        // A qualified or labelled name, a name in backticks, which Swift refuses there, a name of no function,
+        // A qualified or labeled name, a name in backticks, which Swift refuses there, a name of no function,
         // the function itself, a router, an edge a router chooses, an edge whose method is on `Owned` alone,
         // and an equivalent name spelled with other scalars than the edge's.
         for edge in [

@@ -30,20 +30,23 @@ struct Generator {
     var hasOperations: Bool { !schema.operations.isEmpty }
     /// Whether the schema declares any event, so its managed owners take handlers.
     var hasEvents: Bool { !schema.events.isEmpty }
-    /// Whether a `Local` owner drains command batches: it has work to start or events to emit.
+    /// Whether a `Local` owner drains command batches because it has work to start or events to emit.
     var hasCommands: Bool { schema.generates(.local) && (hasOperations || hasEvents) }
-    /// The retained-outcome type of the runtime hosts: the sealed completion, or `Never` without operations.
+    /// The retained-outcome type of the runtime hosts (`Completion`, or `Never` without operations).
     var outcome: String { hasOperations ? "Completion" : "Swift::Never" }
     func declaration(_ source: String) -> DeclSyntax { DeclSyntax(stringLiteral: source) }
     /// How generated code names the schema in an expression, where a local value of the schema's name,
     /// such as a parameter `input` of a schema named `input`, would hide the type.
     var schemaReference: String { "_StateMachineSchema" }
     /// A generated spelling of a schema member, such as `Load.Output`, spelled from the schema's name for
-    /// a generated scope that declares a type of the member's name; a module-qualified spelling is kept.
+    /// a generated scope that declares a type of the member's name.
+    ///
+    /// Module-qualified spellings stay as-is.
     func qualified(_ spelling: String) -> String { spelling.hasPrefix("Swift::") ? spelling : "\(name).\(spelling)" }
 
-    /// How generated code names the type whose static function it calls for an authored function: the
-    /// schema, or for a deprecated function the protocol requirement it witnesses, which draws no warning.
+    /// How generated code names the type whose static function it calls for an authored function, using
+    /// either the schema or, for a deprecated function, the protocol requirement it witnesses so the call
+    /// draws no warning.
     func authored(_ deprecation: Schema.Deprecation?) -> String {
         deprecation == nil ? schemaReference : "\(schemaReference)._stateMachineDeprecated"
     }
@@ -51,9 +54,11 @@ struct Generator {
     /// The deprecation a generated public member named for an authored function repeats, before its modifiers.
     func deprecated(_ deprecation: Schema.Deprecation?) -> String { deprecation.map { $0.attribute + " " } ?? "" }
 
-    /// The authored functions' deprecations, each once, in declaration order, with whether a call of the
-    /// function needs `try`: whether it declares `throws` and the macro reads its failure as other than
-    /// `Never`; an edge that returns `Advance` reports its failure without throwing.
+    /// The authored functions' deprecations, each once, in declaration order, paired with whether a call
+    /// to the function needs `try`.
+    ///
+    /// A call needs `try` when the function declares `throws` and the macro reads its failure as other
+    /// than `Never`. An edge that returns `Advance` reports its failure without throwing.
     var deprecations: [(deprecation: Schema.Deprecation, throwing: Bool)] {
         var seen: Set<String> = []
         let all =
@@ -65,8 +70,10 @@ struct Generator {
     }
 
     /// The protocol through which generated code calls each deprecated authored function, and the type whose
-    /// deprecated members witness it: a call through a requirement draws no deprecation warning, so only the
-    /// generated public members named for a function repeat its deprecation.
+    /// deprecated members witness it.
+    ///
+    /// Calling through a protocol requirement draws no deprecation warning, so only the generated public
+    /// members named for a function repeat its deprecation.
     func deprecatedCalls() -> String {
         guard !deprecations.isEmpty else { return "" }
         return """
@@ -128,8 +135,8 @@ struct Generator {
         """
     }
 
-    /// The body of a `send`: `body`, or nothing for an `Input` without cases, whose value no caller can
-    /// construct, so no statement after it could run.
+    /// The body of a `send`, or nothing for an `Input` without cases, whose value no caller can
+    /// construct so no statement after it could run.
     ///
     /// Every owner's template places the body two levels inside the owner, so its continuation lines
     /// are indented to match.
@@ -140,8 +147,8 @@ struct Generator {
     /// The effect type an edge returns, or `Never` when it starts nothing.
     func authoredEffect(_ edge: Schema.Transition) -> String { schema.effectType(edge) ?? "Swift::Never" }
 
-    /// The arguments of a call to an authored function: the source, when it takes one, then the trigger
-    /// payload, then a completion's request, labeled `request:`, when it takes one.
+    /// The arguments of a call to an authored function, consisting of the source when it takes one, then
+    /// the trigger payload, then a completion's request labeled `request:` when it takes one.
     func authoredArguments(
         _ edge: Schema.Transition,
         source: String,
@@ -164,10 +171,10 @@ struct Generator {
         ///
         /// An `Input` case's payload is inferred from the value a pattern of the case binds alone, which
         /// has the type `Input` declares, so a name an extension of `Input` declares is read as Swift
-        /// reads it; the parameter is then compared with it in a statement of its own, where no
-        /// conversion can adapt one to the other. The pattern matches an input a local function consumes,
-        /// which binds a payload of any kind, a noncopyable one included, and type-checks each witness
-        /// on its own.
+        /// reads it. The parameter is then compared with it in a statement of its own where no conversion
+        /// can adapt one to the other. The pattern matches an input a local function consumes, which
+        /// binds a payload of any kind, a noncopyable one included, and type-checks each witness on its
+        /// own.
         ///
         /// A completion's outcome parameter, and its `request:` parameter, are compared with the declared
         /// type through a function whose exact overload takes the same type twice and whose unavailable
@@ -215,8 +222,8 @@ struct Generator {
             }
             .joined(separator: "\n")
         // A failure a router pins must be an error, as an operation's declared failure must, and every
-        // function of its group that throws must throw it, whichever owners and methods the expansion
-        // generates: a typed throw converts only to its own type.
+        // function of its group that throws must throw it regardless of which owners and methods the
+        // expansion generates, because a typed throw converts only to its own type.
         // A key is hashed and compared outside every lock, and crosses into the runtime's key table.
         let pinnedWitnesses = schema.routes.compactMap { route -> String? in
             guard let pinned = route.pinnedFailure else { return nil }
@@ -245,8 +252,8 @@ struct Generator {
             .joined(separator: "\n")
         var plan = schema.checkPlan
         // A type read as the standard library's `Void` or `Never` through a reading the macro cannot
-        // confirm is checked: the exact overload accepts the standard library's type, and the
-        // unavailable generic one rejects any other with a message.
+        // confirm is checked with an exact overload that accepts the standard library's type and an
+        // unavailable generic overload that rejects any other with a message.
         let standardWitnesses = plan.standards
             .map { standard, message, function in
                 let message =
@@ -260,8 +267,8 @@ struct Generator {
             }
             .joined(separator: "\n")
         // A type read as one with values through a reading the macro cannot confirm is checked not to be
-        // `Never`: the probe's exact overload matches only `Never`, and its result selects the
-        // unavailable overload of the second stage, which rejects it with a message; any other type
+        // `Never`. The probe's exact overload matches only `Never`, and its result selects the
+        // unavailable overload of the second stage, which rejects it with a message. Any other type
         // takes the generic overloads.
         var probeLines: [String] = []
         if plan.probesNever || plan.probesPairs { probeLines.append("fileprivate enum _StateMachineReadsNever {}") }
@@ -299,7 +306,7 @@ struct Generator {
             )
         }
         // The schema conforms to each standard protocol its inheritance clause names by a name another
-        // protocol could take: the constrained overload accepts it, and the unavailable one rejects it.
+        // protocol could take. The constrained overload accepts it, and the unavailable one rejects it.
         for name in plan.conformances {
             let function = Schema.CheckPlan.conformanceWitness(name)
             probeLines.append(
@@ -318,9 +325,9 @@ struct Generator {
                 """
             )
         }
-        // What an `Owned` router's method may give away depends on which types are `Sendable`: each is
-        // sorted by whether it is, and only an unshared value, or a pair of two, selects the unavailable
-        // overload, whose message names the cause and the repairs.
+        // What an `Owned` router's method may give away depends on which types are `Sendable`. Each type
+        // is sorted by whether it is, and only an unshared value, or a pair of two, selects the
+        // unavailable overload, whose message names the cause and the repairs.
         if plan.sortsSharing {
             probeLines.append(
                 """
@@ -368,7 +375,7 @@ struct Generator {
             )
         }
         // Each check names its type through a local alias, which resolves a spelling of any form at the
-        // schema's scope; the alias takes a name the schema's source never spells.
+        // schema's scope. The alias takes a name the schema's source never spells.
         let checked = schema.checkedAlias
         let checkLines = schema.typeChecks
             .map { check in
@@ -383,7 +390,7 @@ struct Generator {
                     return
                         "do { func witness(_ input: consuming Input) { switch consume input { case .\(check.reference)(let bound): let probe = _stateMachineNeverProbe(_stateMachineCasePayload(bound)); \(plan.stage(message))(probe); case _: break } } }\n"
                 case .finishes(let message):
-                    // An omitted alias is never named; it is the `Void` or `Never` it means.
+                    // An omitted alias is never named and defaults to `Void` or `Never`.
                     let operation = schema.tables.operationsByName[check.reference]
                     let output = operation?.output ?? "Swift::Void"
                     let failure = operation?.failure ?? "Swift::Never"
@@ -447,7 +454,7 @@ struct Generator {
             fileprivate struct _OperationFailureIsError<Value: Swift::Error> {}
             fileprivate struct _OperationKeyIsHashable<Value: Swift::Hashable & Swift::Sendable> {}
             fileprivate struct _EffectIsCopyable<Value> {}
-            /// The schema, for generated code that names it where a value of its name could take the name.
+            /// The schema type, used by generated code where a local value could shadow its name.
             \(access)typealias _StateMachineSchema = \(name)
             fileprivate typealias _StateMachineScopeID = StateMachine::RuntimeScopeID
             fileprivate typealias _StateMachineOperation = StateMachine::RuntimeOperation
@@ -488,8 +495,8 @@ struct Generator {
             (
                 "single-pass sequence", "cancel()",
                 (
-                    "calls `cancel()`, from any isolation domain, which frees its subscriber slot before it",
-                    "returns; a read already handed an element by then still returns it."
+                    "calls `cancel()` from any isolation domain, which frees its subscriber slot before it",
+                    "returns. A read that already received an element still returns it."
                 )
             )
         case .mainActorStream:
@@ -508,8 +515,8 @@ struct Generator {
     /// A string literal of `text`, escaped.
     func literal(_ text: String) -> String { StringLiteralExprSyntax(content: text).description }
 
-    /// The conformance clause of a generated value type: the mode's Sendable requirement, then each value
-    /// conformance the schema lists.
+    /// The conformance clause of a generated value type, combining the mode's `Sendable` requirement with
+    /// each value conformance the schema lists.
     func conformances(_ base: [String]) -> String {
         let all = base + schema.valueConformances.map { "Swift::\($0)" }
         return all.isEmpty ? "" : ": " + all.joined(separator: ", ")
@@ -544,9 +551,9 @@ struct Generator {
             }
             let cancellations = cancelled.flatMap { op in
                 [
-                    "/// Cancels the work `\(op.name)` holds for one key; a key without work cancels nothing.",
+                    "/// Cancels the active `\(op.name)` work for one key. Cancelling a key with no active work does nothing.",
                     "case \(op.cancelEffect)(key: \(name).\(op.key))",
-                    "/// Cancels all of `\(op.name)`'s work.",
+                    "/// Cancels all active `\(op.name)` work.",
                     "case \(op.cancelAllEffect)",
                 ]
             }
@@ -632,10 +639,10 @@ struct Generator {
         return declaration
     }
 
-    /// The request of each operation that has a key or an input: what the work was started with.
+    /// The request type of each operation that has a key or an input, recording what the work started with.
     ///
     /// It is plain data with a public initializer. Admission captures it when it accepts the start, and
-    /// the work, its completion, and a retained outcome carry that capture; constructing one grants no
+    /// the work, its completion, and a retained outcome carry that capture. Constructing one grants no
     /// authority, so an `Owned` caller can pass one to a completion edge that takes it.
     ///
     /// A request that carries an input is the runtime's `OperationRequest`, or `KeyedOperationRequest`
@@ -654,7 +661,7 @@ struct Generator {
                         \(access)struct \(op.request): Swift::Hashable, Swift::Sendable {
                             /// The key the work was started for.
                             \(access)let key: \(op.key)
-                            /// Creates a request; it is plain data and grants no authority.
+                            /// Creates a request value. Requests are plain data and grant no authority.
                             \(access)init(key: \(op.key)) {
                                 self.key = key
                             }
@@ -693,8 +700,8 @@ struct Generator {
             case .direct: ".direct"
             }
         }
-        // Each element is appended in its own statement: one literal holding every element is type-checked
-        // as one expression, at a cost that grows faster than its length.
+        // Each element is appended in its own statement because one literal holding every element is
+        // type-checked as one expression, at a cost that grows faster than its length.
         var builders: [String] = []
         func elements(_ name: String, _ type: String, _ values: [String]) -> String {
             guard !values.isEmpty else { return "[]" }
@@ -783,23 +790,24 @@ struct Generator {
     ///
     /// A routed edge is reached only through its router's method, so a typed call obeys the router. An
     /// observation's completion edge is reached only through delivery, so the first retained outcome is
-    /// the only one that can commit. An unrouted `Owned` completion edge stays callable: `Owned` holds
-    /// no work authority and retains no outcome, so it is the caller's only way to finish its own typestate.
+    /// the only one that can commit. An unrouted `Owned` completion edge stays callable because `Owned`
+    /// holds no work authority and retains no outcome, making it the caller's only way to finish its
+    /// own typestate.
     func edgeAccess(_ edge: Schema.Transition, observed: Bool) -> String {
         schema.hasOwnMethod(edge, observed: observed) ? access : "fileprivate "
     }
 
-    /// The input routers that become `Observed` methods: those with candidate edges.
+    /// The input routers with candidate edges that become `Observed` methods.
     var inputRouters: [Schema.Route] { schema.routes.filter { schema.hasMethod($0, observed: true) } }
 
-    /// The routers that become `Owned` methods: every router with candidate edges, for an input or a completion.
+    /// The routers with candidate edges, for an input or a completion, that become `Owned` methods.
     var ownedRouters: [Schema.Route] { schema.routes.filter { schema.hasMethod($0, observed: false) } }
 
     /// A router's candidate edges in declaration order.
     func branches(_ route: Schema.Route) -> [Schema.Transition] { schema.branches(route) }
 
-    /// The passing convention of a routed method's payload parameter: every convention that the router
-    /// or an edge it may choose declares, so the method can pass the payload on to each of them.
+    /// The passing convention of a routed method's payload parameter, combining every convention that the
+    /// router or an edge it may choose declares so the method can pass the payload on to each of them.
     func routedConvention(_ route: Schema.Route) -> String {
         let declared = ([route.payloadConvention] + branches(route).map(\.payloadConvention)).joined()
         return ["sending", "@escaping"].filter { declared.contains($0 + " ") }.map { $0 + " " }.joined()
@@ -813,8 +821,8 @@ struct Generator {
             "\(schemaReference)._stateMachineCopy(\(schemaReference)._TriggerPayloadMatchesDeclaration<\(payload)>())\n"
     }
 
-    /// The passing convention of a routed method's request parameter: every convention that the router
-    /// or an edge it may choose declares for its request.
+    /// The passing convention of a routed method's request parameter, combining every convention that the
+    /// router or an edge it may choose declares for its request.
     func routedRequestConvention(_ route: Schema.Route) -> String {
         let declared = ([route.requestConvention] + branches(route).map(\.requestConvention)).joined()
         return ["sending"].filter { declared.contains($0 + " ") }.map { $0 + " " }.joined()
@@ -851,9 +859,9 @@ struct Generator {
 
     /// The type a router's `Owned` method returns.
     ///
-    /// When the router cannot throw and every candidate edge returns the same type, that type; otherwise
-    /// `Route.<Router>Result`, which has one case per candidate edge and, when the router can throw, a
-    /// `rejected` case that returns the source.
+    /// When the router cannot throw and every candidate edge returns the same type, it returns that type
+    /// directly. Otherwise it returns `Route.<Router>Result`, which has one case per candidate edge and,
+    /// when the router can throw, a `rejected` case that returns the source.
     func ownedRoutedResult(_ route: Schema.Route) -> String {
         guard !schema.needsOwnedResult(route), let first = branches(route).first else {
             return schema.resultType(route)
@@ -871,18 +879,18 @@ struct Generator {
             .map { "case \($0.name)(\(schema.ownedResult($0, source: source, qualified: true)))" }
         if route.failureType != nil, let failure = schema.routerFailure(route) {
             cases.append(
-                "/// The router declined; the source is returned unchanged.\ncase rejected(\(schema.qualify(failure)), \(source))"
+                "/// The router declined and returned the source unchanged.\ncase rejected(\(schema.qualify(failure)), \(source))"
             )
         }
         return """
-            /// The result of `\(route.name)` on an owned `\(phase(route.from))`: one case per edge it may select.
+            /// The result of calling `\(route.name)` on an owned `\(phase(route.from))`, with one case per edge it may select.
             \(access)enum \(route.namespace ?? Schema.companion(route.name))Result: ~Swift::Copyable\(schema.mode == .shared ? ", Swift::Sendable" : "") {
                 \(cases.joined(separator: "\n"))
             }
             """
     }
 
-    /// The choice type of a router: one payload-free case per candidate edge.
+    /// The choice type of a router, with one payload-free case per candidate edge.
     func choiceDeclaration(_ route: Schema.Route) -> String {
         let cases = route.choices.map { "case \($0)" }.joined(separator: "\n")
         return """
@@ -891,8 +899,8 @@ struct Generator {
             """
     }
 
-    /// The `Route` namespace: each router's choice type and owned result under `Route.<Phase>`, and under
-    /// `Route.<Router>` when that name is unambiguous.
+    /// The `Route` namespace, placing each router's choice type and owned result under `Route.<Phase>`
+    /// and under `Route.<Router>` when that name is unambiguous.
     func routeNamespace() -> String {
         var short: [String] = []
         var emitted = Set<String>()
@@ -1169,17 +1177,17 @@ struct Generator {
         }
         if schema.generates(.shared) || schema.generates(.actorHost) {
             aliases.append(
-                "/// A live observation registration; cancelling or releasing it stops delivery.\n\(access)typealias Subscription = StateMachine::SnapshotSubscription"
+                "/// A live observation registration. Cancelling or releasing it stops delivery.\n\(access)typealias Subscription = StateMachine::SnapshotSubscription"
             )
         }
         if schema.generates(.isolatedHost) {
             aliases.append(
-                "/// A live observation registration with an owner confined to the actor `Owner`; only that actor can cancel it, which removes it, and dropping it stops delivery.\n\(access)typealias IsolatedSubscription<Owner: Swift::Actor> = StateMachine::IsolatedSnapshotSubscription<Owner>"
+                "/// A live observation registration for an owner confined to `Owner`. Only that actor can cancel and remove it, and releasing it stops delivery.\n\(access)typealias IsolatedSubscription<Owner: Swift::Actor> = StateMachine::IsolatedSnapshotSubscription<Owner>"
             )
         }
         if schema.generates(.mainActorHost) {
             aliases.append(
-                "/// A live MainActor observation registration; cancelling or releasing it stops delivery.\n\(access)typealias MainActorSubscription = StateMachine::MainActorSnapshotSubscription"
+                "/// A live `MainActor` observation registration. Cancelling or releasing it stops delivery.\n\(access)typealias MainActorSubscription = StateMachine::MainActorSnapshotSubscription"
             )
         }
         if schema.generatesManagedOwner {
@@ -1194,7 +1202,7 @@ struct Generator {
         }
         if schema.mode != .shared && schema.generates(.mainActorHost) {
             aliases.append(
-                "/// A single-consumer latest-value stream of a MainActor owner's snapshots.\n\(access)typealias MainActorSnapshots = StateMachine::MainActorSnapshotSequence<Snapshot>"
+                "/// A single-consumer latest-value stream of a `MainActor` owner's snapshots.\n\(access)typealias MainActorSnapshots = StateMachine::MainActorSnapshotSequence<Snapshot>"
             )
         }
         if schema.mode != .shared && schema.generates(.isolatedHost) {
@@ -1229,7 +1237,7 @@ struct Generator {
                 \(access)var revision: Swift::UInt64 { record.revision }
                 /// Whether this historical root records closure.
                 \(access)var isClosed: Swift::Bool { record.isClosed }
-                /// Ordinary model data; constructing it confers no installation authority.
+                /// The ordinary model data. Constructing a model value directly confers no installation authority.
                 \(access)var model: \(name) { record.model }
                 /// The phase, revision, and closure of this observation, without its payload.
                 \(access)var description: Swift::String { switch self { \(descriptionCases) } }
@@ -1263,7 +1271,7 @@ struct Generator {
                     edgeID = record.edge
                 }
                 /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
-                /// change that takes no edge: a reset, closure, or the authority-only commit of
+                /// change that takes no edge, such as a reset, closure, or the authority-only commit of
                 /// `discardPending(id:)`.
                 \(access)let edgeID: Swift::String?
                 /// The owner-lifetime accepted revision.
@@ -1275,8 +1283,8 @@ struct Generator {
             \(access)enum SendRejection: Swift::Error {
                 /// Routing or the authored transition declined the input before a candidate existed.
                 case preparation(PreparationRejection)
-                /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`);
-                /// read `snapshot()` for the current root.
+                /// The owner refused the prepared candidate, or its effect plan is defective (`.plan`).
+                /// Read `snapshot()` for the current root.
                 case commit(CommitRejection)
             }
             /// Admission either publishes the entire candidate or leaves all state unchanged.
@@ -1367,7 +1375,7 @@ struct Generator {
     /// The sealed completions of each operation and, for a `Local` owner, its work and command batches.
     func operations() -> String {
         let local = schema.generates(.local)
-        // Only `Local` hands completions to its caller; a managed owner seals and admits its own, so
+        // Only `Local` hands completions to its caller. A managed owner seals and admits its own, so
         // without `Local` the completion types stay private to the expansion.
         let sealed = local ? access : "fileprivate "
         let declarations = schema.operations
@@ -1400,7 +1408,7 @@ struct Generator {
                     \(work)
                     /// The sealed terminal result of one execution, which only its owner\(local ? "'s `deliver`" : "") admits.
                     \(sealed)struct \(op.name)Completion\(sendable) {
-                        \(op.isInfallible ? "/// The value the operation produced; it cannot fail." : "/// The typed terminal value.")
+                        \(op.isInfallible ? "/// The value the operation produced. This operation cannot fail." : "/// The typed terminal value.")
                         \(sealed)let \(op.isInfallible ? "value: \(op.output)" : "result: Swift::Result<\(op.output), \(op.failure)>")
                         \(op.hasRequest ? "/// What admission started the work with.\n\(sealed)let request: \(op.request)" : "")
                         fileprivate let authority: StateMachine::RuntimeTicket
@@ -1450,7 +1458,7 @@ struct Generator {
                 return
                     "case .\(op.effect)\(requestBindings(op)): return .\(op.effect)(\(op.name)Work(request: \(requestConstruction(op)), authority: work.ticket))"
             }
-        // A cancellation revokes work at admission; it is never started or emitted.
+        // A cancellation revokes work at admission and is never started or emitted.
         let cancelOnly = schema.cancelledOperations.map {
             "case .\($0.cancelEffect), .\($0.cancelAllEffect): Swift::preconditionFailure(\"A cancellation is never started or emitted.\")"
         }
@@ -1525,7 +1533,7 @@ struct Generator {
             """
     }
 
-    /// The pattern that binds a keyed or input-taking operation's effect case: `(let key, let input)`.
+    /// The pattern that binds a keyed or input-taking operation's effect case, such as `(let key, let input)`.
     func requestBindings(_ op: Schema.Operation) -> String {
         let names = (op.isKeyed ? ["key"] : []) + (op.takesInput ? ["input"] : [])
         return names.isEmpty ? "" : "(" + names.map { "let \($0)" }.joined(separator: ", ") + ")"
@@ -1537,8 +1545,10 @@ struct Generator {
         return "\(op.request)(\(arguments.joined(separator: ", ")))"
     }
 
-    /// The `Observed` method that `prepare` calls for an edge: the edge's own, or for a deprecated edge whose own
-    /// method is public, the method that one forwards to, which is not deprecated.
+    /// The `Observed` method that `prepare` calls for an edge.
+    ///
+    /// For a deprecated edge whose own method is public, this returns the nondeprecated helper method
+    /// that the public method forwards to.
     func observedName(_ edge: Schema.Transition) -> String {
         guard edge.deprecation != nil, edgeAccess(edge, observed: true) != "fileprivate " else { return edge.name }
         return "_stateMachineDeprecated\(edge.declaration)"
@@ -1605,13 +1615,13 @@ struct Generator {
                 ? ["var counts = Swift::Array(repeating: 0, count: \(schema.operations.count))"] : [])
             + (cancellations.isEmpty ? [] : ["var cancellations: [_StateMachineEngine.Cancellation] = []"])
             + (hasEvents ? ["var emissions: [_StateMachineEngine.Emission] = []"] : [])
-        // An event starts nothing: it keeps its place among the starts and admission publishes it.
+        // An event starts nothing. It keeps its place among the starts and admission publishes it.
         let emissions = schema.events
             .map { "case .\($0.effect): emissions.append(.init(effect, position: starts.count))" }
             .joined(separator: "\n")
         // Each trigger's switch on the snapshot names the phases with an edge or router for it, in declaration
         // order, and a default covers the rest. Nesting single-subject switches, rather than switching on a
-        // (trigger, snapshot) tuple, keeps the compiler's exhaustiveness check linear in the cases; the outer
+        // (trigger, snapshot) tuple, keeps the compiler's exhaustiveness check linear in the cases. The outer
         // switch names every trigger and has no default, so a trigger without a case fails to compile.
         let index = DispatchIndex(schema)
         let phasePositions = Dictionary(
@@ -1713,7 +1723,8 @@ struct Generator {
             }
             /// Routes an input against a historical snapshot, rejecting a missing phase edge explicitly.
             ///
-            /// A plan defect is not a routing rejection: it travels inside the result, and admission reports it.
+            /// A plan defect travels inside the returned `Prepared` value rather than throwing here, so
+            /// admission reports it.
             \(access)static func prepare(_ input: Input, on snapshot: Snapshot) throws(PreparationRejection) -> Prepared {
                 \(schema.inputs.isEmpty ? "" : "switch input { \(inputCases.joined(separator: "\n")) }")
             }
@@ -1794,8 +1805,8 @@ struct Generator {
         guard let route = index.routes[pair] else {
             return edges.first.map { dispatchEdge($0, source: source, arguments: arguments($0)) }
         }
-        // A router sees plain values only; a completion's authority goes to the edge it selects. Each
-        // function's failure becomes its own `PreparationRejection` case.
+        // A router sees plain values only, while a completion's authority goes to the edge it selects.
+        // Each function's failure becomes its own `PreparationRejection` case.
         let request = route.takesRequest ? ", request: completion.request" : ""
         // A completion router of a success without output takes no output.
         let routed = isInput || route.payloadType != nil ? payload : nil
@@ -1823,11 +1834,11 @@ struct Generator {
         // Each variant names only the attribute arguments the schema actually wrote.
         let documentation =
             if schema.restoration?.only != nil {
-                "/// A phase saved data can restore: one listed in `@Restoration(only:)`."
+                "/// A phase that saved data can restore, matching the phases listed in `@Restoration(only:)`."
             } else if schema.restoration?.allows.isEmpty == false {
-                "/// A phase saved data can restore: one in which no operation is active, or one listed in\n/// `@Restoration(allows:)`."
+                "/// A phase that saved data can restore, covering phases with no active operations and those\n/// listed in `@Restoration(allows:)`."
             } else {
-                "/// A phase saved data can restore: one in which no operation is active."
+                "/// A phase that saved data can restore, covering phases with no active operations."
             }
         let declaration = """
             \(documentation) A restored owner has no outstanding work.
@@ -1843,7 +1854,7 @@ struct Generator {
                 \(access)enum ResetRejection: Swift::Error {
                     /// The `@Restoration` function rejected the saved data.
                     case restoration(\(failure))
-                    /// The owner refused the reset: it is closed, its revisions are exhausted, or it had no queue slot for the reset's batch.
+                    /// The owner refused the reset because it is closed, its revisions are exhausted, or it had no queue slot for the reset's batch.
                     case commit(CommitRejection)
                 }
                 """
@@ -1896,7 +1907,7 @@ struct Generator {
             /// A single-pass latest-value sequence of a managed owner's retained completions.
             \(access)typealias PendingCompletionUpdates = StateMachine::SnapshotSequence<[PendingCompletion]>
             """ : "") : (schema.generates(.mainActorHost) ? """
-            /// A single-consumer latest-value stream of a MainActor owner's retained completions.
+            /// A single-consumer latest-value stream of a `MainActor` owner's retained completions.
             \(access)typealias PendingCompletionUpdates = StateMachine::MainActorSnapshotSequence<[PendingCompletion]>
             """ : ""))
             \(schema.mode != .shared && schema.generates(.isolatedHost) ? """
@@ -1909,7 +1920,7 @@ struct Generator {
             }
             /// A retained terminal outcome and its delivery diagnostics.
             ///
-            /// The outcome is an inert value: only `reconcile(id:)`, `retryAdmission(id:)`, or
+            /// The outcome is an inert value. Only `reconcile(id:)`, `retryAdmission(id:)`, or
             /// `discardPending(id:)` can settle the retained completion it describes.
             \(access)struct PendingCompletion\(sendable) {
                 /// The retained terminal value of one operation, with the request its work was started with.
@@ -1931,7 +1942,7 @@ struct Generator {
                 \(access)let status: PendingStatus
                 /// The last failed preparation or admission, when present.
                 \(access)let lastRejection: Rejection?
-                /// The saturating count of claimed preparations; capacity retries do not increment it.
+                /// The saturating count of claimed preparations. Capacity retries do not increment it.
                 \(access)let attempts: Swift::UInt64
                 /// Whether the preparation count has reached its representable limit.
                 \(access)var attemptsSaturated: Swift::Bool { attempts == Swift::UInt64.max }
@@ -1953,7 +1964,7 @@ struct Generator {
             \(access)enum DeliveryResult\(sendable) {
                 /// The outcome committed.
                 case committed(Receipt)
-                /// The outcome is retained; its status says what admission is waiting for.
+                /// The outcome is retained, and its status describes what admission is waiting for.
                 case pending(PendingCompletionID, PendingStatus)
                 \(refusedCase)
                 /// The operation's authority is inactive or its outcome was already settled.
@@ -1966,7 +1977,7 @@ struct Generator {
             \(access)enum ReconcileResult\(sendable) {
                 /// The retained outcome committed.
                 case committed(Receipt)
-                /// The outcome is still retained; its status says what admission is waiting for.
+                /// The outcome is still retained, and its status describes what admission is waiting for.
                 case pending(PendingCompletionID, PendingStatus)
                 \(refusedCase)
                 /// Another attempt holds the only preparation claim.
@@ -1978,7 +1989,7 @@ struct Generator {
             \(access)enum DiscardResult\(sendable) {
                 /// The authority-only commit revoked the operation and disposed of its outcome.
                 case discarded(Receipt)
-                /// The owner refused the authority-only commit; the outcome stays retained.
+                /// The owner refused the authority-only commit, leaving the outcome retained.
                 case rejected(CommitRejection)
                 /// No outcome with this identity is retained.
                 case notPending
@@ -2033,13 +2044,13 @@ struct Generator {
             /// The owner keeps its identity and subscribers, and its revision advances.
             """
         let finish = after.isEmpty ? "" : "\n" + after
-        // A manual owner queues a batch only for commands; a managed owner queues every acceptance.
+        // A manual owner queues a batch only for commands, while a managed owner queues every acceptance.
         let queueing =
             mutating
             ? (hasOperations
-                ? "it queues a batch only to cancel the work it revokes, so it needs a slot only then."
-                : "it queues no batch, so it needs no slot.")
-            : "it queues every reset to publish it, so it always needs a slot."
+                ? "It queues a batch only to cancel the work it revokes, so it needs a slot only then."
+                : "It queues no batch, so it needs no slot.")
+            : "It queues every reset to publish it, so it always needs a slot."
         let isolated = isolation.isEmpty ? "" : ", " + isolation
         let expectation = ", expecting: expected.record"
         var members = """
@@ -2050,7 +2061,7 @@ struct Generator {
             /// A reset expects no revision, so no concurrent commit can make it conflict. It throws
             /// `.closed` once the owner is closed, `.revisionExhausted` when no ordinary revision remains,
             /// or `.capacityExceeded(.commitQueue)` when it must queue a batch while the commit queue is
-            /// full, and then changes nothing; \(queueing)
+            /// full, leaving state unchanged. \(queueing)
             @discardableResult
             \(access)\(modifier)func reset(to initial: \(initialType)\(initialDefault)\(isolated))\(asynchronous) throws(CommitRejection) -> Receipt {
                 let result = \(reset(".\(schema.initial)(initial)", "[\(initialScopes)]", ""))\(finish)
@@ -2063,9 +2074,10 @@ struct Generator {
             /// still holds the root `expected` observed, so a decision made on that snapshot cannot
             /// discard a change accepted since.
             ///
-            /// Otherwise it changes nothing and throws as a commit prepared on `expected` would:
-            /// `.foreignOwner` for another owner's snapshot, then `.closed`, `.obsoleteIncarnation` after
-            /// another reset, or `.conflict` after any other acceptance; and then as `reset(to:)` does.
+            /// Otherwise it leaves state unchanged and throws the same errors as a commit prepared on
+            /// `expected`, in precedence order. It reports `.foreignOwner` for another owner's snapshot,
+            /// `.closed` after closure, `.obsoleteIncarnation` after another reset, `.conflict` after any
+            /// other acceptance, and then the same errors as `reset(to:)`.
             @discardableResult
             \(access)\(modifier)func reset(to initial: \(initialType)\(initialDefault), expecting expected: Snapshot\(isolated))\(asynchronous) throws(CommitRejection) -> Receipt {
                 let result = \(reset(".\(schema.initial)(initial)", "[\(initialScopes)]", expectation))\(finish)
@@ -2093,8 +2105,8 @@ struct Generator {
         }
         members += """
 
-            /// Replaces the model with the phase `\(validator.name)` validates from saved data, in a fresh
-            /// incarnation, exactly as `reset(to:)` does; the saved data never resumes work.
+            /// Replaces the model with the phase `\(validator.name)` validates from saved data in a fresh
+            /// incarnation, as `reset(to:)` does. Restoring saved data never resumes prior work.
             @discardableResult
             \(deprecated(schema.restoration?.deprecation))\(access)\(modifier)func reset(restoring saved: \(validator.archiveParameter)\(isolated))\(asynchronous) throws(\(rejection)) -> Receipt {
                 \(validation)
@@ -2124,10 +2136,10 @@ struct Generator {
     func localDrain() -> String {
         let summary =
             hasOperations
-            ? "physical execution occurs after mutating access ends."
-            : "handle their events after mutating access ends."
+            ? "Physical execution occurs after mutating access ends."
+            : "Handle their events after mutating access ends."
         return """
-            /// Transfers whole FIFO batches, at most `limit` of them; \(summary)
+            /// Transfers at most `limit` whole FIFO batches. \(summary)
             \(access)mutating func drainCommands(limit: Swift::Int = .max) -> [CommandBatch] {
                 engine.drain(limit: limit).map { _stateMachineBatch($0) }
             }
@@ -2153,7 +2165,7 @@ struct Generator {
         /// Retains the first outcome and attempts one typed preparation against the current root.
         ///
         /// This is the only way to submit a terminal outcome. A later outcome for the same work never
-        /// replaces the retained one; it reports that outcome's status instead.
+        /// replaces the retained one and reports the retained outcome's status instead.
         \(access)mutating func deliver(_ completion: Completion) -> DeliveryResult {
             switch ledger.retain(completion, for: completion.authority, in: &engine) {
             case .stale: return .stale
@@ -2188,7 +2200,7 @@ struct Generator {
         }
         /// Retries admission of a retained candidate that was waiting for capacity, without preparing it again.
         ///
-        /// Draining and acknowledging never admit a retained completion; call this after they free capacity.
+        /// Draining and acknowledging never admit a retained completion. Call this after they free capacity.
         \(access)mutating func retryAdmission(id: PendingCompletionID) -> ReconcileResult {
             _stateMachineFinish(ledger.retryAdmission(id.raw, in: &engine))
         }
@@ -2197,7 +2209,7 @@ struct Generator {
         /// Revokes one retained operation using an atomic authority-only commit.
         ///
         /// The operation's work already returned the outcome it settles, so the commit issues no
-        /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+        /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
         \(access)mutating func discardPending(id: PendingCompletionID) -> DiscardResult {
             guard let result = ledger.discard(id.raw, in: &engine) else { return .notPending }
             switch result {
@@ -2257,7 +2269,7 @@ struct Generator {
             \(access)enum ShutdownResult: Swift::Equatable, Swift::Sendable {
                 /// Every execution, delivery, and preparation obligation settled.
                 case quiescent
-                /// The deadline passed first; the diagnostics describe what was still outstanding.
+                /// The deadline passed first, and the diagnostics describe what remained outstanding.
                 case timedOut(ShutdownDiagnostics)
                 fileprivate init(_ raw: StateMachine::ShutdownDiagnostics?) {
                     self = raw.map { .timedOut(ShutdownDiagnostics($0)) } ?? .quiescent
@@ -2268,9 +2280,8 @@ struct Generator {
             """
     }
 
-    /// The protocols through which a harness drives a `Local` owner: the one for its commands and
-    /// deliveries when it has them, and the ones for a declared initial default and a `@Restoration`
-    /// function when the schema has them.
+    /// The protocols through which a harness drives a `Local` owner, covering commands and deliveries
+    /// when it has them, plus initial defaults and `@Restoration` when declared.
     var localConformance: String {
         let base =
             hasOperations
@@ -2282,7 +2293,7 @@ struct Generator {
 
     /// The type witnesses and graph metadata of a `Local` owner's conformance.
     ///
-    /// The type witnesses are explicit, because `deliver` is overloaded per operation; a restoring
+    /// The type witnesses are explicit because `deliver` is overloaded per operation. A restoring
     /// owner's saved data and rejection are inferred from its `reset(restoring:)`. The metadata reads
     /// only values the caller already holds and constructs no authority.
     func localWitnesses() -> String {
@@ -2375,7 +2386,7 @@ struct Generator {
     /// `PreparationRejection` from a phase, which a `Local` owner and every refused outcome report.
     ///
     /// Each throwing function's `PreparationRejection` case, from each phase it leaves, names that phase's
-    /// router or edge of the function's name, as the graph identifies it; any other rejection names none.
+    /// router or edge of the function's name, as the graph identifies it. Any other rejection names none.
     func refusingRoute() -> String {
         guard schema.generates(.local) || hasOperations else { return "" }
         let phases = schema.phases
@@ -2407,8 +2418,8 @@ struct Generator {
 
     func local() -> String {
         let ops = hasOperations
-        // A Local queues only batches that carry a command, and the terminal batch; every other
-        // receipt is the return value of `send` or `commit`. A run of plain edits needs no draining.
+        // A Local queues only batches that carry a command and the terminal batch. Every other receipt
+        // is returned directly by `send` or `commit`, so a run of plain edits needs no draining.
         let batches = ", recording: .commands"
         let restoring = schema.restoration.map { validator in
             """
@@ -2447,7 +2458,7 @@ struct Generator {
                         return _stateMachineAdmission(result)
                     }
                 }
-                /// Routes, prepares and admits one input against the current root.
+                /// Routes, prepares, and admits one input against the current root.
                 @discardableResult
                 \(access)mutating func send(_ input: Input) throws(SendRejection) -> Receipt {
                     \(sendBody("""
@@ -2502,7 +2513,9 @@ struct Generator {
     private func attribute(_ isolation: String) -> String { isolation.isEmpty ? "" : isolation + " " }
 
     /// The documentation of a managed owner's event handlers, beginning with a line break, or nothing
-    /// without events; `isolation` names where they run, or `nil` for the owner's serial batch turn.
+    /// without events.
+    ///
+    /// `isolation` names where they run, or `nil` for the owner's serial batch turn.
     private func handlerNote(isolation: String?) -> String {
         guard hasEvents else { return "" }
         let place = isolation.map { "on \($0)" } ?? "from the serial turn that processes its batch"
@@ -2548,14 +2561,15 @@ struct Generator {
         return ", emit: { \(owner ? actor + ", " : "")effect in switch effect { \(cases) } }"
     }
 
-    /// The type of one operation's driver: the bare output when it cannot fail, otherwise a `Result`.
+    /// The type of one operation's driver, returning the bare output when it cannot fail or a `Result`
+    /// otherwise.
     ///
     /// A fallible driver returns `Result` rather than throwing, because a typed-throws closure literal
     /// does not infer its thrown type.
     ///
     /// An `IsolatedHost` driver takes its owning actor, isolated, before the key and input. An input the
-    /// macro confirms is a function type is `@escaping`, so a driver can keep it or return it; any other
-    /// input is passed as it is, which a closure the macro cannot see is too, so a driver can call it.
+    /// macro confirms is a function type is `@escaping`, so a driver can keep it or return it. Any other
+    /// input is passed as it is, including a closure the macro cannot see, so a driver can call it.
     func driverType(_ op: Schema.Operation, isolation: String, owner: Bool = false) -> String {
         let output = op.isInfallible ? op.output : "Swift::Result<\(op.output), \(op.failure)>"
         let parameters =
@@ -2564,7 +2578,7 @@ struct Generator {
         return "\(attribute(isolation))(\(parameters.joined(separator: ", "))) async -> \(output)"
     }
 
-    /// The `completionPolicy:` parameter of every managed initializer: defaulted to `.retry`, unless a
+    /// The `completionPolicy:` parameter of every managed initializer, defaulting to `.retry` unless a
     /// completion edge or router can refuse an outcome, in which case the caller must choose.
     private var completionPolicyParameter: String {
         "completionPolicy: CompletionPolicy\(schema.completionCanRefuse ? "" : " = .retry")"
@@ -2589,17 +2603,17 @@ struct Generator {
             /// How this owner settles a retained completion that does not commit when it is delivered.
             ///
             /// `.retry` prepares a completion again against the newer state when another commit wins the
-            /// race. That is the same as the result arriving a moment later, when its edge would run
-            /// against the newer phase anyway; work that must not survive a change is revoked by the
-            /// edge's `invalidates:` instead. `.manual` never prepares a completion again on its own.
-            /// Either form can pass each completion that needs reconciliation to a handler.
+            /// race. That behaves like the result arriving a moment later, when its edge would run against
+            /// the newer phase anyway. Work that must not survive a change is revoked by the edge's
+            /// `invalidates:` instead. `.manual` never prepares a completion again on its own. Either form
+            /// can pass each completion that needs reconciliation to a handler.
             ///
             \(choice)
             ///
-            /// A handler runs outside the owner's critical section each time a retained completion's
-            /// status becomes `reconciliationRequired`: its completion edge or router threw, its effect
-            /// plan is defective, the owner refused its admission, an explicit `reconcile(id:)` did not
-            /// commit, or, under `.manual`, its preparation lost a race. Settle it with
+            /// A handler runs outside the owner's critical section each time a retained completion enters
+            /// `reconciliationRequired`. This happens when its completion edge or router throws, its
+            /// effect plan is defective, the owner refuses its admission, an explicit `reconcile(id:)`
+            /// does not commit, or, under `.manual`, its preparation loses a race. Settle it with
             /// `reconcile(id:)` or `discardPending(id:)`.
             \(access)struct CompletionPolicy\(sendable ? ": Swift::Sendable" : "") {
                 fileprivate let runtime: StateMachine::RuntimeCompletionPolicy
@@ -2612,20 +2626,20 @@ struct Generator {
                 /// at most four times per turn before yielding to other work, and notifies no one.
                 ///
                 /// Choose it when every completion edge and router is deterministic and free of side
-                /// effects; the compiler does not check that. A completion retained for any other reason
-                /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
+                /// effects, since the compiler does not enforce that. A completion retained for any other
+                /// reason stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
                 \(access)static var retry: CompletionPolicy { CompletionPolicy(.retry, handler: { _ in }) }
                 /// Retries lost races as `retry` does, and passes every completion that still needs
                 /// reconciliation to `handler`.
                 \(access)static func retry(onReconciliationRequired handler: @escaping \(handler)) -> CompletionPolicy {
                     CompletionPolicy(.retry, handler: handler)
                 }
-                /// Never prepares a completion again on its own, and notifies no one: every completion that
+                /// Never prepares a completion again on its own and notifies no one. Every completion that
                 /// needs reconciliation, including one whose preparation lost a race with another commit,
                 /// stays visible through `pendingCompletions()` and `pendingCompletionUpdates()`.
                 \(access)static var manual: CompletionPolicy { CompletionPolicy(.manual, handler: { _ in }) }
-                /// Never prepares a completion again on its own: every completion that needs reconciliation,
-                /// including one whose preparation lost a race with another commit, goes to `handler`.
+                /// Never prepares a completion again on its own. Every completion that needs reconciliation,
+                /// including one whose preparation lost a race with another commit, is passed to `handler`.
                 \(access)static func manual(onReconciliationRequired handler: @escaping \(handler)) -> CompletionPolicy {
                     CompletionPolicy(.manual, handler: handler)
                 }
@@ -2637,8 +2651,8 @@ struct Generator {
     /// operations, close over the uninhabited outcome.
     ///
     /// An `IsolatedHost`'s driver receives its owning actor, isolated, and passes it to each operation's driver.
-    /// `isolation` is the attribute of the host's driver type, which its execution of one operation repeats;
-    /// an `IsolatedHost`'s execution captures the isolated actor, so it runs isolated to it.
+    /// `isolation` is the attribute of the host's driver type, which its execution of one operation repeats.
+    /// An `IsolatedHost`'s execution captures the isolated actor, so it runs isolated to it.
     private func managedHooks(owner: Bool = false, isolation: String = "@Sendable") -> String {
         guard hasOperations else {
             // Without operations, every effect is an event, and no driver can be asked to run one.
@@ -2663,8 +2677,9 @@ struct Generator {
             """
     }
 
-    /// The pending-completion members of a managed owner; a managed owner offers no `deliver`, because
-    /// no caller holds its work.
+    /// The pending-completion members of a managed owner.
+    ///
+    /// A managed owner offers no `deliver` because no caller holds its work.
     private func managedPending(
         asynchronous: String,
         awaiting: String,
@@ -2681,11 +2696,11 @@ struct Generator {
             \(access)func pendingCompletions()\(asynchronous) -> [PendingCompletion] { \(awaiting)host.pendingCompletions().map(PendingCompletion.init) }
             /// Registers a \(sequenceTerms(confined ? .mainActorStream : .transferable).sequence) of the retained completions, each element the whole collection, taking a subscriber slot when called.
             ///
-            /// The first element is the collection current at registration, and each later one the
-            /// collection after a change to it, in the order of those changes; a newer collection
-            /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
-            /// It also ends when this owner is released, when its `\(sequenceTerms(confined ? .mainActorStream : .transferable).cancel)` is called, or when a
-            /// read finds its task cancelled. A consumer that keeps it after it stops reading
+            /// The first element is the collection current at registration, and each later element is the
+            /// collection after a change, in the order of those changes. A newer collection replaces one
+            /// not yet read. Closing delivers a final, empty collection, and it then ends. It also ends
+            /// when this owner is released, when its `\(sequenceTerms(confined ? .mainActorStream : .transferable).cancel)` is called, or when a read finds its
+            /// task cancelled. A consumer that keeps it after it stops reading
             /// \(sequenceTerms(confined ? .mainActorStream : .transferable).ending.0)
             /// \(sequenceTerms(confined ? .mainActorStream : .transferable).ending.1)
             \(access)func pendingCompletionUpdates()\(asynchronous) throws(SubscriptionFailure) -> PendingCompletionUpdates {
@@ -2708,7 +2723,7 @@ struct Generator {
             /// Revokes retained delivery with an authority-only admission.
             ///
             /// The operation's work already returned the outcome it settles, so the commit issues no
-            /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+            /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
             \(access)func discardPending(id: PendingCompletionID)\(asynchronous) -> DiscardResult { Self.discarded(\(awaiting)host.discardPending(id: id.raw)) }
             // The raw host reports only the cases each operation can produce; the rest cannot occur.
             private static func reconciled(_ result: (delivery: \(delivery), refusal: Host.Refusal?)) -> ReconcileResult {
@@ -2735,7 +2750,8 @@ struct Generator {
     /// The Combine members of a `MainActorHost`, `ActorHost`, or `Shared` owner.
     ///
     /// A Combine pipeline can move each value to another thread, so every publisher's output is
-    /// `Sendable`: a projection of the snapshot, and the snapshot itself only in `shared` mode.
+    /// `Sendable`. Projected publishers are available in all modes, and whole-snapshot publishers
+    /// are available only in `shared` mode.
     private func publisherMembers(
         asynchronous: String,
         awaiting: String,
@@ -2797,9 +2813,9 @@ struct Generator {
             }
             /// Closes admission, then waits until \(obligations).
             ///
-            /// With a `deadline`, it stops waiting once the deadline passes and reports what was still
-            /// outstanding at that moment; the owner stays closed and that work stays tracked. Without one,
-            /// it always returns `.quiescent`.
+            /// With a `deadline`, this method stops waiting once the deadline passes and reports what was
+            /// still outstanding at that moment, leaving the owner closed and that work tracked. Without a
+            /// deadline, it always returns `.quiescent`.
             @discardableResult
             \(access)func shutdown(deadline: Swift::ContinuousClock.Instant? = nil\(isolation.isEmpty ? "" : ", " + isolation)) async -> ShutdownResult {
                 ShutdownResult(await host.shutdown(deadline: deadline\(isolation.isEmpty ? "" : ", isolation: isolation")))
@@ -2827,7 +2843,7 @@ struct Generator {
         let driverDeclaration =
             mainActor && hasOperations
             ? """
-            /// Immutable operation selections whose non-Sendable values stay within MainActor.
+            /// Immutable operation selections whose non-`Sendable` values stay on `MainActor`.
             @Swift::MainActor \(access)struct MainActorDrivers {
                 \(fields)
                 /// Selects every driver for this owner's lifetime.
@@ -2886,11 +2902,11 @@ struct Generator {
         let summary =
             mainActor
             ? """
-            /// A sealed sole-writer MainActor owner with managed execution.
+            /// A sealed sole-writer `MainActor` owner with managed execution.
             ///
-            /// On iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1, and Mac Catalyst 17 and later it is
-            /// `Observable`, so a SwiftUI view can read it directly. Each tracked member registers a read of
-            /// its own value only: \(hasOperations ? "`currentSnapshot` and `snapshot()`, `runningCount`, `subscriberCount`,\n/// and `pendingCompletions()`" : "`currentSnapshot` and `snapshot()`, and `subscriberCount`").
+            /// On iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, and Mac Catalyst 17.0 and
+            /// later, this owner conforms to `Observable` so a SwiftUI view can read it directly. Each
+            /// tracked member registers a read of its own value only, covering \(hasOperations ? "`currentSnapshot` and `snapshot()`, `runningCount`,\n/// `subscriberCount`, and `pendingCompletions()`" : "`currentSnapshot` and `snapshot()`, and `subscriberCount`").
             """
             : """
             /// A sealed sole-writer native actor owner with managed execution.
@@ -2901,8 +2917,8 @@ struct Generator {
             : """
 
             ///
-            /// With `isolatedTo`, the owner's actor runs on that actor's serial executor, so their turns
-            /// never overlap; calls into the owner still await.
+            /// With `isolatedTo`, the owner's actor runs on that actor's serial executor so their turns
+            /// never overlap, though calls into the owner still await.
             """
         return """
             \(driverDeclaration)
@@ -2914,13 +2930,13 @@ struct Generator {
                 \(access)init(_ initial: \(initialType)\(initialDefault), \(managedParameters(drivers: drivers, isolation: isolation, executor: !mainActor))) {
                     \(construction(model: ".\(schema.initial)(initial)", scopes: "[\(initialScopes)]"))
                 }\(restoring ?? "")\(closureInitializers(drivers: drivers, isolation: isolation, executor: !mainActor))
-                /// Captures a complete historical observation\(mainActor ? "; reading it registers a read of the snapshot with Observation" : "").
+                /// Captures a complete historical observation\(mainActor ? ". Reading it registers a snapshot read with Observation" : "").
                 \(access)func snapshot()\(asynchronous) -> Snapshot { _stateMachineSnapshot(\(awaiting)host.snapshot()) }
                 \(mainActor ? """
-                /// The current complete snapshot; reading it registers a read of the snapshot with Observation.
+                /// The current complete snapshot. Reading it registers a snapshot read with Observation.
                 \(access)var currentSnapshot: Snapshot { _stateMachineSnapshot(host.snapshot()) }
                 """ : "")
-                /// Routes, prepares and admits one input in a single isolated turn without suspension.
+                /// Routes, prepares, and admits one input in a single isolated turn without suspension.
                 @discardableResult
                 \(access)func send(_ input: Input)\(asynchronous) throws(SendRejection) -> Receipt {
                     \(sendBody("""
@@ -2948,7 +2964,7 @@ struct Generator {
                     case .defective(let defect): return _stateMachineAdmission(\(awaiting)host.reject(defect))
                     }
                 }
-                /// Subscribes to initial, accepted and terminal complete snapshots, taking a subscriber slot when called.
+                /// Subscribes to initial, accepted, and terminal complete snapshots, taking a subscriber slot when called.
                 \(access)func subscribe(_ receive: @escaping \(isolation) (Snapshot) -> Swift::Void,
                     onFinish: @escaping \(isolation) () -> Swift::Void = {})\(asynchronous) throws(SubscriptionFailure) -> \(token) {
                     try \(awaiting)host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish)
@@ -2972,7 +2988,7 @@ struct Generator {
                 \(lifetimeMembers())
                 \(hasOperations ? "/// Actual workers whose joined termination has not yet been processed." : "")
                 \(hasOperations ? "\(access)var runningCount: Swift::Int { \(mainActor ? "host.runningCount" : "get async { await host.runningCount }") }" : "")
-                /// Live observer registrations\(mainActor ? "; reading it registers a read of the count with Observation" : "").
+                /// The count of live observer registrations\(mainActor ? ". Reading it registers a count read with Observation" : "").
                 \(access)var subscriberCount: Swift::Int { \(mainActor ? "host.subscriberCount" : "get async { await host.subscriberCount }") }
                 /// Whether closure and all managed obligations have settled.
                 \(access)var isQuiescent: Swift::Bool { \(mainActor ? "host.isQuiescent" : "get async { await host.isQuiescent }") }
@@ -3035,11 +3051,11 @@ struct Generator {
             }
             /// Registers a \(sequenceTerms(sharedMode ? .transferable : .isolatedStream).sequence) of the retained completions, each element the whole collection, taking a subscriber slot when called.
             ///
-            /// The first element is the collection current at registration, and each later one the
-            /// collection after a change to it, in the order of those changes; a newer collection
-            /// replaces one not yet read. Closing delivers a final, empty collection, and it then ends.
-            /// It also ends when this owner is released, when its `\(sequenceTerms(sharedMode ? .transferable : .isolatedStream).cancel)` is called, or when a
-            /// read finds its task cancelled. A consumer that keeps it after it stops reading
+            /// The first element is the collection current at registration, and each later element is the
+            /// collection after a change, in the order of those changes. A newer collection replaces one
+            /// not yet read. Closing delivers a final, empty collection, and it then ends. It also ends
+            /// when this owner is released, when its `\(sequenceTerms(sharedMode ? .transferable : .isolatedStream).cancel)` is called, or when a read finds its
+            /// task cancelled. A consumer that keeps it after it stops reading
             /// \(sequenceTerms(sharedMode ? .transferable : .isolatedStream).ending.0)
             /// \(sequenceTerms(sharedMode ? .transferable : .isolatedStream).ending.1)
             \(access)func pendingCompletionUpdates(\(isolation)) throws(SubscriptionFailure) -> \(updates) {
@@ -3062,7 +3078,7 @@ struct Generator {
             /// Revokes retained delivery with an authority-only admission.
             ///
             /// The operation's work already returned the outcome it settles, so the commit issues no
-            /// cancellation for it; a reset or closure, by contrast, cancels every ticket it revokes.
+            /// cancellation for it. By contrast, a reset or closure cancels every ticket it revokes.
             \(access)func discardPending(id: PendingCompletionID, \(isolation)) -> DiscardResult {
                 Self.discarded(host.discardPending(id: id.raw, isolation: isolation))
             }
@@ -3102,10 +3118,11 @@ struct Generator {
             hasOperations
             ? """
             /// The host holds its actor weakly, so an idle actor that stores it is released with it. A running
-            /// driver retains the actor, because it runs on it; `close()` or `shutdown()` requests the drivers'
-            /// cancellation, and the actor is released after each driver returns. A closure that captures the
-            /// actor keeps it alive while the host or registration holding the closure lasts, so a driver or
-            /// handler, which the host holds for its lifetime, should use the actor it receives instead.
+            /// driver retains the actor while it runs on it. Calling `close()` or `shutdown()` requests
+            /// cancellation of running drivers, and the actor is released after each driver returns. A closure
+            /// that captures the actor keeps it alive while the host or registration holding the closure lasts,
+            /// so a driver or handler, which the host holds for its lifetime, should use the actor it receives
+            /// instead.
             """
             : """
             /// The host holds its actor weakly, so an idle actor that stores it is released with it. A closure
@@ -3117,8 +3134,8 @@ struct Generator {
             ///
             /// Create it on the actor that owns it, as `IsolatedHost(isolation: self, …)`, and keep it there.
             /// It is not `Sendable`, so the compiler keeps it in that actor's region, and every method takes
-            /// the actor as a defaulted `isolated` parameter: inside the actor a call reads `host.send(input)`,
-            /// and a call from another actor or a nonisolated context does not compile. A method that receives
+            /// the actor as a defaulted `isolated` parameter. Inside the actor, calls read `host.send(input)`,
+            /// while calls from another actor or a nonisolated context do not compile. A method that receives
             /// a different instance of the actor's type stops the program.
             ///
             \(callbacksNote)
@@ -3134,7 +3151,7 @@ struct Generator {
                 }\(restoring ?? "")\(closureInitializers(drivers: "Drivers", isolation: "", owner: true))
                 /// Captures a complete historical observation.
                 \(access)func snapshot(\(isolation)) -> Snapshot { _stateMachineSnapshot(host.snapshot(isolation: isolation)) }
-                /// Routes, prepares and admits one input in a single turn of the owning actor, without suspension.
+                /// Routes, prepares, and admits one input in a single turn of the owning actor, without suspension.
                 @discardableResult
                 \(access)func send(_ input: Input, \(isolation)) throws(SendRejection) -> Receipt {
                     \(sendBody("""
@@ -3162,15 +3179,15 @@ struct Generator {
                     case .defective(let defect): return _stateMachineAdmission(host.reject(defect, isolation: isolation))
                     }
                 }
-                /// Subscribes to initial, accepted and terminal complete snapshots, delivered on the owning actor, taking a subscriber slot when called.
+                /// Subscribes to initial, accepted, and terminal complete snapshots, delivered on the owning actor, taking a subscriber slot when called.
                 ///
                 /// The registration stays in the owning actor's region, and only that actor can cancel it, which
                 /// removes the registration before returning, so none of its callbacks begins afterward. Cancelling
-                /// releases the callbacks before it returns, except while this owner is delivering a change, as when
-                /// another observer's callback cancels: that delivery keeps the callbacks it selected until it has
-                /// delivered the change to its other observers, and releases them then. Dropping the registration
-                /// stops delivery and frees its slot at once; this owner releases its callbacks when it next sweeps
-                /// its registrations or is destroyed.
+                /// releases the callbacks before it returns, except while this owner is delivering a change, such
+                /// as when another observer's callback cancels. That delivery keeps the callbacks it selected until
+                /// it finishes delivering the change to its other observers, and releases them then. Dropping the
+                /// registration stops delivery and frees its slot at once, and this owner releases its callbacks
+                /// when it next sweeps its registrations or is destroyed.
                 \(access)func subscribe(_ receive: @escaping (Snapshot) -> Swift::Void,
                     onFinish: @escaping () -> Swift::Void = {}, \(isolation)) throws(SubscriptionFailure) -> IsolatedSubscription<Owner> {
                     try host.subscribe({ receive(_stateMachineSnapshot($0)) }, onFinish: onFinish, isolation: isolation)
@@ -3189,7 +3206,7 @@ struct Generator {
                 /// `transform` runs on the owning actor when a snapshot is delivered, and the sequence offers
                 /// each projection, equal to the one before it or not. It supports every `AsyncSequence`
                 /// operator and may be consumed anywhere. `distinctSnapshots(_:)` omits repeated values instead.
-                /// Ending it on another actor stops delivery and frees its slot at once; this owner releases
+                /// Ending it on another actor stops delivery and frees its slot at once, and this owner releases
                 /// `transform` when it next sweeps its registrations or is destroyed.
                 \(access)func snapshots<Projection: Swift::Sendable>(
                     _ transform: @escaping (Snapshot) -> Projection, \(isolation)
@@ -3307,7 +3324,7 @@ struct Generator {
                     try host.distinctSnapshots { transform(_stateMachineSnapshot($0)) }
                 }
                 \(publisherMembers(asynchronous: "", awaiting: "", projectionIsolation: "@Sendable", projectionPlace: "on the registration's serial delivery path, outside every lock,"))
-                /// Routes, prepares and admits one input in a single attempt.
+                /// Routes, prepares, and admits one input in a single attempt.
                 ///
                 /// Preparation runs outside the lock against one snapshot and is never repeated, so
                 /// a concurrent commit surfaces as `.commit(.conflict)` for the caller to resolve.
@@ -3429,9 +3446,9 @@ struct Generator {
 
     /// The managed driver cases shared by all managed facades, each selecting the execution of its operation.
     ///
-    /// The driver awaits only the execution it selects: one async closure that awaited each operation's
-    /// driver in its own case would carry every case's temporaries through each suspension, which grows the
-    /// compiled closure with the square of the operations.
+    /// The driver awaits only the execution it selects. One async closure that awaited each operation's
+    /// driver in its own case would carry every case's temporaries through each suspension, causing the
+    /// compiled closure to grow with the square of the operations.
     private func managedExecutions(owner: Bool) -> String {
         let starts = schema.operations
             .map { op in
@@ -3444,7 +3461,7 @@ struct Generator {
                         execution = { .\(op.effect)(\(op.name)Completion(\(op.isInfallible ? "value" : "result"): await drivers.\(op.effect)(\(arguments)),\(request) authority: raw.ticket)) }
                     """
             }
-        // An event is never started; admission publishes it instead, and applies a cancellation.
+        // An event is never started. Admission publishes it instead and applies any cancellations.
         let unstarted =
             schema.events.map { ".\($0.effect)" }
             + schema.cancelledOperations.flatMap { [".\($0.cancelEffect)", ".\($0.cancelAllEffect)"] }

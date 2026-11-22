@@ -3,7 +3,7 @@
 /// It behaves as ``ControlledDriver`` does, for a `MainActorHost` whose inputs and outputs need not
 /// be `Sendable`, such as one of an `.isolated` graph. The driver, its calls, and their values stay
 /// on the main actor, so the test that awaits ``nextStarted(fileID:filePath:line:column:)`` runs
-/// there too:
+/// there too.
 ///
 /// ```swift
 /// let save = MainActorControlledDriver<GeneratedNote.Draft, GeneratedNote.Saved, Never>()
@@ -28,7 +28,7 @@
         /// Whether the host has cancelled this execution's task.
         public var isCancelled: Bool { signal.isCancelled }
 
-        /// Ends the execution with `result`; it reports `false` and changes nothing if it already ended.
+        /// Ends the execution with `result`, returning `false` without changing anything if it already ended.
         ///
         /// The result stays on the main actor, where the suspended driver reads it once it resumes, so
         /// an output may share state with the input or with other main-actor values.
@@ -96,14 +96,14 @@
         try await awaitNextCall(calls, fileID: fileID, filePath: filePath, line: line, column: column)
     }
 
-    /// The driver of a fallible operation: it waits until the test finishes the call.
+    /// Runs as the driver of a fallible operation, waiting until the test finishes the call.
     public func run(_ input: Input) async -> Result<Output, Failure> {
         await Call(input: input).run(offering: calls)
     }
 }
 
 extension MainActorControlledDriver where Failure == Never {
-    /// The driver of an operation that cannot fail: it returns the output the test supplies.
+    /// Runs as the driver of an operation that cannot fail, returning the output the test supplies.
     public func run(_ input: Input) async -> Output {
         switch await Call(input: input).run(offering: calls) {
         case .success(let output): output

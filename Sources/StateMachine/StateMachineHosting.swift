@@ -22,11 +22,11 @@ nonisolated public protocol StateMachineReceipt {
 
 /// A `MainActor` owner that a presentation can drive and observe.
 ///
-/// Generated `MainActorHost` types conform. Conforming confers no authority: every
+/// Generated `MainActorHost` types conform. Conforming confers no authority because every
 /// requirement is already part of the owner's sealed public surface.
 ///
-/// A host of your own, such as a test double or a preview, must end each registration it makes when
-/// the registration's subscription is cancelled: after a registration's cancellation has returned, the
+/// A custom host, such as a test double or a preview, must end each registration it makes when
+/// the registration's subscription is cancelled. After a registration's cancellation returns, the
 /// host must not invoke that registration's callbacks again.
 @MainActor public protocol MainActorStateMachineHost: AnyObject {
     /// The closed dynamic inputs this owner routes.
@@ -110,13 +110,13 @@ extension MainActorStateMachineHost {
 /// The base class of every generated `MainActorHost`, which makes it `Observable` wherever the
 /// Observation framework exists.
 ///
-/// It has no state and no members of its own. On iOS 17, macOS 14, tvOS 17, watchOS 10, visionOS 1,
-/// and Mac Catalyst 17 and later, a generated host is `Observable`: a SwiftUI view can read it
-/// directly, and the environment can carry it. Its `currentSnapshot`, `snapshot()`, `runningCount`,
-/// `subscriberCount`, and `pendingCompletions()` each register a read of their own value, so a commit
-/// invalidates a reader of the snapshot without invalidating a reader of the running count, and
-/// tracking takes no subscriber slot. Earlier systems observe through a subscription, a snapshot
-/// sequence, or a presentation.
+/// It has no state and no members of its own. On iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0,
+/// visionOS 1.0, and Mac Catalyst 17.0 or later, a generated host conforms to `Observable` so a
+/// SwiftUI view can read it directly and the environment can carry it. Its `currentSnapshot`,
+/// `snapshot()`, `runningCount`, `subscriberCount`, and `pendingCompletions()` each register a read
+/// of their own value, so a commit invalidates a reader of the snapshot without invalidating a reader
+/// of the running count, and tracking takes no subscriber slot. Earlier systems observe through a
+/// subscription, a snapshot sequence, or a presentation.
 @MainActor open class ObservableMainActorHost {
     /// Creates the base of a generated host.
     public init() {}
@@ -127,7 +127,7 @@ extension ObservableMainActorHost: Observable {}
 
 /// A shared owner that any isolation domain can observe.
 ///
-/// Generated `Shared` types conform. Conforming confers no authority: every requirement is
+/// Generated `Shared` types conform. Conforming confers no authority because every requirement is
 /// already part of the owner's sealed public surface.
 nonisolated public protocol SharedStateMachineHost: AnyObject, Sendable {
     /// A complete historical observation of this owner.
@@ -153,7 +153,7 @@ nonisolated public protocol SharedStateMachineHost: AnyObject, Sendable {
 
 /// An owner isolated to an actor of its own that any isolation domain can observe.
 ///
-/// Generated `ActorHost` types conform. Conforming confers no authority: every requirement is
+/// Generated `ActorHost` types conform. Conforming confers no authority because every requirement is
 /// already part of the owner's sealed public surface.
 nonisolated public protocol ActorStateMachineHost: AnyObject, Sendable {
     /// A complete historical observation of this owner.
@@ -191,7 +191,7 @@ nonisolated public protocol IsolatedStateMachineHost: AnyObject {
     /// subscriber slot when called.
     ///
     /// The registration stays in `Owner`'s region, and only `Owner` can cancel it, which removes it at
-    /// once. Dropping it stops delivery and frees its slot at once; the host releases its callbacks
+    /// once. Dropping it stops delivery and frees its slot at once, and the host releases its callbacks
     /// when it next sweeps its registrations or is destroyed.
     func subscribe(
         _ receive: @escaping (Snapshot) -> Void,

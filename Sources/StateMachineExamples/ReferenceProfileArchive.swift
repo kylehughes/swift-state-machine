@@ -4,7 +4,7 @@ extension ReferenceProfile {
     /// Validated, versioned model data without live authority.
     ///
     /// Version 1 stores `version`, `model`, and `presentation`. Version 0 uses the same
-    /// model and presentation shape; an absent version identifies that legacy format.
+    /// model and presentation shape, identified by an absent version field.
     /// Decoding migrates legacy data through current validation. Loading is rejected.
     public struct Archive: Codable, Sendable {
         /// The only version emitted by the encoder.

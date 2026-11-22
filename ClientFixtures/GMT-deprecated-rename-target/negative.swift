@@ -1,4 +1,4 @@
-// A rename the generated methods cannot use, here the authored function's qualified, labelled name, is refused at
+// A rename the generated methods cannot use, here the authored function's qualified, labeled name, is refused at
 // its string rather than repeated as a fix-it that names a file-private static function.
 import StateMachine
 

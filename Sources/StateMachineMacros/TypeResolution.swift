@@ -6,8 +6,8 @@ import Darwin
 #endif
 
 extension TokenSyntax {
-    /// The text of the token, with an identifier read without backticks that change nothing:
-    /// `` `Phase` `` and `Phase` name one declaration.
+    /// The text of the token, with an identifier read without redundant backticks so `` `Phase` `` and
+    /// `Phase` name one declaration.
     ///
     /// An escaped identifier keeps its backticks when its bare spelling means something else in a
     /// type, as `` `Type` `` does after a period, or is no ordinary identifier by Swift's own lexer, as
@@ -29,9 +29,11 @@ extension TokenSyntax {
 }
 
 extension AttributeSyntax {
-    /// The attribute's name as Swift reads a name it may define itself: a bare identifier without
-    /// backticks, so `@escaping` and `` @`escaping` `` are both `escaping`; `nil` for a name through a
-    /// module selector, a member, or with generic arguments, which only a custom attribute has.
+    /// The attribute's name as Swift reads a built-in attribute, as a bare identifier without backticks
+    /// so `@escaping` and `` @`escaping` `` both return `escaping`.
+    ///
+    /// Returns `nil` for a name through a module selector, a member, or with generic arguments, which
+    /// only a custom attribute can have.
     var builtInName: String? {
         guard let identifier = attributeName.as(IdentifierTypeSyntax.self), identifier.moduleSelector == nil,
             identifier.genericArgumentClause == nil, case .identifier = identifier.name.tokenKind
@@ -41,12 +43,12 @@ extension AttributeSyntax {
 }
 
 extension TokenSyntax {
-    /// The value of an integer literal token, read as Swift reads it: decimal digits, or `0x`, `0o`, or
-    /// `0b` and digits of that base, with any `_` between them ignored; `nil` for another token, and for
-    /// a value too large for `UInt`.
+    /// The value of an integer literal token, read as Swift reads decimal digits or `0x`, `0o`, or `0b`
+    /// prefixed digits with any `_` separators ignored.
     ///
-    /// It is the one reader of integer literals: an admission limit and a value generic argument are read
-    /// through it, so `10`, `1_0`, and `0xA` are one value wherever the macro compares them.
+    /// Returns `nil` for any other token or for a value too large for `UInt`. Both admission limits and
+    /// value generic arguments are read through this helper so `10`, `1_0`, and `0xA` compare as the
+    /// same value wherever the macro checks them.
     var integerLiteralMagnitude: UInt? {
         guard case .integerLiteral(let text) = tokenKind else { return nil }
         let digits = text.filter { $0 != "_" }
@@ -57,9 +59,10 @@ extension TokenSyntax {
 }
 
 extension ExprSyntax {
-    /// The value of an integer literal, `-` and a literal included, as an `Int`, through
-    /// ``TokenSyntax/integerLiteralMagnitude``; `nil` for any other expression, and for a value `Int`
-    /// cannot represent.
+    /// The value of an integer literal, including `-` with a literal, as an `Int` through
+    /// ``TokenSyntax/integerLiteralMagnitude``.
+    ///
+    /// Returns `nil` for any other expression or for a value `Int` cannot represent.
     var integerLiteralValue: Int? {
         if let literal = self.as(IntegerLiteralExprSyntax.self) {
             return literal.literal.integerLiteralMagnitude.flatMap { Int(exactly: $0) }
@@ -74,12 +77,12 @@ extension ExprSyntax {
 }
 
 extension String {
-    /// The source text of a type's name, as stored without backticks: the name bare where Swift reads it
-    /// bare as that name in any position of a type, after a period included, and in backticks otherwise,
-    /// as a keyword, a raw identifier such as `` `N.P` ``, and `` `Type` `` need.
+    /// The source text of a type's name stored without backticks, spelled bare where Swift reads it bare
+    /// in any type position (including after a period) and in backticks otherwise (for keywords, raw
+    /// identifiers such as `` `N.P` ``, and `` `Type` ``).
     ///
-    /// Every name the macro stores is its ``TokenSyntax/lookupName``, which tables key and lookups compare;
-    /// this is the one way back to source text.
+    /// Every name the macro stores is its ``TokenSyntax/lookupName``, which tables key and lookups
+    /// compare. This property is the one way back to source text.
     var spelledAsName: String {
         guard !["Type", "Protocol", "Self", "Any", "self"].contains(self), isValidSwiftIdentifier(for: .variableName)
         else { return "`" + self + "`" }
@@ -87,15 +90,16 @@ extension String {
     }
 }
 
-/// The syntax of each type spelling an expansion stores as text, so reading a spelling again never parses it
-/// again: parsing nested brackets takes time that doubles with each level, as SwiftParser's lookahead for an
-/// inline array tries each `[` both ways.
+/// The syntax of each type spelling an expansion stores as text, cached so reading a spelling never
+/// parses it again.
 ///
-/// A spelling kept exactly as the author wrote it is read from the author's syntax; any other, which the
-/// macro composed, is parsed once, the first time it is read.
+/// Parsing nested brackets takes time that doubles with each level because SwiftParser's lookahead
+/// for an inline array tries each `[` both ways. A spelling kept exactly as the author wrote it is
+/// read from the author's syntax. Any other spelling composed by the macro is parsed once, the first
+/// time it is read.
 final class SpellingSyntax {
     private var types: [String: TypeSyntax] = [:]
-    /// The spellings parsed so far, each once: those the macro composed.
+    /// The macro-composed spellings parsed so far, each parsed once.
     private(set) var parsed: Set<String> = []
 
     /// The syntax of `spelling`.
@@ -117,7 +121,7 @@ final class SpellingSyntax {
 /// A name in a key, compared, hashed, and ordered by the number the reader gives its text when it first
 /// sees it, so a long name is hashed once, where it is numbered, however many keys hold it.
 ///
-/// Numbers are given in reading order, so the order of two names holds for one expansion; keys use it
+/// Numbers are given in reading order, so the order of two names holds for one expansion. Keys use it
 /// only to put a composition's members and a type's attributes in one canonical order, never to print.
 struct KeyName: Hashable, Comparable, CustomStringConvertible {
     let number: Int
@@ -132,13 +136,13 @@ struct KeyName: Hashable, Comparable, CustomStringConvertible {
     var description: String { text }
 }
 
-/// The identity of the type a spelling names, as a tree: spellings of one type share one key, and
-/// spellings of types the compiler tells apart never do.
+/// The identity of the type a spelling names, represented as a tree so spellings of one type share one
+/// key and spellings of distinct types never do.
 ///
 /// Each composite type keeps its structure, so a metatype of a function, a function of a metatype, an
 /// optional function, and a function of an optional are different keys whatever their tokens. Every name
-/// in a key is a ``KeyName``, and keys are ordered by their structure, never by how they print: a nested
-/// protocol `N.P` and a protocol named by the raw identifier `` `N.P` `` print alike and are two keys,
+/// in a key is a ``KeyName``, and keys are ordered by their structure, never by how they print. A nested
+/// protocol `N.P` and a protocol named by the raw identifier `` `N.P` `` print alike yet are two keys,
 /// ordered the same way wherever they appear.
 indirect enum TypeKey: Hashable, Comparable, CustomStringConvertible {
     /// A type the schema declares, by its path from the schema's name, as `["Flow", "Item"]`.
@@ -159,13 +163,13 @@ indirect enum TypeKey: Hashable, Comparable, CustomStringConvertible {
     case generic(TypeKey, [TypeKey])
     /// A value generic argument, such as an inline array's count.
     case value(String)
-    /// A tuple of other than one unlabeled element; `()` is `Void`.
+    /// A tuple of other than one unlabeled element (`()` is `Void`).
     case tuple([TupleElement])
     case function(FunctionKey)
     /// A type with attributes or specifiers that are part of it, in a canonical order.
     case attributed([TypeKey], TypeKey)
-    /// The metatype of a type: `.plain` for a concrete type or an existential, `.existential` for
-    /// `P.Type` of a protocol `P`, which is `any P.Type`, and `.unresolved` for a base the macro cannot
+    /// The metatype of a type, using `.plain` for a concrete type or an existential, `.existential` for
+    /// `P.Type` of a protocol `P` (which is `any P.Type`), and `.unresolved` for a base the macro cannot
     /// tell apart.
     case metatype(TypeKey, MetatypeKind)
     /// A composition, in a canonical order.
@@ -176,7 +180,7 @@ indirect enum TypeKey: Hashable, Comparable, CustomStringConvertible {
     case syntax(String, [TypeKey])
     /// A reading a budget cut short, which is never equal to another and which no conclusion may rest on.
     case unresolved(Int)
-    /// A type read in full whose key outgrew the key budget: its shape is known, and its identity is
+    /// A type read in full whose key outgrew the key budget, so its shape is known and its identity is
     /// equal to no other.
     case distinct(Int)
 
@@ -285,8 +289,8 @@ indirect enum TypeKey: Hashable, Comparable, CustomStringConvertible {
 
     // MARK: Order
 
-    /// Keys in a total order of their structure: by kind, then by what each kind holds, names by their
-    /// numbers, so the order of two keys never depends on how either prints.
+    /// Keys in a total order of their structure, comparing kind, payload, and name numbers so the order
+    /// of two keys never depends on how either prints.
     static func < (lhs: TypeKey, rhs: TypeKey) -> Bool { order(lhs, rhs) < 0 }
 
     /// The position of each kind of key in the order.
@@ -426,25 +430,26 @@ indirect enum TypeKey: Hashable, Comparable, CustomStringConvertible {
 /// read for the type it names where the author wrote it.
 ///
 /// The scopes are the schema and every nongeneric struct, enum, class, and actor declared inside it, at
-/// any depth. Each holds the types and type aliases declared directly inside it; an `@Operation`
+/// any depth. Each holds the types and type aliases declared directly inside it. An `@Operation`
 /// namespace also holds the `Input` and `Output` aliases the macro adds when it omits them, and an
-/// `@Event` namespace its `Payload`. Lookup follows Swift's lexical rules over what the macro can see: a
-/// name is found in the innermost scope that declares it, a generic alias's parameter inside its own
-/// spelling, an alias reads as what its own spelling names where the alias is declared, with a generic
-/// alias's arguments in place of its parameters, and a member is looked up in its base's scope. Names
-/// are compared without backticks. Declarations outside the schema, including extensions of its types
-/// and members a class inherits, are invisible.
+/// `@Event` namespace holds its `Payload`. Lookup follows Swift's lexical rules over what the macro can
+/// see. A name is found in the innermost scope that declares it, a generic alias's parameter inside its
+/// own spelling, an alias reads as what its own spelling names where the alias is declared (with a
+/// generic alias's arguments in place of its parameters), and a member is looked up in its base's scope.
+/// Names are compared without backticks. Declarations outside the schema, including extensions of its
+/// types and members a class inherits, are invisible.
 ///
-/// A reading is confirmed when nothing invisible could change it: every name in it is a generic
-/// parameter, `Self`, a module selector's, a type or alias found in the scope that spells it, a member
-/// the macro reads of a confirmed base, the schema's own name spelled at the schema's scope, which the
-/// expansion checks names the schema, or a type declared outside the schema spelled at the schema's
-/// scope, whose every spelling there names one type. A name a nested scope finds in an enclosing one,
-/// the schema's name among them, could be hidden by a member an extension, a superclass, or a protocol
-/// extension gives the nested type, and a bare standard-library name, such as `Never` or `Error`, by a
-/// declaration outside the schema, so a reading through either is unconfirmed. Its kind, which every
-/// generated shape rests on, is confirmed separately: a structural spelling confirms it whatever the
-/// names inside it read as, and a name only through confirmed lookups.
+/// A reading is confirmed when nothing invisible could change it. Every name in it must be a generic
+/// parameter, `Self`, a module-qualified name, a type or alias found in the scope that spells it, a
+/// member the macro reads of a confirmed base, the schema's own name spelled at the schema's scope
+/// (which the expansion checks names the schema), or a type declared outside the schema spelled at the
+/// schema's scope (whose every spelling there names one type). A name a nested scope finds in an
+/// enclosing one, including the schema's name, could be hidden by a member an extension, a superclass,
+/// or a protocol extension gives the nested type, and a bare standard-library name such as `Never` or
+/// `Error` could be hidden by a declaration outside the schema, so a reading through either is
+/// unconfirmed. Its kind, which every generated shape rests on, is confirmed separately. A structural
+/// spelling confirms its kind regardless of what the names inside it read as, while a name confirms it
+/// only through confirmed lookups.
 ///
 /// Reading is lazy and bounded. An alias is read only when a reading reaches it, once, and a chain of
 /// aliases that each name the next, generic or not, is read without deepening the reading. An alias that
@@ -452,31 +457,31 @@ indirect enum TypeKey: Hashable, Comparable, CustomStringConvertible {
 /// reaches it, so a member of it is looked up at once, as through the path itself. A generic alias reads
 /// each of its arguments only where its spelling reaches that parameter, and once for every use of one
 /// argument. An alias that names itself through confirmed links only is recorded in
-/// ``circularAliases``; one whose cycle runs through a link the macro cannot confirm reads as an
-/// unconfirmed opaque type, for the compiler to resolve. A reading whose key would grow past
-/// ``keyBudget`` nodes keeps its kind with a key that stands for its identity, and a reading that takes
-/// ``stepBudget`` steps, or all readings together ``totalStepBudget``, or that nests past
-/// ``depthBudget`` or its thread's stack, is cut short: its `isCut` reading is never concluded from,
-/// and the declaration that spells it is diagnosed.
+/// ``circularAliases``. One whose cycle runs through a link the macro cannot confirm reads as an
+/// unconfirmed opaque type for the compiler to resolve. A reading whose key would grow past
+/// ``keyBudget`` nodes keeps its kind with a key that stands for its identity. A reading that exceeds
+/// ``stepBudget`` steps, pushes all readings past ``totalStepBudget``, or nests past ``depthBudget`` or
+/// its thread's stack is cut short, so its `isCut` reading is never concluded from and the declaration
+/// that spells it is diagnosed.
 ///
 /// Every unit of work a reading does is a charged step, is bounded by the syntax it reads once, or is
-/// amortised against those steps: each type read, generic argument, enclosing scope a name is looked up
+/// amortized against those steps. Each type read, generic argument, enclosing scope a name is looked up
 /// through, member a composition flattens in, node of the stack a deferred argument is read across, and
-/// alias and link the cycle search inspects is a step; every name and spelling is hashed once, when it
-/// is numbered, and every table a reading keeps is keyed by numbers.
+/// alias and link the cycle search inspects counts as a step. Every name and spelling is hashed once
+/// when numbered, and every table a reading keeps is keyed by numbers.
 struct LexicalScopes {
     /// A type alias the macro reads.
     struct Alias {
         /// The spelling it names, read in the scope that declares it.
         let target: TypeSyntax
-        /// The numbers of the names of its generic parameters in order; empty for a nongeneric alias.
+        /// The numbers of the names of its generic parameters in order, empty for a nongeneric alias.
         let parameters: [Int]
         /// How many distinct names its parameters have, which a use must give an argument each.
         let distinctParameters: Int
         /// Whether a use's generic arguments can stand in for its parameters: each is an ordinary type
         /// parameter rather than a parameter pack or a value.
         let substitutes: Bool
-        /// The declaration, for a diagnostic; `nil` for an alias the macro declares.
+        /// The declaration for diagnostics, or `nil` for an alias the macro declares.
         let declaration: TypeAliasDeclSyntax?
     }
 
@@ -510,9 +515,11 @@ struct LexicalScopes {
     /// The index of the schema's own scope.
     static let schema = 0
 
-    /// The most nodes an alias's reading keeps as its key: an alias whose key would exceed it, as one
-    /// that doubles a type at every level of a chain does, keeps the kind of type it reads as, and its
-    /// key stands for its own identity, which is equal to no other spelling's.
+    /// The most nodes an alias's reading keeps as its key.
+    ///
+    /// An alias whose key would exceed it, as one that doubles a type at every level of a chain does,
+    /// keeps the kind of type it reads as, and its key stands for its own identity, which is equal to
+    /// no other spelling's.
     static let keyBudget = 1024
     /// The most steps one reading takes before it is cut short, and its declaration diagnosed.
     static let stepBudget = 100_000
@@ -520,9 +527,9 @@ struct LexicalScopes {
     static let totalStepBudget = 1_000_000
     /// The deepest one reading nests through the structure of the types it reads before it is cut short.
     ///
-    /// An array of an array, or a tuple a generic alias spells, nests; a chain of aliases that each name
-    /// the next does not. A reading nested deeper than ``stackCheckDepth`` is also cut short where its
-    /// thread has less than ``stackMargin`` bytes of stack left.
+    /// An array of an array, or a tuple a generic alias spells, nests, while a chain of aliases that
+    /// each name the next does not. A reading nested deeper than ``stackCheckDepth`` is also cut short
+    /// where its thread has less than ``stackMargin`` bytes of stack left.
     static let depthBudget = 1024
     static let stackCheckDepth = 16
     static let stackMargin = 160 * 1024
@@ -696,7 +703,7 @@ struct LexicalScopes {
             let name = number(nominal.name)
             scopes[scope].declarations[name] = declaration.id
             scopes.append(Scope(path: scopes[scope].path + [keyNames[name]], parent: scope))
-            // A generic type's members depend on its arguments, so readings leave them unread; which
+            // A generic type's members depend on its arguments, so readings leave them unread. Which
             // declaration a member names does not, and its generic parameters hide outer names there.
             if let generic = nominal.generic {
                 scopes[scope].members[name] = .type(nil, isProtocol: false)
@@ -757,7 +764,7 @@ struct LexicalScopes {
     /// resolve.
     func namedDeclarations(_ type: TypeSyntax, in scope: Int = Self.schema) -> [SyntaxIdentifier] {
         let scope = scopes.indices.contains(scope) ? scope : Self.schema
-        // An alias expands to its target where it is declared; a cycle, which Swift refuses, stops after
+        // An alias expands to its target where it is declared. A cycle, which Swift refuses, stops after
         // a bounded number of expansions for each member reference.
         var expansions = 0
         /// The scope that declares the members of what scope `index` declares under `name`.
@@ -956,12 +963,12 @@ struct LexicalScopes {
         let visit: ReadingCache.Visit
     }
 
-    /// Reads a type of any kind; `bindings` holds the arguments of the generic alias being read.
+    /// Reads a type of any kind, using `bindings` for the arguments of the generic alias being read.
     ///
     /// Every kind of type has a reading. Sugar keys as the type it abbreviates, so `[T]` and
     /// `Swift::Array<T>` share a key, and a kind the macro cannot judge reads as opaque, which the
     /// expansion checks where it matters. A generic alias whose use this reading reaches is expanded in
-    /// this frame, so a chain of them reads iteratively; each other kind is read by a function of its
+    /// this frame, so a chain of them reads iteratively. Each other kind is read by a function of its
     /// own, so a reading nested through structure deepens the stack by small frames. A reading nested
     /// deeper than ``depthBudget``, or than its thread's stack allows, is cut short.
     private func reference(_ type: TypeSyntax, _ scope: Int, _ bindings: Bindings) -> Reference {
@@ -1028,8 +1035,10 @@ struct LexicalScopes {
         return result
     }
 
-    /// Whether the current thread has more than ``stackMargin`` bytes of stack left below this frame,
-    /// where the platform reports its stack; elsewhere ``depthBudget`` alone bounds the nesting.
+    /// Whether the current thread has more than ``stackMargin`` bytes of stack left below this frame
+    /// where the platform reports its stack.
+    ///
+    /// Elsewhere ``depthBudget`` alone bounds the nesting.
     private static func hasStackRoom() -> Bool {
         #if canImport(Darwin)
         let thread = pthread_self()
@@ -1378,9 +1387,10 @@ struct LexicalScopes {
         return Reference(attributed, form: .concrete)
     }
 
-    /// The key of a function type: its parameters with their passing conventions, which are part of the
-    /// function's type, its effects, with a throw of `Never` read as none and a throw of `any Error` as
-    /// an untyped one, and its result; and what its readings say about it.
+    /// The key of a function type and what its readings say about it.
+    ///
+    /// Captures parameters with their passing conventions (which are part of the function's type),
+    /// effects (reading a throw of `Never` as none and a throw of `any Error` as untyped), and result.
     private func functionKey(
         _ function: FunctionTypeSyntax,
         _ scope: Int,
@@ -1532,7 +1542,7 @@ struct LexicalScopes {
 
     /// Reads a type named by an identifier.
     ///
-    /// It only dispatches, so a reading nested through it keeps a small frame; each outcome is read by
+    /// It only dispatches so a reading nested through it keeps a small frame. Each outcome is read by
     /// a function of its own, and a generic alias is left for the caller to expand.
     private func identifierReference(
         _ identifier: IdentifierTypeSyntax,
@@ -1690,7 +1700,7 @@ struct LexicalScopes {
             .confirmed(false)
         }
         // A type declared outside the schema keys as its spelling, which names one type at the schema's
-        // scope; a nested scope could hide it with a member the macro cannot see.
+        // scope. A nested scope could hide it with a member the macro cannot see.
         var evidence = arguments.evidence
         evidence.confirmed = evidence.confirmed && scope == Self.schema
         return Reference(
@@ -1878,7 +1888,7 @@ struct LexicalScopes {
     /// alias being read passes on the argument it stands for, and another type is read in `scope`.
     ///
     /// Each argument is charged a step, so a use of an alias with many parameters spends the budget in
-    /// proportion to them however often it is expanded; `nil` when the budget runs out first.
+    /// proportion to them however often it is expanded. Returns `nil` when the budget runs out first.
     private func lazyArguments(
         _ clause: GenericArgumentClauseSyntax?,
         _ scope: Int,
@@ -1943,14 +1953,14 @@ struct LexicalScopes {
     }
 
     /// Reads nongeneric alias `id` in place when its spelling, and the spelling of each nongeneric alias
-    /// it names in turn, is a path of names alone, as `Namespace`, `Self`, `Flow.Namespace`, or another
-    /// such alias, keeping each alias's reading as reading it on its own would keep it; `nil` for any
-    /// other spelling, a path through an alias being read or through itself, or a budget run out.
+    /// it names in turn, is a path of names alone, such as `Namespace`, `Self`, `Flow.Namespace`, or
+    /// another such alias, keeping each alias's reading as reading it on its own would.
     ///
-    /// Such a reading reads no generic alias and no argument, so it changes nothing a later reading
-    /// undoes, and its aliases' readings depend on no alias being read. It follows a chain of aliases in
-    /// one loop, charging each name and each scope it looks through, and an alias whose path fails is
-    /// remembered, so no path is followed to its failure twice.
+    /// Returns `nil` for any other spelling, a path through an alias being read or through itself, or an
+    /// exhausted budget. Such a reading reads no generic alias and no argument, so it changes nothing a
+    /// later reading undoes, and its aliases' readings depend on no alias being read. It follows a chain
+    /// of aliases in one loop, charging each name and each scope it looks through, and an alias whose
+    /// path fails is remembered, so no path is followed to its failure twice.
     private func readPath(_ id: AliasID) -> Reference? {
         var visited: Set<AliasID> = []
         let read = followPath(from: .alias(id, confirmed: true), &visited)
@@ -2126,13 +2136,13 @@ struct LexicalScopes {
                 return
             }
             guard !circular.isEmpty else {
-                // Nothing left is circular, so every alias left waits on one that is now read; each is read
-                // again, and a wait it registered before counts for nothing.
+                // Nothing left is circular, so every alias left waits on one that is now read. Each is
+                // read again, and a wait it registered before counts for nothing.
                 outstanding = [:]
                 pending = Array(left)
                 continue
             }
-            // A cycle through links the macro confirms is reported; one through a link that a member it
+            // A cycle through links the macro confirms is reported. One through a link that a member it
             // cannot see could change is left for the compiler, unconfirmed.
             guard let certain = cycles(among: circular, through: waiting, confirmedOnly: true) else {
                 for id in left { cache.keep(cache.unresolved(), for: id, identity: identity(of: id)) }
@@ -2156,10 +2166,10 @@ struct LexicalScopes {
     /// only when `confirmedOnly`: those in a strongly connected component of more than one alias, or
     /// that wait on themselves.
     ///
-    /// It runs Tarjan's algorithm with its own stack, once over every alias left, in time linear in
-    /// the aliases and their links: each alias it opens and each link it inspects, one it follows or one
-    /// it passes over, is charged to the reading's steps and checked against the budgets as it is
-    /// charged, so no alias's links are gathered before they are paid for; `nil` when a budget runs out
+    /// It runs Tarjan's algorithm with its own stack once over every alias left, in time linear in
+    /// the aliases and their links. Each alias it opens and each link it inspects, whether followed or
+    /// passed over, is charged to the reading's steps and checked against the budgets as it is charged,
+    /// so no alias's links are gathered before they are paid for. Returns `nil` when a budget runs out
     /// first.
     private func cycles(
         among nodes: Set<AliasID>,
@@ -2380,9 +2390,9 @@ private final class ReadingCache {
     ///
     /// A reading not cut short whose key outgrows ``LexicalScopes/keyBudget`` keeps its shape with
     /// `identity` as its key, which is equal to no other spelling's, so what a later reading builds on it
-    /// stays within the budget whichever path kept it. A kept reading is numbered, so every later use of
-    /// it is known to be the same; a reading kept again with its key unchanged, as an alias that names
-    /// another alias keeps it, keeps its number, so a composition that names both flattens it once.
+    /// stays within the budget whichever path kept it. A kept reading is numbered so every later use of
+    /// it is known to be the same. A reading kept again with its key unchanged, as when an alias names
+    /// another alias, keeps its number so a composition that names both flattens it once.
     private func admitted(
         _ reading: LexicalScopes.Reference,
         identity: @autoclosure () -> TypeKey
@@ -2522,8 +2532,9 @@ private final class ReadingCache {
         chain = 0
     }
 
-    /// Whether every alias read since the chain began was reached through a confirmed lookup; a
-    /// deferred argument spelled outside the chain is read where it was spelled, so none is.
+    /// Whether every alias read since the chain began was reached through a confirmed lookup.
+    ///
+    /// A deferred argument spelled outside the chain is read where it was spelled, so none is.
     var chainPathIsConfirmed: Bool { foreign == 0 && unconfirmed(head) == unconfirmed(chainBase) }
     /// The nongeneric aliases left unread, with whether a confirmed lookup reached each.
     var unread: [LexicalScopes.AliasID: Bool] = [:]
@@ -2682,8 +2693,9 @@ private final class ReadingCache {
         return value
     }
 
-    /// Keeps a generic alias's reading with the arguments of a use, through ``admitted(_:identity:)``;
-    /// a reading too large to keep has a key equal to no other.
+    /// Keeps a generic alias's reading with the arguments of a use through ``admitted(_:identity:)``.
+    ///
+    /// A reading too large to keep gets a key equal to no other.
     func keep(_ reading: LexicalScopes.Reference, for expansion: ExpansionKey) -> LexicalScopes.Reference {
         let kept = admitted(reading, identity: .distinct(nextNumber()))
         record(.expansion(expansion, previous: expansions[expansion]))
@@ -2750,7 +2762,7 @@ struct ResolvedType: Equatable {
     ///
     /// The kind, `Void`, `Never`, a function type, or another type with values, is what the generated
     /// shape rests on. A type spelled by its structure, such as `(A, B)` or `() -> A`, confirms its kind
-    /// whatever the types inside it name; a name confirms it only through lookups the macro confirms.
+    /// whatever the types inside it name. A name confirms it only through lookups the macro confirms.
     var isShapeConfirmed = true
     /// Whether a budget cut the reading short, so nothing may be concluded from it: the declaration
     /// that spells it is diagnosed instead.
@@ -2772,7 +2784,9 @@ struct ResolvedType: Equatable {
     var isNever: Bool { reading == .never }
     /// Whether the spelling names a type the macro cannot see into.
     var isOpaque: Bool { reading == .opaque }
-    /// Whether the macro confirms what kind of type this is; a type it cannot see into has no known kind.
+    /// Whether the macro confirms what kind of type this is.
+    ///
+    /// A type it cannot see into has no known kind.
     var confirmsShape: Bool { isShapeConfirmed && reading != .opaque }
     /// Whether the macro confirms the type is the standard library's `Never`.
     var isConfirmedNever: Bool { confirmsShape && isNever }
@@ -2781,8 +2795,8 @@ struct ResolvedType: Equatable {
     /// Whether the macro confirms the type is a function type.
     var isConfirmedFunction: Bool { confirmsShape && isFunction }
 
-    /// The reading of the standard-library `name` when it is one whose kind the shape rests on: `Void`,
-    /// `Never`, or `UnboundedRange`, the alias of `(Swift::UnboundedRange_) -> ()`; or `nil`.
+    /// The reading of the standard-library `name` when it is one whose kind the shape rests on (`Void`,
+    /// `Never`, or `UnboundedRange`, the alias of `(Swift::UnboundedRange_) -> ()`), or `nil` otherwise.
     static func standard(_ name: String) -> ResolvedType? {
         switch name {
         case "Void": ResolvedType(key: .tuple([]), reading: .void)
@@ -2870,8 +2884,10 @@ extension ResolvedType {
     /// needs to know of a key that large.
     static func counted(_ count: Int) -> Int { min(count, LexicalScopes.keyBudget + 1) }
 
-    /// Whether the count of a reading not cut short is its key's, which the debug build checks wherever a
-    /// reading is kept; a cut reading's key is left unfinished, so it is never kept or concluded from.
+    /// Whether the count of a reading not cut short matches its key's, which the debug build checks
+    /// wherever a reading is kept.
+    ///
+    /// A cut reading's key is left unfinished, so it is never kept or concluded from.
     var countsItsKey: Bool { isCut || size == key.nodes(upTo: LexicalScopes.keyBudget + 1) }
 }
 

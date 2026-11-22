@@ -1,8 +1,8 @@
-/// The declared structure of a `@StateMachine` graph: its phases, inputs, scopes, operations, events,
-/// edges, and routers.
+/// The declared structure of a `@StateMachine` graph, including its phases, inputs, scopes,
+/// operations, events, edges, and routers.
 ///
 /// A schema's generated `graph` describes exactly the declarations the macro read, in declaration
-/// order. It is inert metadata: it holds names and type spellings, never a payload, a ticket, an
+/// order. It is inert metadata holding names and type spellings, never a payload, a ticket, an
 /// observation, or a reference to an owner, so it grants no authority and can be encoded, compared,
 /// and rendered anywhere.
 ///
@@ -11,12 +11,13 @@
 /// or router is identified by its source phase and name, `"<phase>.<name>"`, so edges of one name that
 /// leave different phases stay distinct.
 ///
-/// Each type spelling is the author's text: the type's tokens as written, in order, with one space
-/// wherever whitespace, a line break, or a comment separated two of them, and nothing else, so
-/// `Self.Draft` and `(@Sendable () -> Int)` are kept as written. It means what it means where it was
-/// written: a phase's payload inside the schema, an input case's payload inside `Input`, and an
-/// operation's or event's types inside its namespace. A type the namespace omits is spelled
-/// through the standard library's module, `Swift::Void` or `Swift::Never`, which no declaration shadows.
+/// Each type spelling is the author's text, preserving the type's tokens as written in order with
+/// one space wherever whitespace, a line break, or a comment separated two of them and nothing else,
+/// so `Self.Draft` and `(@Sendable () -> Int)` are kept as written. It resolves in the scope where
+/// it was written, meaning inside the schema for a phase's payload, inside `Input` for an input
+/// case's payload, and inside the namespace for an operation's or event's types. A type the
+/// namespace omits is spelled through the standard library's module, `Swift::Void` or `Swift::Never`,
+/// which no declaration shadows.
 ///
 /// A path in the graph shows only that an edge is declared. Whether it is taken depends on the authored
 /// functions, which may throw, choose another edge, or return no effects.
@@ -79,7 +80,7 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
         public let scope: String?
         /// The additional scopes the operation depends on.
         public let requires: [String]
-        /// The phases in which the operation may run: those of its primary scope and every required scope.
+        /// The phases in which the operation may run, combining its primary scope and every required scope.
         public let activeIn: [String]
         /// The admission policy for concurrent work, which applies to each key of a keyed operation.
         public let admission: StateMachineAdmission
@@ -97,14 +98,14 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
         /// The spelling of the failure type, which means what it means inside the namespace, or
         /// `Swift::Never` when the namespace omits it.
         ///
-        /// The spelling is the author's, so an alias keeps its name; ``canFail`` reports whether it names
-        /// the standard library's `Never`.
+        /// The spelling is the author's, so an alias keeps its name, and ``canFail`` reports whether
+        /// it names the standard library's `Never`.
         public let failure: String
-        /// Whether the operation can fail, so its failure needs an edge or router: its `Failure` names
-        /// a type other than the standard library's `Never`, as the macro reads it.
+        /// Whether the operation can fail and needs a failure edge or router, which is true when its
+        /// `Failure` names a type other than the standard library's `Never` as the macro reads it.
         public let canFail: Bool
-        /// Whether the operation can succeed, so its success needs an edge or router: its `Output` names
-        /// a type other than the standard library's `Never`, as the macro reads it.
+        /// Whether the operation can succeed and needs a success edge or router, which is true when
+        /// its `Output` names a type other than the standard library's `Never` as the macro reads it.
         public let canSucceed: Bool
 
         /// Describes an operation.
@@ -226,7 +227,7 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
         public let source: String
         /// What runs the router.
         public let trigger: Trigger
-        /// The identifiers of the edges it may choose, in declaration order; empty when it always declines.
+        /// The identifiers of the edges it may choose in declaration order, or empty when it always declines.
         public let candidates: [String]
 
         /// Describes a router.
@@ -251,8 +252,8 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
     public let initial: String
     /// The phases marked `@Terminal`, in declaration order.
     public let terminal: [String]
-    /// The phases saved data can restore through the schema's `@Restoration` function, in declaration
-    /// order; empty when the schema declares none.
+    /// The phases saved data can restore through the schema's `@Restoration` function in declaration
+    /// order, or empty when the schema declares none.
     public let restorable: [String]
     /// Every phase in declaration order.
     public let phases: [Phase]
@@ -363,9 +364,10 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
     /// which enters the initial phase, and with a dashed edge labeled `restored` each other restorable
     /// phase. Terminal phases have a double outline, and each edge is labeled with its name. A label
     /// escapes a quotation mark, a backslash, and `&`, one Unicode scalar at a time, and writes every line
-    /// ending as a line break, so each renders as itself. The graph's identifier, the graph's name, is
-    /// not a label: it is a quoted DOT identifier, whose only escape is `\"`, so `R&D` stays `R&D` and a
-    /// backslash stays a backslash. Lines follow declaration order, so equal graphs render identical text.
+    /// ending as a line break, so each renders as itself. The graph's identifier (the graph's name)
+    /// is a quoted DOT identifier rather than a label, and its only escape is `\"`, so `R&D` stays
+    /// `R&D` and a backslash stays a backslash. Lines follow declaration order, so equal graphs
+    /// render identical text.
     public func dot() -> String {
         // Every phase is a node with an internal identifier, `p0`, `p1`, and so on, labeled with its
         // name, so no name can be read as DOT syntax or meet the entry point, whose identifier is
@@ -390,9 +392,9 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// A Mermaid label for `text`: letters, digits, and `_` as they are, and every other character as
-    /// a decimal entity code, which Mermaid replaces before it reads the diagram and renders as the
-    /// character.
+    /// Returns a Mermaid label for `text`, keeping letters, digits, and `_` as they are and writing
+    /// every other character as a decimal entity code, which Mermaid replaces before reading the
+    /// diagram and renders as the character.
     ///
     /// Mermaid's own placeholders for entity codes use `ß` and `ﬂ`, so those letters are encoded too.
     private static func mermaidLabel(_ text: String) -> String {
@@ -411,8 +413,8 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
     /// A quoted DOT identifier of `text`, which DOT reads as `text` itself.
     ///
     /// In a quoted identifier, `\"` is the only escape and a backslash followed by a line feed is a line
-    /// continuation, which DOT removes; every other scalar, a backslash included, stands for itself, and
-    /// entities and `\n` mean something only in a label. So each quotation mark is escaped, and a
+    /// continuation that DOT removes. Every other scalar, including a backslash, stands for itself, and
+    /// entities and `\n` mean something only in a label. Each quotation mark is therefore escaped, and a
     /// backslash that ends the text or precedes a line feed, which DOT would otherwise read as escaping
     /// the closing quotation mark or as a continuation, is followed by a continuation of its own.
     private static func dotID(_ text: String) -> String {
@@ -455,8 +457,8 @@ nonisolated public struct StateMachineGraph: Sendable, Hashable, Codable {
     }
 }
 
-/// The Mermaid state of each phase a graph names: `p0`, `p1`, and so on, for its phases in declaration
-/// order, then for any other name its edges and phase lists use, in the order they first appear.
+/// Maps each phase a graph names to a diagram state (`p0`, `p1`, and so on) in declaration order,
+/// followed by any other name referenced in its edges or phase lists in first-seen order.
 nonisolated private struct DiagramStates {
     private(set) var declared: [(phase: String, state: String)] = []
     private var states: [String: String] = [:]

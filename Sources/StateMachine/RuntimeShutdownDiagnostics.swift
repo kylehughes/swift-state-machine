@@ -29,14 +29,14 @@ nonisolated public struct ShutdownDiagnostics: Equatable, Sendable {
 
     /// An opaque identity for one execution whose physical termination is still tracked.
     ///
-    /// The handle compares executions for identity only; it grants no authority over the operation.
+    /// The handle compares executions for identity only and grants no authority over the operation.
     public struct ExecutionHandle: Equatable, Sendable {
         fileprivate let ticket: RuntimeTicket
     }
 
     /// An opaque identity for one delivery preparation that is still executing.
     ///
-    /// The handle compares preparations for identity only; it grants no authority over the retained outcome.
+    /// The handle compares preparations for identity only and grants no authority over the retained outcome.
     public struct PreparationHandle: Equatable, Sendable {
         fileprivate let claim: RuntimeDeliveryClaim
     }

@@ -67,7 +67,7 @@ nonisolated package struct RuntimeReportQueue<Report> {
 
     /// Takes every queued report, oldest first, for a delivery to make in that order.
     ///
-    /// A call that is not `continuing` a delivery begins one only when none is in progress; otherwise
+    /// A call that is not `continuing` a delivery begins one only when none is in progress. Otherwise
     /// it takes nothing, and the delivery in progress delivers what it would have. A delivery that
     /// finds the queue empty ends.
     package mutating func takeAll(continuing: Bool) -> RuntimeFIFO<Report>? {

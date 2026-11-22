@@ -9,21 +9,21 @@ nonisolated public enum ReferenceProfile {
     public struct Idle: Codable, Equatable, Sendable {
         /// The validated user identifier.
         public let userID: UserID
-        /// Creates a value from the supplied data; authority-bearing construction remains private.
+        /// Creates a value from the supplied data without granting authority.
         public init(userID: UserID) { self.userID = userID }
     }
     /// The in-flight request payload.
     public struct Loading: Codable, Equatable, Sendable {
         /// The immutable validated request.
         public let request: ProfileRequest
-        /// Creates a value from the supplied data; authority-bearing construction remains private.
+        /// Creates a value from the supplied data without granting authority.
         public init(request: ProfileRequest) { self.request = request }
     }
     /// The successful profile payload.
     public struct Loaded: Codable, Equatable, Sendable {
         /// The immutable profile data.
         public let profile: Profile
-        /// Creates a value from the supplied data; authority-bearing construction remains private.
+        /// Creates a value from the supplied data without granting authority.
         public init(profile: Profile) { self.profile = profile }
     }
     /// The failed request and its typed reason.
@@ -32,7 +32,7 @@ nonisolated public enum ReferenceProfile {
         public let request: ProfileRequest
         /// The typed failure reason.
         public let failure: ProfileFailure
-        /// Creates a value from the supplied data; authority-bearing construction remains private.
+        /// Creates a value from the supplied data without granting authority.
         public init(request: ProfileRequest, failure: ProfileFailure) {
             self.request = request
             self.failure = failure
@@ -255,12 +255,16 @@ nonisolated public enum ReferenceProfile {
         public let status: PendingStatus
         /// The last typed preparation or admission failure, when present.
         public let lastRejection: CompletionRejection?
-        /// The saturating number of preparations; admission-only retries do not increment it.
+        /// The saturating number of preparations.
+        ///
+        /// Admission-only retries do not increment it.
         public let attemptCount: UInt64
         /// Whether the preparation count has reached its representable limit.
         public let attemptsSaturated: Bool
     }
-    /// A completion admission decision; pending results remain queryable.
+    /// A completion admission decision.
+    ///
+    /// Pending results remain queryable.
     public enum DeliveryResult: Sendable {
         case committed(Receipt)
         case pending(PendingCompletionID, PendingStatus)
@@ -432,13 +436,13 @@ nonisolated public enum ReferenceProfile {
     /// Explicit ownership of a callback registration.
     public struct Subscription: Sendable {
         fileprivate let cancellation: SubscriptionCancellation
-        /// Unsubscribes; a callback already claimed by its delivery loop may finish.
+        /// Unsubscribes, though a callback already claimed by its delivery loop may still finish.
         public func cancel() { cancellation.cancel() }
     }
 
     /// A synchronous, thread-safe managed owner.
     ///
-    /// Copies alias one history. Typed drivers execute outside its atomic storage;
+    /// Copies alias one history. Typed drivers execute outside its atomic storage, and
     /// a coordinator retains cancelled tasks until their actual termination.
     public struct Shared: Sendable {
         private typealias Host = RuntimeSharedHost<Record, Descriptor, Completion, CompletionPreparationRejection>
@@ -1268,7 +1272,7 @@ extension ReferenceProfile.Local {
     public mutating func retryAdmission(id: ReferenceProfile.PendingCompletionID) -> ReferenceProfile.DeliveryResult {
         state.project(state.ledger.retryAdmission(id.raw, in: &state.engine))
     }
-    /// Revokes pending authority through an ordinary commit; rejection preserves the envelope.
+    /// Revokes pending authority through an ordinary commit, preserving the envelope on rejection.
     public mutating func discardPending(id: ReferenceProfile.PendingCompletionID) -> ReferenceProfile.DeliveryResult {
         guard let result = state.ledger.discard(id.raw, in: &state.engine) else { return .notPending }
         switch state.project(result) {

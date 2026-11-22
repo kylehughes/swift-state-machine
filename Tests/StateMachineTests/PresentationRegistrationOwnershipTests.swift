@@ -853,7 +853,7 @@ private actor Bench {
         )
     }
 
-    /// Parks the owning actor's thread after the next registration, until `proceed` is signalled.
+    /// Parks the owning actor's thread after the next registration, until `proceed` is signaled.
     func parkAfterRegistering(reached: Signal, proceed: DispatchSemaphore) {
         host.afterRegistering = {
             reached.raise()
@@ -867,7 +867,7 @@ private actor Bench {
     func observe(on presentation: SnapshotPresentation<Snapshot>) async throws {
         try await presentation.observe(host)
     }
-    /// Parks the owning actor's thread inside the next snapshot read, until `proceed` is signalled.
+    /// Parks the owning actor's thread inside the next snapshot read, until `proceed` is signaled.
     func parkDuringSnapshotRead(reached: Signal, proceed: DispatchSemaphore) {
         host.duringSnapshotRead = {
             reached.raise()

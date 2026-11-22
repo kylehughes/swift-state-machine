@@ -1,8 +1,8 @@
 import os
 
-// A capacity-one serial mailbox. Its state sits behind one lock: a change takes the envelope it
-// replaces or claims out of the state, and client callbacks and the release of displaced payloads run
-// after unlocking, so a call that only reads a flag never holds a payload.
+// A capacity-one serial mailbox whose state sits behind one lock. Each change takes any envelope it
+// replaces or claims out of the state, and client callbacks and displaced payload releases run after
+// unlocking, so a call that only reads a flag never holds a payload.
 nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
     private struct Envelope: Sendable {
         let revision: UInt64?
@@ -23,18 +23,20 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
     private let receive: @Sendable (Value) -> Void
     private let finish: @Sendable () -> Void
     private let onRelease: (@Sendable () -> Void)?
-    /// Closed by cancellation; its token closes it too, even after the owner has released this mailbox.
+    /// Closed by cancellation.
+    ///
+    /// Its token closes it as well, even after the owner releases this mailbox.
     package let gate = RuntimeRegistrationGate()
 
     /// Creates a mailbox whose first envelope is `initial`.
     ///
     /// With a `revision`, an offer replaces the last accepted one only when its revision is greater,
     /// because revisions only grow. Without one, every offer is newer than the last, because its owner
-    /// offers values in order, through one serial delivery, as a `Shared` owner offers images of its
+    /// offers values in order through one serial delivery, as a `Shared` owner offers images of its
     /// retained completions.
     ///
-    /// `onRelease` runs once, at once, when the owner releases the registration without closing, even
-    /// while a delivery is still in progress; `finish` follows that delivery.
+    /// `onRelease` runs once immediately when the owner releases the registration without closing,
+    /// even while a delivery is still in progress. `finish` follows that delivery.
     package init(
         initial: Value,
         revision: UInt64?,
@@ -67,13 +69,14 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
         if wake { Task { self.deliver() } }
     }
 
-    /// Records that the owner was released, which its lifetime reports once, from its destructor.
+    /// Records that the owner was released, which its lifetime reports once from its destructor.
     ///
     /// A registration that is cancelled, or whose closed snapshot is pending or claimed, has nothing
-    /// more to decide. Otherwise the owner promised nothing more: the release is reported at once, and
-    /// the finish follows any delivery still pending or running, on a later task outside the releasing
-    /// context. A delivery in progress retains the mailbox, not the owner, so the owner's release is
-    /// decided here whatever a delivery, or a cancellation that reads the owner's state, still holds.
+    /// more to decide. Otherwise the owner promised nothing more, so the release is reported at once
+    /// and `finish` follows any delivery still pending or running on a later task outside the
+    /// releasing context. A delivery in progress retains the mailbox rather than the owner, so the
+    /// owner's release is decided here regardless of what a delivery or a concurrent cancellation
+    /// still holds.
     package func release() {
         let open = gate.isOpen
         let decision = storage.withLock { state -> Bool? in
@@ -89,8 +92,10 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
         if wake { Task { self.deliver() } }
     }
 
-    /// Offers `value`, which replaces any envelope not yet claimed unless its `revision` is not greater
-    /// than the last accepted one; an offer without a revision is always newer.
+    /// Offers `value`, replacing any envelope not yet claimed unless `revision` is not greater than
+    /// the last accepted one.
+    ///
+    /// An offer without a revision is always treated as newer.
     package func offer(_ value: Value, revision: UInt64?, terminal: Bool) {
         var changed = storage.withLock { state -> (wake: Bool, replaced: Envelope?)? in
             guard !state.closed else { return nil }
@@ -122,8 +127,8 @@ nonisolated package final class LatestMailbox<Value: Sendable>: Sendable {
         while true {
             var step = storage.withLock { state -> (envelope: Envelope?, finishing: Bool) in
                 guard !state.closed, let envelope = state.pending.take() else {
-                    // An owner released without closing finishes once nothing is left to deliver; the gate
-                    // keeps a cancellation that came first from beginning the finish.
+                    // An owner released without closing finishes once nothing is left to deliver. The gate
+                    // keeps an earlier cancellation from starting the finish.
                     let finishing = !state.closed && state.released
                     if finishing { state.closed = true }
                     state.scheduled = false

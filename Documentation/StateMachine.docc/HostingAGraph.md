@@ -9,7 +9,7 @@ four managed owners, `MainActorHost`, `Shared`, `ActorHost`, and
 their own completion edges, and publish each accepted snapshot. They differ in
 where their state lives and how a caller reaches it.
 
-The examples in this article host one search graph:
+The examples in this article host one search graph.
 
 ```swift
 import StateMachine
@@ -61,7 +61,7 @@ nonisolated enum Lookup: Sendable {
 | `ActorHost` | `shared` | An actor of its own | Its drivers |
 | `IsolatedHost<Owner>` | `shared`, `isolated` | An actor instance its creator chooses | Its drivers, on that actor |
 
-Start from the code that reads and changes the state:
+Start from the code that reads and changes the state.
 
 - A screen or a view model works on the main actor, so use `MainActorHost`. It
   is `Observable` on iOS 17, macOS 14, and later, and the `StateMachineUI`
@@ -86,11 +86,11 @@ describes.
 ## Create a managed owner
 
 A managed owner takes a driver for each operation when it is created and keeps
-that selection for its lifetime. Pass each driver as its own closure, labelled
+that selection for its lifetime. Pass each driver as its own closure, labeled
 with the operation's effect case followed by `Driver`, so `Fetch` takes
 `fetchDriver:`. The closures follow the order the operations are declared, and
 each is required. With the default that `Lookup` declares, the host also needs
-no initial payload:
+no initial payload.
 
 ```swift
 @MainActor
@@ -116,7 +116,7 @@ The same owner also takes a `Drivers` value through `drivers:`, a
 `IsolatedHost`. Prefer the value when one set of
 drivers serves several owners, when a test injects stubs, and when a graph has
 many operations, where one value is easier to read and pass than a long list of
-closures:
+closures.
 
 ```swift
 func makeOwners(drivers: Lookup.Drivers) -> (Lookup.Shared, Lookup.ActorHost) {
@@ -125,7 +125,7 @@ func makeOwners(drivers: Lookup.Drivers) -> (Lookup.Shared, Lookup.ActorHost) {
 ```
 
 After the drivers, a schema with events takes one required handler per event,
-labelled `on` followed by the event's name. `configuration:` bounds the owner's
+labeled `on` followed by the event's name. `configuration:` bounds the owner's
 capacity with a `Configuration`, the schema's name for
 ``ManagedConfiguration``. Its defaults allow 256 queued batches, 64 effects per
 plan, 256 execution reservations, and 128 subscribers, and its initializer
@@ -162,7 +162,7 @@ snapshots as they change.
 ## Act on the observation a caller saw
 
 `send(_:)` acts on whatever the owner currently holds. Use it for an event that
-should apply to the current state: a tap that means "cancel the current
+should apply to the current state, such as a tap that means "cancel the current
 search", a push notification, or a timer.
 
 `Observed<Phase>` also has one method for each edge whose source is that phase.
@@ -199,10 +199,10 @@ func cancel(_ searching: Lookup.Observed<Lookup.Searching>, on host: Lookup.Main
 The compiler checks the call. If `cancel` is removed from the schema or moves to
 another phase, this function stops compiling, whereas `send(.cancel)` routes at
 run time and fails with `.preparation(.invalidPhase)`. A completion edge has no
-method on an observation: an owner admits a completion only through its own
-delivery, so a caller cannot commit a result the driver never produced.
-`prepare(_:on:)` routes an input against a snapshot the way `send` does and
-throws `PreparationRejection`; it returns a `Prepared` for `commit(_:)`.
+method on an observation, because an owner admits a completion only through its
+own delivery and a caller cannot commit a result the driver never produced.
+`prepare(_:on:)` routes an input against a snapshot the way `send` does, throws
+`PreparationRejection`, and returns a `Prepared` proposal for `commit(_:)`.
 
 ## Host on the main actor
 
@@ -210,7 +210,7 @@ throws `PreparationRejection`; it returns a `Prepared` for `commit(_:)`.
 synchronous there. Its drivers are `@MainActor` closures, so they can read
 main-actor state without awaiting. It is the only managed owner of an
 `isolated` schema that the main actor reaches directly, and its payloads stay
-there without becoming `Sendable`:
+there without becoming `Sendable`.
 
 ```swift
 @StateMachine(mode: .isolated)
@@ -271,7 +271,7 @@ that actor.
 Pass an actor to `isolatedTo:` to run the owner's actor on that actor's serial
 executor. Their turns then never overlap, which suits an owner that works
 alongside the state of an existing actor, although calls into the owner still
-await:
+await.
 
 ```swift
 actor SearchIndex {
@@ -291,7 +291,7 @@ func makeIndexedLookup(index: SearchIndex) -> Lookup.ActorHost {
 
 The owner retains that actor for its whole lifetime, because its executor must
 outlive every job the owner runs. An actor that stores an owner isolated to
-itself therefore keeps itself alive until it releases the owner; to own a host
+itself therefore keeps itself alive until it releases the owner. To own a host
 from the actor whose turns it shares, confine it with `IsolatedHost` instead.
 
 ## Confine the owner to an actor you own
@@ -302,7 +302,7 @@ passed as `isolation:`, so the compiler keeps it there. Every method ends with a
 `isolation: isolated Owner = #isolation` parameter, which the actor fills in by
 itself, so inside the actor a call is plain and synchronous. Each driver
 receives the actor, isolated, before its input, so it can read and change the
-actor's state without awaiting:
+actor's state without awaiting.
 
 ```swift
 actor SearchSession {
@@ -332,7 +332,7 @@ a `let`. Declare it `lazy`, as here, so the actor creates it on first use, or
 store it in an optional that an `async` initializer or an actor method assigns.
 
 A call from anywhere else does not compile. From another actor, the default
-argument cannot become an `Owner`, and the compiler reports:
+argument cannot become an `Owner`, and the compiler reports this diagnostic.
 
 ```text
 call to actor-isolated instance method 'send(_:isolation:)' in a synchronous actor-isolated context
@@ -350,44 +350,46 @@ owner stops the program, so no path changes the host from two actors.
 Event handlers receive the actor, isolated, before their payload, as drivers
 do, so a handler such as `onLogged: { owner, line in owner.messages.append(line) }`
 reaches the actor's state without capturing it. Write drivers and handlers that
-way: the host holds them for its whole lifetime, so one that captures the actor
-keeps the actor alive as long as the host it stores, a cycle. Subscription
-callbacks, the completion policy's handler, and snapshot projections are plain
-closures that run on the owning actor. A registration from `subscribe` stays in
-that actor's region, and cancelling it there removes it before returning, so
-none of its callbacks begins afterward. A cancellation made while the host
-delivers a change, such as from another observer's callback, releases the
-callbacks once the host has delivered that change to its other observers. Only
-the owning actor can cancel it: its
+way because the host holds them for its whole lifetime, and one that captures
+the actor creates a retain cycle that keeps the actor alive as long as the host
+it stores.
+
+Subscription callbacks, the completion policy's handler, and snapshot
+projections are plain closures that run on the owning actor. A registration from
+`subscribe` stays in that actor's region, and cancelling it there removes it
+before returning, so none of its callbacks begins afterward. A cancellation made
+while the host delivers a change, such as from another observer's callback,
+releases the callbacks once the host has delivered that change to its other
+observers. Only the owning actor can cancel a registration. Its
 `cancel(isolation:)` takes that actor as a defaulted `isolated` parameter, so a
 call from another actor or from an ordinary object's destructor does not
-compile. Dropping it instead, which can happen on another thread when an object
-that stores it is released there, stops delivery and frees its slot at once;
-the host releases its callbacks when it next sweeps its registrations on the
-actor, or when it is destroyed. The host's counts are methods for the same
-reason: `runningCount()`, `subscriberCount()`, and `isQuiescent()` take the
-owning actor like every other member. In an `isolated` schema, `snapshots()` returns an
-`IsolatedSnapshots` stream that the actor reads with `next()`. It has no
-Combine publisher, because its callbacks belong to an actor that Combine
-cannot be confined to.
+compile. Dropping the registration instead, which can happen on another thread
+when an object that stores it is released there, stops delivery and frees its
+slot at once. The host then releases its callbacks when it next sweeps its
+registrations on the actor, or when it is destroyed. The host's counts are
+methods for the same reason, so `runningCount()`, `subscriberCount()`, and
+`isQuiescent()` take the owning actor like every other member. In an `isolated`
+schema, `snapshots()` returns an `IsolatedSnapshots` stream that the actor reads
+with `next()`. It has no Combine publisher, because its callbacks belong to an
+actor that Combine cannot be confined to.
 
 The host holds its owner weakly, so an actor that stores its host is released
-with it once idle. A running driver retains the actor, because it runs there:
-an actor released while a driver waits stays alive until the driver returns.
-`close()` or `shutdown()` requests the drivers' cancellation, and the actor is
-released after each driver returns; a driver that ignores cancellation keeps it
-until then. A closure that captures the actor keeps it alive for as long as the
-host or registration that holds the closure. A released host first processes every batch it has already
-accepted, then ends its registrations without calling them, and only then
-cancels its workers, so a driver's cancellation handler finds every
-registration ended.
+with it once idle. Because a running driver executes on the actor, it retains
+the actor while it waits, keeping an otherwise released actor alive until the
+driver returns. `close()` or `shutdown()` requests the drivers' cancellation,
+and the actor is released after each driver returns. A driver that ignores
+cancellation keeps the actor alive until it returns. A closure that captures the
+actor also keeps it alive for as long as the host or registration holds that
+closure. A released host first processes every batch it has already accepted,
+then ends its registrations without calling them, and only then cancels its
+workers, so a driver's cancellation handler finds every registration ended.
 
 ## Settle completions that do not commit
 
 When an operation's driver returns, the host prepares the completion edge from
 the current state and tries to admit it. A completion that does not commit is
 retained with its first outcome until it is settled. A managed owner's
-`completionPolicy:` decides what happens next:
+`completionPolicy:` decides what happens next.
 
 - `.retry` prepares the completion again when another commit wins the race, at
   most four times per turn before yielding to other work. A completion that
@@ -425,11 +427,12 @@ with `invalidates:` instead. Choose `.manual` when the application, rather than
 the edge, must decide whether a result still applies to a newer state.
 
 `.retry` is the default unless one of the schema's completions can refuse its
-outcome: a completion edge or router throws, or a completion edge starts an
-operation whose admission is `.rejectWhenActive` or `.parallel(limit:)`. A
-refusal is a decision about the newer state that the caller may need to settle,
-so every managed initializer of such a schema takes `completionPolicy:` without
-a default. This intake refuses negative values in its completion edge:
+outcome, which happens when a completion edge or router throws or when a
+completion edge starts an operation whose admission is `.rejectWhenActive` or
+`.parallel(limit:)`. A refusal is a decision about the newer state that the
+caller may need to settle, so every managed initializer of such a schema takes
+`completionPolicy:` without a default. This intake refuses negative values in
+its completion edge.
 
 ```swift
 @StateMachine(mode: .shared)
@@ -472,11 +475,11 @@ func makeIntake() -> Intake.Shared {
 `pendingCompletions()` reads every retained completion without claiming it. A
 `PendingCompletion` holds an opaque `id`, the `outcome` with one case per
 operation, its `status`, the `lastRejection`, and the number of `attempts`. Its
-outcome is plain data: the output for an operation that cannot fail, a `Result`
-for one that can, and the request the work was started with. A caller can read
-it without any authority to apply it. Settle a retained completion with
-`reconcile(id:)`, which authorizes one fresh preparation and reports
-`.inProgress` if another attempt holds the claim, or end it with
+outcome is plain data holding the output for an operation that cannot fail, or a
+`Result` for one that can, along with the request the work was started with. A
+caller can read it without any authority to apply it. Settle a retained
+completion with `reconcile(id:)`, which authorizes one fresh preparation and
+reports `.inProgress` if another attempt holds the claim, or end it with
 `discardPending(id:)`, which revokes the operation in an authority-only commit.
 `PendingCompletionID` is specific to the graph, so an identifier from another
 graph does not type-check.
@@ -497,15 +500,15 @@ func settle(_ intake: Intake.Shared) {
 ```
 
 To follow the retained completions as they change, iterate
-`pendingCompletionUpdates()`. Each element is the whole collection: first the
-one current at registration, then the collection after each change, with a
-newer collection replacing one not yet read. Closing the owner delivers a final,
-empty collection, and the sequence ends. Each registration takes one
-subscriber slot, and on `ActorHost` the call is `async`.
+`pendingCompletionUpdates()`. Each element is the whole collection, starting
+with the one current at registration and continuing with the collection after
+each change, with a newer collection replacing one not yet read. Closing the
+owner delivers a final, empty collection, and the sequence ends. Each
+registration takes one subscriber slot, and on `ActorHost` the call is `async`.
 `pendingCompletionUpdates(_:)` projects each collection to a `Sendable` value
-instead; in an `isolated` schema, whose `pendingCompletionUpdates()` is a
-stream read on the owner's actor, the projection is how the collection reaches
-`for await` and sequence operators:
+instead. In an `isolated` schema, whose `pendingCompletionUpdates()` is a stream
+read on the owner's actor, that projection is how the collection reaches
+`for await` and sequence operators.
 
 ```swift
 func watchPending(_ intake: Intake.Shared) async throws {
@@ -515,8 +518,8 @@ func watchPending(_ intake: Intake.Shared) async throws {
 }
 ```
 
-A managed owner has no `deliver`: a caller never holds a work value there, so a
-completion reaches the owner only through its own driver.
+A managed owner has no `deliver` method, because a caller never holds a work
+value there and completions reach the owner only through its own drivers.
 
 ## Start over with reset
 
@@ -526,7 +529,7 @@ subscribers, advances the revision, revokes every outstanding operation,
 publishing its cancellation in the reset's batch, and disposes of every
 retained completion, so a late result is stale. Observations and proposals from
 before the reset can no longer commit. Its argument defaults exactly when the
-initial phase declares a default:
+initial phase declares a default.
 
 ```swift
 @MainActor
@@ -541,18 +544,18 @@ throws `.closed` once the owner is closed, `.revisionExhausted` when no
 ordinary revision remains, and `.capacityExceeded(.commitQueue)` when it must
 queue a batch while the commit queue is full, and then changes nothing. A
 managed owner queues every reset, because it publishes each accepted snapshot
-from its queue; a `Local` queues one only to cancel the work the reset revokes. Work that is still running
-keeps its execution reservation and counts in `runningCount` until it
-terminates, because revoking authority does not stop a driver. A schema with a
-`@Restoration` function also has `reset(restoring:)`, which validates saved
-data and resets into the phase it restores.
+from its queue. A `Local` queues one only to cancel the work the reset revokes.
+Work that is still running keeps its execution reservation and counts in
+`runningCount` until it terminates, because revoking authority does not stop a
+driver. A schema with a `@Restoration` function also has `reset(restoring:)`,
+which validates saved data and resets into the phase it restores.
 
 A reset that follows from a decision about one snapshot, such as discarding the
 draft a user just reviewed, takes that snapshot as `expecting:`. The owner
 resets only while it still holds that root, and otherwise changes nothing and
-throws as a commit prepared on it would: `.foreignOwner` for another owner's
-snapshot, then `.closed`, `.obsoleteIncarnation` after another reset, or
-`.conflict` after any other change:
+throws as a commit prepared on it would, reporting `.foreignOwner` for another
+owner's snapshot, then `.closed`, `.obsoleteIncarnation` after another reset,
+or `.conflict` after any other change.
 
 ```swift
 @MainActor
@@ -570,9 +573,9 @@ resets are `async`, and `Local`'s resets are `mutating`.
 
 `close()` ends admission and returns a receipt of the closed snapshot, while
 keeping read access to the final state. `flush(through:)` waits until the owner
-has processed every batch through a receipt: for a graph with operations, its
-cancellation and launch decisions. It returns ``FlushResult/processed``, or
-``FlushResult/foreignOwner`` for a receipt another owner issued.
+has processed every batch through a receipt, including the cancellation and
+launch decisions of a graph with operations. It returns ``FlushResult/processed``,
+or ``FlushResult/foreignOwner`` for a receipt another owner issued.
 
 `shutdown()` closes the owner and waits for its tasks to terminate and its
 delivery and preparation obligations to settle, then returns `.quiescent`. Pass a
@@ -580,7 +583,7 @@ deadline to `shutdown(deadline:)` to bound the wait. On timeout it returns
 `.timedOut(diagnostics)`, and the owner stays closed with that work still
 tracked. `diagnostics.outstandingExecutions` identifies the reservations it
 still tracks, and `pendingCompletions` the retained completions, and none of
-them grants authority. The result is discardable:
+them grants authority. The result is discardable.
 
 ```swift
 func stop(_ lookup: Lookup.Shared) async {
@@ -596,6 +599,7 @@ func stop(_ lookup: Lookup.Shared) async {
 
 Cancellation is cooperative, so a driver that ignores it keeps a shutdown
 waiting. `runningCount` counts the workers whose termination has not been
-processed, `subscriberCount` the live registrations, and `isQuiescent` whether
-closure and every obligation have settled; all three are `async` on
-`ActorHost`, and on `IsolatedHost` they are methods that take the owning actor.
+processed, `subscriberCount` counts the live registrations, and `isQuiescent`
+reports whether closure and every obligation have settled. All three are `async`
+on `ActorHost`, and on `IsolatedHost` they are methods that take the owning
+actor.

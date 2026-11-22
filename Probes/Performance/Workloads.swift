@@ -34,7 +34,7 @@ func uncontendedLocal(bytes: Int, operations: Int, timing: Bool, probe: Allocato
         case .committed: participant.accepted += 1
         case .rejected: participant.otherRejections += 1
         }
-        // Local ownership has no scheduling: explicit draining is outside commit latency.
+        // Local ownership has no scheduling, so explicit draining stays outside commit latency.
         _ = owner.drainCommands(limit: 1)
         if timing {
             participant.snapshotNanoseconds.append(t1 - t0)
@@ -60,7 +60,7 @@ func uncontendedLocal(bytes: Int, operations: Int, timing: Bool, probe: Allocato
     row.participants = [participant]
     row.counts = ["quiescentOwners": 1, "physicalDrivers": 0, "registeredSubscribers": 0, "explicitRetries": 0]
     row.notes = [
-        "Local generated facade; snapshot, preparation and public commit measured separately. Commit duration is not lock-hold duration. Drain cost included only in wall throughput."
+        "Local generated facade with snapshot, preparation, and public commit measured separately. Commit duration is not lock-hold duration. Drain cost is included only in wall throughput."
     ]
     return row
 }
@@ -130,7 +130,7 @@ func uncontended(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProb
         "registeredSubscribers": 0, "explicitRetries": 0,
     ]
     row.notes = [
-        "Single-writer generated Shared facade, no subscribers/effects. Snapshot, preparation and synchronous public commit are separate samples. An awaited FIFO flush after each commit prevents queued-work capacity pressure; settlementNanoseconds and wall throughput include that scheduling fence. Public commit is not lock-hold duration; internal drainer activity can overlap it. The additional Local lane removes managed scheduling entirely."
+        "Single-writer generated Shared facade with no subscribers or effects. Snapshot, preparation, and synchronous public commit are separate samples. An awaited FIFO flush after each commit prevents queued-work capacity pressure, and settlementNanoseconds and wall throughput include that scheduling fence. Public commit is not lock-hold duration because internal drainer activity can overlap it. The additional Local lane removes managed scheduling entirely."
     ]
     return row
 }
@@ -224,7 +224,7 @@ func concurrent(
         "finalPayloadChecksum": Int(checksum(value(owner.snapshot()).bytes)),
     ]
     row.notes = [
-        "One writer operation is one snapshot/prepare/commit attempt, with no retry. Accepted changes are reported separately. Managed FIFO scheduling can overlap the public commit; no observer/effect is registered. Thread roles are Dispatch concurrentPerform participants; scheduler concurrency is not a fairness guarantee."
+        "One writer operation is one snapshot, prepare, and commit attempt with no retry. Accepted changes are reported separately. Managed FIFO scheduling can overlap the public commit, and no observer or effect is registered. Thread roles are Dispatch concurrentPerform participants, and scheduler concurrency is not a fairness guarantee."
     ]
     return row
 }
@@ -386,7 +386,7 @@ func pressure(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?)
     RuntimeDeliveryProbe.reset()
     #endif
     row.notes = [
-        "One blocked initial callback spans the fixed producer attempt burst; a fast subscriber proves completion delivery. Distinct accepted effect IDs are compared exactly with physical driver starts/returns. Mailbox pending capacity one is a source contract; measured coalescing is initial plus final callback. The shipping facade does not expose private queue/task/reservation high-water counts; the separate resource-copy profile supplies checkpoint samples. Completion retry-policy internal retry counts are unavailable through the facade."
+        "One blocked initial callback spans the fixed producer attempt burst, while a fast subscriber proves completion delivery. Distinct accepted effect IDs are compared directly against physical driver starts and returns. Mailbox pending capacity one is a source contract, and measured coalescing is the initial plus final callback. Because the shipping facade hides private queue, task, and reservation high-water counts, the separate resource-copy profile supplies checkpoint samples. Completion retry-policy internal retry counts are unavailable through the facade."
     ]
     return row
 }
@@ -478,8 +478,8 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
         )
         try require(counts.cancelled == (cycle % 2 == 0 ? 1 : 0), "Cancellation was confused with physical termination")
         #if PERFORMANCE_RESOURCE_INSTRUMENTED
-        // Cohort size one: join library handles before dropping each owner. This avoids retaining
-        // all completed task allocations for a 10,000-cycle resource run.
+        // Join library handles after each cycle (cohort size one) to avoid retaining
+        // all completed task allocations across a 10,000-cycle resource run.
         maxima["retainedTaskHandlesBeforeJoin"] = max(
             maxima["retainedTaskHandlesBeforeJoin", default: 0],
             RuntimeCoordinatorTaskProbe.trackedCount
@@ -551,11 +551,11 @@ func lifecycle(bytes: Int, operations: Int, timing: Bool, probe: AllocatorProbe?
     row.counts["trackedTaskHandlesAfterCohortJoin"] = RuntimeCoordinatorTaskProbe.trackedCount
     row.counts["privateResourcesAfterJoinedShutdown"] = 0
     row.notes.append(
-        "Separate nonshipping resource-copy mode samples actual engine/coordinator/subscriber/queue/claim counts. maxSampled values are checkpoint maxima, not continuously observed peaks. Tracked Task<Void> handles include completed tasks until a per-cycle join; they are not asserted to equal simultaneously live tasks. Watchers join their exact Outcome workers. Weak markers cover host storage/progress/coordinator and registered mailbox/storage, and never retain them. Storage and mailbox markers must be released when the owner is dropped. The progress and coordinator markers are actors: the concurrency runtime can still hold an actor for a moment after its last job, once every library task is joined and no program reference remains, so the copy waits a bounded second for their release and counts each cycle that needed the wait."
+        "Separate nonshipping resource-copy mode samples engine, coordinator, subscriber, queue, and claim counts. maxSampled values are checkpoint maxima rather than continuously observed peaks. Tracked Task<Void> handles include completed tasks until a per-cycle join and are not asserted to equal simultaneously live tasks. Watchers join their exact Outcome workers. Weak markers cover host storage, progress, coordinator, and registered mailbox storage without retaining them. Storage and mailbox markers must release when the owner is dropped. Because the concurrency runtime can still hold the progress and coordinator actors briefly after their last job even once every library task is joined and no program reference remains, this copy waits up to one second for their release and counts each cycle that needed the wait."
     )
     #endif
     row.notes += [
-        "Alternating cancel and completion cycles await real driver entry/return and public shutdown. Weak markers measure facade-owner release; controlled driver counts are measured. Exact private worker/watcher/mailbox storage counters are not inferred from those counts. Up to 64 snapshots intentionally retain model Arrays; Array headers and authority metadata are additional. Released-snapshot memory includes runtime/allocator caches and harness lifetime."
+        "Alternating cancel and completion cycles await real driver entry, return, and public shutdown. Weak markers measure facade-owner release, and controlled driver counts are measured directly. Private worker, watcher, and mailbox storage counters are not inferred from those counts. Up to 64 snapshots intentionally retain model Arrays, with Array headers and authority metadata counted separately. Released-snapshot memory includes runtime and allocator caches as well as harness lifetime."
     ]
     return row
 }

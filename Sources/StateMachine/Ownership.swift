@@ -2,7 +2,9 @@
 @frozen nonisolated public struct Change<Next: ~Copyable, Effect>: ~Copyable {
     /// The successor payload.
     public let next: Next
-    /// Effects in authored order; constructing a change executes none of them.
+    /// Inert effects in authored order.
+    ///
+    /// Constructing a change executes none of them.
     public let effects: [Effect]
 
     /// Creates a change without executing effects.

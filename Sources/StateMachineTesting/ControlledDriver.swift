@@ -1,11 +1,11 @@
 /// A driver whose every call waits until the test decides how it ends.
 ///
-/// Pass its `run` method as an operation's driver to any managed host
-/// whose values are `Sendable`: `Shared`, `ActorHost`, `MainActorHost`, or `IsolatedHost`. Each
-/// time the host starts the operation, the driver suspends, and the test receives the call from
+/// Pass its `run` method as an operation's driver to any managed host whose values are `Sendable`:
+/// `Shared`, `ActorHost`, `MainActorHost`, or `IsolatedHost`. Each time the host starts the
+/// operation, the driver suspends, and the test receives the call from
 /// ``nextStarted(fileID:filePath:line:column:)`` with the input the host passed. The test then
 /// finishes it with ``Call/succeed(_:)`` or ``Call/fail(_:)``, or leaves it running. Each step is an
-/// explicit hand-off, so a test needs no sleeps or yields to order them:
+/// explicit hand-off, so a test needs no sleeps or yields to order them.
 ///
 /// ```swift
 /// let fetch = ControlledDriver<ProfileRequest, Profile, ProfileFailure>()
@@ -17,17 +17,17 @@
 /// call.succeed(profile)
 /// ```
 ///
-/// The same `run` serves an infallible operation, whose driver returns its output directly, an
-/// operation without input, and an `IsolatedHost`, whose driver receives its owning actor: the
-/// contextual driver type selects the form. A call ignores cancellation, as a driver that does not
-/// check for it would. When the host cancels the call's task, ``Call/isCancelled`` becomes `true`
-/// and ``Call/waitForCancellation(fileID:filePath:line:column:)`` returns, and the call keeps running until
-/// the test finishes it, so a test can deliver a result after cancellation and observe that the
-/// host discards it. A call that the test never finishes never returns, and the host's shutdown
-/// waits for it.
+/// The same `run` method serves an infallible operation (whose driver returns its output directly),
+/// an operation without input, and an `IsolatedHost` (whose driver receives its owning actor), with
+/// the contextual driver type selecting the overload. A call ignores cancellation, just as a driver
+/// that does not check for cancellation would. When the host cancels the call's task,
+/// ``Call/isCancelled`` becomes `true` and ``Call/waitForCancellation(fileID:filePath:line:column:)``
+/// returns, while the call keeps running until the test finishes it so a test can deliver a result
+/// after cancellation and observe that the host discards it. A call that the test never finishes
+/// never returns, and the host's shutdown waits for it.
 ///
-/// The driver grants no authority: it supplies a result to the host's own work, which only the
-/// host can deliver.
+/// The driver grants no authority, because it supplies a result to the host's own work, which only
+/// the host can deliver.
 nonisolated public final class ControlledDriver<Input: Sendable, Output: Sendable, Failure: Error>: Sendable {
     /// One started execution of the operation, which the test finishes.
     public final class Call: Sendable {
@@ -43,7 +43,7 @@ nonisolated public final class ControlledDriver<Input: Sendable, Output: Sendabl
         /// Whether the host has cancelled this execution's task.
         public var isCancelled: Bool { signal.isCancelled }
 
-        /// Ends the execution with `result`; it reports `false` and changes nothing if it already ended.
+        /// Ends the execution with `result`, returning `false` without changing anything if it already ended.
         @discardableResult public func finish(_ result: Result<Output, Failure>) -> Bool { slot.finish(result) }
         /// Ends the execution with a successful output.
         @discardableResult public func succeed(_ output: Output) -> Bool { finish(.success(output)) }
@@ -99,7 +99,7 @@ nonisolated public final class ControlledDriver<Input: Sendable, Output: Sendabl
         try await awaitNextCall(calls, fileID: fileID, filePath: filePath, line: line, column: column)
     }
 
-    /// The driver of a fallible operation: it waits until the test finishes the call.
+    /// Runs as the driver of a fallible operation, waiting until the test finishes the call.
     public func run(_ input: Input) async -> Result<Output, Failure> {
         await Call(input: input).run(offering: calls)
     }
@@ -111,7 +111,7 @@ nonisolated public final class ControlledDriver<Input: Sendable, Output: Sendabl
 }
 
 extension ControlledDriver where Failure == Never {
-    /// The driver of an operation that cannot fail: it returns the output the test supplies.
+    /// Runs as the driver of an operation that cannot fail, returning the output the test supplies.
     public func run(_ input: Input) async -> Output {
         switch await Call(input: input).run(offering: calls) {
         case .success(let output): output
@@ -151,9 +151,9 @@ extension ControlledDriver.Call where Output == Void {
 ///
 /// It behaves as ``ControlledDriver`` does, and each call also carries the key the host started it
 /// for, so a test can finish one key's work and leave another's running. A host starts each execution
-/// in its own task, so calls for different keys can reach the driver in either order;
+/// in its own task, so calls for different keys can reach the driver in either order.
 /// ``nextStarted(for:fileID:filePath:line:column:)`` waits for one key's call and leaves the others
-/// queued:
+/// queued.
 ///
 /// ```swift
 /// let download = KeyedControlledDriver<Int, String, String, TransferFailure>()
@@ -192,7 +192,7 @@ nonisolated public final class KeyedControlledDriver<
         /// Whether the host has cancelled this execution's task.
         public var isCancelled: Bool { signal.isCancelled }
 
-        /// Ends the execution with `result`; it reports `false` and changes nothing if it already ended.
+        /// Ends the execution with `result`, returning `false` without changing anything if it already ended.
         @discardableResult public func finish(_ result: Result<Output, Failure>) -> Bool { slot.finish(result) }
         /// Ends the execution with a successful output.
         @discardableResult public func succeed(_ output: Output) -> Bool { finish(.success(output)) }
@@ -266,7 +266,7 @@ nonisolated public final class KeyedControlledDriver<
         )
     }
 
-    /// The driver of a fallible keyed operation: it waits until the test finishes the call.
+    /// Runs as the driver of a fallible keyed operation, waiting until the test finishes the call.
     public func run(_ key: Key, _ input: Input) async -> Result<Output, Failure> {
         await Call(key: key, input: input).run(offering: calls)
     }
@@ -279,7 +279,7 @@ nonisolated public final class KeyedControlledDriver<
 }
 
 extension KeyedControlledDriver where Failure == Never {
-    /// The driver of a keyed operation that cannot fail: it returns the output the test supplies.
+    /// Runs as the driver of a keyed operation that cannot fail, returning the output the test supplies.
     public func run(_ key: Key, _ input: Input) async -> Output {
         switch await Call(key: key, input: input).run(offering: calls) {
         case .success(let output): output

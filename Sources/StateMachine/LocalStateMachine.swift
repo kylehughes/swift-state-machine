@@ -1,9 +1,9 @@
 /// A manually driven owner whose caller performs every step synchronously.
 ///
-/// Generated `Local` types conform, so a harness such as `ManualMachineTest` in `StateMachineTesting`
-/// can drive any graph's `Local` through one generic surface. Conforming confers no authority: each
-/// requirement is part of the owner's sealed public surface, or reads graph metadata from a value the
-/// caller already holds. None of them constructs a snapshot, a proposal, a ticket, or a completion.
+/// Generated `Local` types conform so a harness such as `ManualMachineTest` in `StateMachineTesting`
+/// can drive any graph's `Local` through one generic surface. Conforming confers no authority because
+/// each requirement is part of the owner's sealed public surface or reads graph metadata from a value
+/// the caller already holds. None of them constructs a snapshot, a proposal, a ticket, or a completion.
 nonisolated public protocol LocalStateMachine: ~Copyable {
     /// The closed dynamic inputs this owner routes.
     associatedtype Input
@@ -28,13 +28,13 @@ nonisolated public protocol LocalStateMachine: ~Copyable {
     static func receipt(of result: CommitResult) -> Receipt?
     /// The identifier of the router or edge, as ``StateMachineGraph/Router/id`` and
     /// ``StateMachineGraph/Edge/id`` name them, whose authored function refused an input that `send`
-    /// rejected from a snapshot in `phase`, or `nil` when no authored function refused it: no edge
-    /// leaves the phase for the input, or admission refused the candidate.
+    /// rejected from a snapshot in `phase`, or `nil` when no authored function refused it because no
+    /// edge leaves the phase for the input or because admission refused the candidate.
     static func rejectingRoute(of rejection: SendRejection, in phase: String) -> String?
 
     /// Returns an immutable historical observation.
     borrowing func snapshot() -> Snapshot
-    /// Whether `snapshot` was taken from this owner, in any incarnation; a reset keeps the owner.
+    /// Whether `snapshot` was taken from this owner in any incarnation. A reset keeps the same owner.
     borrowing func owns(_ snapshot: Snapshot) -> Bool
     /// Routes, prepares, and admits one input against the current root.
     @discardableResult mutating func send(_ input: Input) throws(SendRejection) -> Receipt
@@ -58,8 +58,8 @@ extension LocalStateMachine where Self: ~Copyable {
 
 /// A manually driven owner whose schema declares a default construction of its initial payload.
 ///
-/// The generated `Local` of a graph whose `@Initial` case declares a default payload conforms; its own
-/// `reset()` and `reset(expecting:)` install that default.
+/// The generated `Local` of a graph whose `@Initial` case declares a default payload conforms, and
+/// its own `reset()` and `reset(expecting:)` install that default.
 nonisolated public protocol DefaultingLocalStateMachine: LocalStateMachine, ~Copyable {
     /// A fresh initial payload, constructed as the schema's declared default constructs it.
     static func defaultInitialPhase() -> InitialPhase
@@ -83,14 +83,14 @@ extension DefaultingLocalStateMachine where Self: ~Copyable {
 nonisolated public protocol RestoringLocalStateMachine: LocalStateMachine, ~Copyable {
     /// The saved data the `@Restoration` function validates.
     associatedtype RestorationArchive
-    /// Why a restoring reset changed nothing: `CommitRejection`, or the schema's `ResetRejection`
-    /// when the `@Restoration` function throws.
+    /// Why a restoring reset changed nothing, either `CommitRejection` or the schema's
+    /// `ResetRejection` when the `@Restoration` function throws.
     associatedtype RestorationRejection: Error
 
     /// Replaces the model with the phase restored from saved data in a fresh incarnation.
     ///
-    /// The saved data is `sending`, so a `@Restoration` function that takes it as `sending` receives it;
-    /// `Sendable` saved data passes as any argument does.
+    /// The saved data is `sending`, so a `@Restoration` function that takes it as `sending` receives
+    /// it, and `Sendable` saved data passes like any other argument.
     @discardableResult mutating func reset(
         restoring saved: sending RestorationArchive
     ) throws(RestorationRejection) -> Receipt
@@ -111,7 +111,7 @@ nonisolated public protocol LocalCommandBatch {
     associatedtype Command
     /// The atomic acceptance represented by this batch.
     var receipt: Receipt { get }
-    /// The batch's commands: cancellations, then starts and events in authored effect order.
+    /// The batch's commands, with cancellations first and starts and events in authored effect order.
     var commands: [Command] { get }
     /// Whether this is the separately reserved close batch.
     var terminal: Bool { get }
@@ -162,9 +162,9 @@ nonisolated public protocol DeliveringLocalStateMachine: DrainingLocalStateMachi
     static func receipt(of result: DiscardResult) -> Receipt?
     /// The identifier of the router or completion edge, as ``StateMachineGraph/Router/id`` and
     /// ``StateMachineGraph/Edge/id`` name them, whose authored function refused the outcome in the
-    /// `deliver` that returned `result`, or `nil` when that call's own preparation did not refuse it:
-    /// the outcome committed, waits for capacity, was already retained, or was not taken, or admission
-    /// refused its candidate.
+    /// `deliver` that returned `result`, or `nil` when that call's own preparation did not refuse it
+    /// because the outcome committed, waits for capacity, was already retained, was not taken, or
+    /// admission refused its candidate.
     static func rejectingRoute(of result: DeliveryResult) -> String?
     /// The identifier of the router or completion edge whose authored function refused the outcome in
     /// the `reconcile(id:)` that returned `result`, or `nil` when that call's own preparation did not

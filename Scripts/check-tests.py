@@ -42,7 +42,7 @@ def main():
     common = ["--build-system", "native", "--configuration", args.configuration]
     selection = []
     if args.macro_implementation:
-        # The opt-in target changes the package graph; a separate scratch path keeps the default
+        # The opt-in target changes the package graph. A separate scratch path keeps the default
         # graph's prebuilt-backed products from being rebuilt.
         os.environ[IMPLEMENTATION_ENVIRONMENT] = "1"
         args.scratch_path = args.scratch_path or Path(".build/macro-implementation")

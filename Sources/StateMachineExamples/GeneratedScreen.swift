@@ -5,8 +5,8 @@ import StateMachine
 /// Delivering a reading and calling `screen` on an owned `Ready` both run the router `screen`, so
 /// neither can record a negative reading through `accept`.
 ///
-/// The schema lists `Equatable`, so its effects compare in another module: an owned `take()` returns
-/// effects equal to `[.measure]`.
+/// The schema lists `Equatable`, so its effects compare in another module and an owned `take()`
+/// returns effects equal to `[.measure]`.
 @StateMachine(mode: .shared)
 nonisolated public enum GeneratedScreen: Sendable, Equatable {
     /// The readings accepted so far.
@@ -21,7 +21,7 @@ nonisolated public enum GeneratedScreen: Sendable, Equatable {
     public enum Input: Sendable { case measure }
     /// Why the router declined a reading.
     public enum Refusal: Error, Sendable { case negative }
-    /// Takes one reading; it takes no input and cannot fail.
+    /// Takes one reading without input and cannot fail.
     @Operation(activeIn: [Ready.self])
     public enum Measure {
         /// The reading.

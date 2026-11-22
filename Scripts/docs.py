@@ -224,7 +224,7 @@ def validate_site(site, symbols):
                 if not (data / (module.lower() + ".json")).is_file() or not (site / "documentation" / module.lower() / "index.html").is_file()]
     for module in MODULES:
         names = symbols.get(module, {})
-        # Readable names identify the symbol; the precise identifier distinguishes overloads.
+        # Readable names identify the symbol, and the precise identifier distinguishes overloads.
         problems += [names[identifier] + " (" + identifier + ")" for identifier in names if identifier not in rendered]
     if problems:
         raise ValueError("Documentation site is missing " + str(len(problems)) + " page(s): " + ", ".join(sorted(problems)[:20]))
@@ -235,11 +235,11 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
-        raise ValueError("Documentation output already exists; choose a fresh output")
+        raise ValueError("Documentation output already exists. Choose a fresh output")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix="docc-", dir=args.output.parent))
     try:
-        # Host graphs omit conditional API; extract every declared Apple platform too.
+        # Host graphs omit conditional APIs, so extract every declared Apple platform too.
         graphs = {"macos": extract_graphs(["--scratch-path", str(scratch / "macos-build")])}
         platforms = declared_platforms()
         for name, floor in platforms:

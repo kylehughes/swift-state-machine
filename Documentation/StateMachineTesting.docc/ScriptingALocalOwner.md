@@ -4,12 +4,12 @@ Drive a real `Local` owner step by step, read the history of what it accepted, a
 
 A generated `Local` owner runs the same admission rules as a managed owner,
 synchronously, and leaves every operation to its caller. ``ManualMachineTest``
-consumes one and offers the same verbs: `send`, `commit`, `drainCommands`,
-`deliver`, `acknowledgeExecution`, `retryAdmission`, `reconcile`,
-`discardPending`, `pendingCompletions`, `reset(to:)`, `reset(to:expecting:)`,
-`reset()` and `reset(expecting:)` when the schema declares a default initial
-payload, the restoring resets of a schema with a `@Restoration` function, and
-`close`.
+consumes one and offers the same verbs, including `send`, `commit`,
+`drainCommands`, `deliver`, `acknowledgeExecution`, `retryAdmission`,
+`reconcile`, `discardPending`, `pendingCompletions`, `reset(to:)`,
+`reset(to:expecting:)`, `reset()` and `reset(expecting:)` when the schema
+declares a default initial payload, the restoring resets of a schema with a
+`@Restoration` function, and `close`.
 Each calls the owner's own method and returns the owner's own result, so a test
 sees real receipts, real command batches with real work, and real rejections.
 Along the way, the harness records every change the owner accepts, with the edge
@@ -17,7 +17,7 @@ its receipt names, and a ``GraphCoverage`` combines those records into a
 coverage report for the owner's graph.
 
 The examples in this article test a transfer list whose downloads are keyed by
-file:
+file.
 
 ```swift
 import StateMachine
@@ -106,7 +106,7 @@ func downloads(_ commands: [Transfers.Command]) -> [Transfers.DownloadWork] {
 
 The test plays the runner. It sends an input, drains the batch the acceptance
 queued, executes the commands it holds, delivers each result as a completion
-sealed by the work, and acknowledges that each execution ended:
+sealed by the work, and acknowledges that each execution ended.
 
 ```swift
 @Test func aDownloadRunsThroughTheRealDeliveryPath() throws {
@@ -143,7 +143,7 @@ sealed by the work, and acknowledges that each execution ended:
 one queued batch, and ``ManualMachineTest/drainFlattenedCommands()`` transfers every
 queued batch and returns their commands in order. `drainBatch` counts the
 queued batches before it transfers any, so when several are queued it throws
-and transfers none: they stay queued in the owner, and the next
+and transfers none. Those batches stay queued in the owner, and the next
 `drainCommands()` or `drainFlattenedCommands()`, or the owner that
 ``ManualMachineTest/finish()`` returns, still holds their work. Admitting the completion
 queued a batch of its own for the `logged` event that `downloaded` emits. It
@@ -160,7 +160,7 @@ when the owner does not admit the input. To test a rejection itself, use
 ``ManualMachineTest/rejection(of:fileID:filePath:line:column:)``, which returns
 the typed rejection and throws when the owner admits the input instead. Both
 record each rejection the owner returned in ``ManualMachineTest/rejections``,
-with the phase the owner held and the route the owner names for it:
+with the phase the owner held and the route the owner names for it.
 
 ```swift
 @Test func goingOnlineWhileBrowsingIsRejected() throws {
@@ -178,14 +178,14 @@ with the phase the owner held and the route the owner names for it:
 
 ``ManualMachineTest/history`` begins with the owner's state when the harness
 took it and gains one ``ManualMachineTest/Step`` for every call the owner
-accepts. A step records its ``ManualMachineTest/Step/kind``, such as `.send`,
-`.delivery`, `.retry`, or `.reset`; its ``ManualMachineTest/Step/trigger``; the
-``ManualMachineTest/Step/source`` phase it left and the
-``ManualMachineTest/Step/phase`` it holds; the accepted
-``ManualMachineTest/Step/snapshot``; and the ``ManualMachineTest/Step/edge``
+accepts. Each step records its ``ManualMachineTest/Step/kind`` (such as `.send`,
+`.delivery`, `.retry`, or `.reset`), its ``ManualMachineTest/Step/trigger``, the
+``ManualMachineTest/Step/source`` phase it left, the
+``ManualMachineTest/Step/phase`` it holds, the accepted
+``ManualMachineTest/Step/snapshot``, and the ``ManualMachineTest/Step/edge``
 that produced it. Edges are identified as the graph identifies them,
 `"<phase>.<edge>"`. A call that the owner rejects, or a stale delivery, accepts
-nothing and adds no step:
+nothing and adds no step.
 
 ```swift
 @Test func cancellingOneKeyRevokesOnlyItsWork() throws {
@@ -226,7 +226,7 @@ must satisfy. The harness checks each invariant against the owner's state when
 it takes the owner and against every snapshot the owner accepts afterward, and
 records each failure in ``ManualMachineTest/violations`` without stopping the
 run. ``ManualMachineTest/requireInvariants(fileID:filePath:line:column:)``
-throws if any was violated:
+throws if any was violated.
 
 ```swift
 @Test func anInvariantReportsTheSnapshotThatBrokeIt() throws {
@@ -251,12 +251,12 @@ throws if any was violated:
 Every reset of the owner is a verb of the harness, recorded as a
 ``ManualMachineTest/Step/Kind/reset`` step without an edge. A schema whose
 `@Initial` case declares a default, as `Transfers` does, gives the harness
-`reset()` and `reset(expecting:)`, which install that default as the owner's
-own do; for a schema without one, `test.reset()` does not compile. The
-restoring resets of a schema with a `@Restoration` function are verbs as well.
-``ManualMachineTest/finish()`` ends the harness and returns the owner it drove.
-The harness holds no work of its own, so every batch the test has not drained
-is still queued in that owner:
+`reset()` and `reset(expecting:)`, which install that default just as the
+owner's own resets do. For a schema without a default, `test.reset()` does not
+compile. The restoring resets of a schema with a `@Restoration` function are
+verbs as well. ``ManualMachineTest/finish()`` ends the harness and returns the
+owner it drove. The harness holds no work of its own, so every batch the test
+has not drained is still queued in that owner.
 
 ```swift
 @Test func aResetAndARestoredOwnerAreRecordedAndReturned() throws {
@@ -288,7 +288,7 @@ fail rather than vouch for snapshots no invariant checked. The harness also
 compares the owner the closure leaves with the one it lent, so a closure that
 assigns another owner, even a fresh one with an equal model at the same
 revision, counts toward ``ManualMachineTest/replacedOwners`` and leaves the
-history incomplete in the same way:
+history incomplete in the same way.
 
 ```swift
 @Test func changesInsideWithOwnerAreNotVouchedFor() throws {
@@ -310,7 +310,7 @@ throws cannot propagate and which loses the owner's typed rejection.
 
 The harness is noncopyable, because it holds the noncopyable owner, and the
 `#expect` macro cannot read a property of a noncopyable value in place. Read
-``ManualMachineTest/isQuiescent`` into a local first:
+``ManualMachineTest/isQuiescent`` into a local first.
 
 ```swift
 @Test func aClosedRunSettles() throws {
@@ -326,7 +326,7 @@ The harness is noncopyable, because it holds the noncopyable owner, and the
 
 ## Measure coverage
 
-``GraphCoverage`` measures one owner type, so only runs of that owner count: a
+``GraphCoverage`` measures one owner type, so only runs of that owner count. A
 run of another schema, even one with the same declared structure, does not
 compile as an argument. Record the history of each run with
 ``GraphCoverage/record(_:)``, and then read ``GraphCoverage/unexercisedEdges``,
@@ -334,7 +334,7 @@ compile as an argument. Record the history of each run with
 ``GraphCoverage/unexercisedRejectingRouters``.
 Every step comes from a real owner admitting a real change and names the edge
 from that change's receipt, so an exercised edge is one that a test actually
-took, even when a router chooses between edges with the same destination:
+took, even when a router chooses between edges with the same destination.
 
 ```swift
 @Test func twoRunsExerciseEveryDeclaredEdge() throws {
@@ -369,21 +369,22 @@ throws a failure that lists each unexercised edge and router, each unvisited
 phase, each invariant violation that a recorded run reported, and the number of
 changes made inside `withOwner` that the harness never observed. Pass the
 identifiers of the edges and routers that no test is meant to reach in
-`excluding:`; both are spelled `"<phase>.<name>"`. A router counts as exercised
-once a step takes one of its candidates. A router without candidates exists
-only to decline an input or a completion, so no step can exercise it: coverage
-requires it only with `includingRejectingRouters: true`, and
+`excluding:`, spelling both as `"<phase>.<name>"`. A router counts as exercised
+once a step takes one of its candidates.
+
+A router without candidates exists only to decline an input or a completion, so
+no step can exercise it. Coverage requires such a router only when you pass
+`includingRejectingRouters: true`, and
 ``GraphCoverage/unexercisedRejectingRouters`` lists each one that no recorded
-run saw decline. A rejection counts only when it comes from
-the real owner, and only for the route the owner names: an input router's
-through `rejection(of:)` or a `send` that failed, which
-``ManualMachineTest/rejections`` records with the owner's typed
-``ManualMachineTest/Rejection/reason``, and a completion router's or completion
-edge's through a `deliver` or `reconcile(id:)` whose own preparation it refused,
-as that call's result reports, which ``ManualMachineTest/completionRejections``
+run saw decline. A rejection counts only when it comes from the real owner and
+names that route. Input router rejections arrive through `rejection(of:)` or a
+failed `send`, which ``ManualMachineTest/rejections`` records with the owner's
+typed ``ManualMachineTest/Rejection/reason``. Completion router and completion
+edge rejections arrive through a `deliver` or `reconcile(id:)` call whose own
+preparation was refused, which ``ManualMachineTest/completionRejections``
 records. A second delivery of a completion the owner already retains prepares
-nothing, so its result reports no refusal and it counts nothing. A completion that a
-router refuses while `Loading` and that `reconcile(id:)` admits in `Paused`
+nothing, so its result reports no refusal and counts nothing. A completion that
+a router refuses while `Loading` and that `reconcile(id:)` admits in `Paused`
 therefore counts the router as declining. Beyond routers without candidates,
-coverage requires nothing of rejections: neither that a router that chooses an
-edge has also declined, nor that a function that can throw has thrown.
+coverage requires nothing of rejections. It requires neither that a router with
+candidates has also declined nor that a function that can throw has thrown.

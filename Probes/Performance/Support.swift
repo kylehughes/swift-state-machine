@@ -15,7 +15,7 @@ func value(_ snapshot: PerformanceFlow.Snapshot) -> PerformanceFlow.Ready {
     }
 }
 
-/// One producer event and one waiter; signaling is the progress proof, process timeout is the safety bound.
+/// One producer event and one waiter. Signaling proves progress, and the process timeout bounds failures.
 final class Event: Sendable {
     private struct State {
         var fired = false

@@ -1,12 +1,11 @@
 import Dispatch
 import os
 
-// A test that blocks a thread waits for a step that some other code takes: a thread of its own, a
-// production callback, or a later line of the test. When that step can be skipped, by a failed
-// requirement, a thrown error, or a wait that the test's cancellation ended early, as when its time
-// limit expires, an untimed wait blocks for the rest of the run. These helpers make every such wait
-// end: a hold is released on every path out of the test, and a test's own wait ends when its task is
-// cancelled.
+// A test that blocks a thread waits for another thread, a production callback, or a later line of
+// the test to take a step. When a failed requirement, thrown error, or task cancellation (such as a
+// time limit expiring) skips that step, an untimed wait blocks for the rest of the run. These
+// helpers release every hold on every path out of the test and end a test's own wait when its task
+// is cancelled.
 
 /// A gate that holds every thread that waits on it until a test opens it, and then stays open.
 ///
@@ -34,18 +33,18 @@ public final class ThreadGate: Sendable {
 
     /// Blocks the calling thread until the gate opens, however long that takes.
     ///
-    /// A hold inside production code waits here, so a task that the code cancels while it is held stays
-    /// held; the test's `defer` opens the gate.
+    /// A hold inside production code waits here so a task cancelled by production code stays held
+    /// until the test's `defer` opens the gate.
     public func wait() {
         semaphore.wait()
         // Each thread the gate lets go passes the opening on to the next.
         semaphore.signal()
     }
 
-    /// Blocks the calling thread until the gate opens or the calling task is cancelled; outside any
-    /// task, until the gate opens.
+    /// Blocks the calling thread until the gate opens or the calling task is cancelled.
     ///
-    /// A hold that may run on the test's own task waits here, so the test's cancellation ends it.
+    /// Outside any task, this blocks until the gate opens. A hold that may run on the test's own
+    /// task waits here so task cancellation ends it.
     ///
     /// - Returns: Whether the gate opened.
     @discardableResult public func waitUnlessCancelled() -> Bool {
@@ -56,12 +55,11 @@ public final class ThreadGate: Sendable {
 }
 
 extension DispatchSemaphore {
-    /// Waits for a signal, as `wait()` does, unless the calling task is cancelled first; outside any
-    /// task, until the signal arrives.
+    /// Waits for a signal, as `wait()` does, unless the calling task is cancelled first.
     ///
-    /// A test that blocks its own thread until another thread has taken a step returns when its task
-    /// is cancelled, so a step that never comes fails the test at its time limit rather than hanging the
-    /// run.
+    /// Outside any task, this waits until the signal arrives. A test that blocks its own thread
+    /// until another thread takes a step returns when its task is cancelled, so a missing step
+    /// fails the test at its time limit rather than hanging the run.
     ///
     /// - Returns: Whether the signal arrived.
     @discardableResult public func waitUnlessCancelled() -> Bool {

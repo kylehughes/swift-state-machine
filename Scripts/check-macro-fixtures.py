@@ -157,7 +157,7 @@ def main():
     parser.add_argument("--phases", type=int, help="Phase count (default: the variant's, else 128)")
     parser.add_argument("--edges", type=int, help="Edge count (default: the variant's, else 512)")
     parser.add_argument("--variant", choices=("dense", "sparse-input", "operation-heavy"), default="dense",
-                        help="dense is the default graph; the others use the shapes in graphs.json under variants")
+                        help="Graph shape variant (dense by default). Other variants use the shapes in graphs.json")
     parser.add_argument("--operations", type=int, help="Override the operation count of the operation-heavy variant")
     parser.add_argument("--keep-expansions", action="store_true", help="Also retain the compiler's macro expansion text")
     parser.add_argument("--output", type=Path, help="Fresh evidence directory outside the package")
@@ -177,7 +177,7 @@ def main():
     if output.is_relative_to(ROOT):
         parser.error("--output must be outside the package to keep candidate evidence separate")
     if (output / "results.json").exists():
-        parser.error("--output already contains results.json; choose a fresh evidence directory")
+        parser.error("--output already contains results.json. Choose a fresh evidence directory")
     output.mkdir(parents=True, exist_ok=True)
     inputs = json.loads(INPUTS.read_text())
     build_root = args.build_root.resolve() if args.build_root else Path(captured([
@@ -188,7 +188,7 @@ def main():
     required = [modules / "StateMachine.swiftmodule", plugin]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
-        parser.error("Build StateMachine with the native backend first; missing: " + ", ".join(missing))
+        parser.error("Build StateMachine with the native backend first. Missing: " + ", ".join(missing))
     swiftc = captured(["xcrun", "--find", "swiftc"])
     sdk = captured(["xcrun", "--sdk", "macosx", "--show-sdk-path"])
     version = subprocess.check_output([swiftc, "--version"], cwd=ROOT, text=True, stderr=subprocess.STDOUT, timeout=120).strip()
@@ -258,7 +258,7 @@ def main():
         "maximum_resident_set_size_bytes": int(peak_rss.group(1)) if peak_rss else None,
         "resource_log": str(resources),
         "compile_log": str(output / "compile.log"),
-        "limitations": ["Compiles the generated client; does not execute it or establish minimum-OS execution."],
+        "limitations": ["Compiles the generated client without executing it or establishing minimum-OS execution."],
     }
     (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     print(f"{status}: {args.phases} phases / {args.edges} edges in {duration:.3f}s; evidence: {output}")

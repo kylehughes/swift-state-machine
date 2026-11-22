@@ -23,27 +23,27 @@ import os
 /// replaces, so a subscriber that requests slowly receives the latest value and never an older one.
 ///
 /// A subscriber receives the presentation's publications in the order the presentation shows them.
-/// Revision order belongs to one observation: within it, each value a subscriber receives has a higher
-/// revision than the one before, and no revision arrives twice. A passive presentation that starts
-/// observing another owner shows that owner's current snapshot as a new baseline, so the first value of
-/// the new observation can carry a lower or equal revision, as `9` from one owner followed by `0` from
-/// another.
+/// Revision order belongs to a single observation, so within one observation each value a subscriber
+/// receives has a higher revision than the one before and no revision arrives twice. A passive
+/// presentation that starts observing another owner shows that owner's current snapshot as a new
+/// baseline, so the first value of the new observation can carry a lower or equal revision, such as
+/// `9` from one owner followed by `0` from another.
 ///
-/// The publisher belongs to the presentation, not to one observation: it stays open across
-/// `stopObserving()` and every later observation, and it does not keep the presentation alive. Once the
-/// presentation's release has begun, it delivers no value: it discards a value its demand has not
-/// reached, a later main-actor turn finishes every subscriber, and a subscriber that attaches after the
-/// release receives `.finished` at once. A buffered value is delivered only when the subscriber had
-/// demand at an instant when the presentation could still deliver, so demand requested after the
-/// release reaches no value. A client that keeps the publisher can therefore tell a presentation that is not observing from
-/// one that can never publish again.
+/// The publisher belongs to the presentation rather than to any single observation, so it stays open
+/// across `stopObserving()` and every later observation without keeping the presentation alive. Once
+/// the presentation's release has begun, it delivers no more values. It discards any value its demand
+/// has not reached, a later main-actor turn finishes every subscriber, and any subscriber that
+/// attaches after release receives `.finished` at once. A buffered value is delivered only when the
+/// subscriber had demand at an instant when the presentation could still deliver, so demand
+/// requested after release reaches no value. A client that keeps the publisher can therefore tell a
+/// presentation that is not observing from one that can never publish again.
 ///
-/// Subscription, delivery, and completion happen on the main actor. Subscribing off the main actor stops
-/// the program instead of racing; requesting demand and cancelling are accepted from any thread. No
-/// value or completion follows a cancellation that returned before the publisher decided a delivery; a
-/// cancellation on another thread that races a delivery already decided on the main actor can return
-/// before it. `Output` is `Sendable`, because a Combine pipeline can move each value to another thread,
-/// as `receive(on:)` does.
+/// Subscription, delivery, and completion happen on the main actor. Subscribing off the main actor
+/// stops the program instead of racing, while requesting demand and cancelling are accepted from any
+/// thread. No value or completion follows a cancellation that returned before the publisher decided
+/// a delivery, though a cancellation on another thread racing a delivery already decided on the main
+/// actor can return before that delivery runs. `Output` is `Sendable` because a Combine pipeline can
+/// move each value to another thread, as `receive(on:)` does.
 @MainActor public struct PresentationPublisher<Output: Sendable> {
     private let attach: @MainActor (AnySubscriber<Output, Never>) -> Void
 
@@ -59,7 +59,7 @@ extension PresentationPublisher: @MainActor Publisher {
     /// Attaches a subscriber, or finishes it at once when the presentation has been released.
     public func receive<S: Subscriber>(subscriber: S) where S.Input == Output, S.Failure == Never {
         // Combine does not check isolation, so a subscription off the main actor stops here rather than
-        // racing. The check asserts the isolation this method already requires; it decides nothing.
+        // racing. This check asserts the isolation the method already requires and decides nothing.
         MainActor.assumeIsolated {}
         attach(AnySubscriber(subscriber))
     }
@@ -68,8 +68,8 @@ extension PresentationPublisher: @MainActor Publisher {
 /// The subscribers of one presentation's publisher, which the presentation tells of each snapshot it
 /// shows, and which finishes them when the presentation is released.
 ///
-/// It holds no snapshot: it reads the one the presentation shows through `current`, which captures the
-/// presentation weakly and so reads `nil` once the presentation's release has begun.
+/// It holds no snapshot. Instead, it reads the snapshot the presentation shows through `current`,
+/// which captures the presentation weakly and returns `nil` once release has begun.
 @MainActor final class PresentationFeed<Snapshot> {
     /// The snapshot the presentation shows, or `nil` once the presentation is being released.
     var current: @MainActor () -> Snapshot? = { nil }
@@ -99,8 +99,9 @@ extension PresentationPublisher: @MainActor Publisher {
         channel.drain()
     }
     /// Offers a snapshot the presentation is about to assign to every subscriber, including one that
-    /// attaches while this runs; that subscriber's first value is the snapshot still assigned, so this
-    /// one follows it.
+    /// attaches while this runs.
+    ///
+    /// That subscriber's first value is the snapshot still assigned, so this one follows it.
     func send(_ snapshot: Snapshot) {
         let outer = sending
         sending = true
@@ -142,10 +143,10 @@ extension PresentationPublisher: @MainActor Publisher {
 
 /// What one subscriber receives next, confined to the main actor.
 ///
-/// `drain` is the only place the subscriber is called with its subscription or a value, and one drain
-/// runs at a time: an offer made while the subscriber is being called, its seed included, replaces
-/// `next` for that drain to deliver once the call returns. Every delivery reads the cancellation and
-/// claims a unit of demand first, with no client code in between.
+/// `drain` is the only place the subscriber is called with its subscription or a value, and only one
+/// drain runs at a time. Any offer made while the subscriber is being called, including its seed,
+/// replaces `next` for that drain to deliver once the call returns. Every delivery reads cancellation
+/// and claims a unit of demand first, with no client code in between.
 @MainActor private final class PresentationChannel<Snapshot, Output: Sendable>: PresentationListener {
     private enum Next {
         /// The subscriber has not yet received its subscription.
@@ -224,12 +225,11 @@ extension PresentationPublisher: @MainActor Publisher {
                 // A snapshot offered while `transform` ran is newer than the one it read.
                 if !isEnded, case .none = next { next = .value(first) }
             case .value:
-                // A delivery claims its unit of demand first and only then reads whether the presentation
-                // can still deliver, holding the unit in between, so a value is delivered only when there
-                // was an instant with both: demand that a request made after the release cannot supply
-                // reaches no value. Nothing is delivered once the presentation's release has begun: the
-                // value waiting is discarded, its unit is returned, and the turn that disposes of the
-                // presentation finishes.
+                // A delivery claims its unit of demand first and only then checks whether the
+                // presentation can still deliver, holding the unit in between, so a value is delivered
+                // only when there was an instant with both. Demand requested after release therefore
+                // reaches no value. Nothing is delivered once release has begun, so any waiting value
+                // is discarded, its unit of demand is returned, and the disposal turn finishes.
                 guard demand.claim() else { return }
                 PresentationDeliveryPause.reached()
                 guard feed?.current() != nil else {

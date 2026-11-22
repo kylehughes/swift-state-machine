@@ -5,7 +5,8 @@ Drive real owners step by step in tests, control when each driver call ends, and
 `StateMachineTesting` is a small library of test helpers for graphs declared
 with `StateMachine`. It depends only on `StateMachine` and links no test
 framework, so the same helpers work under Swift Testing and XCTest, and an app
-target can import them too. Add the library to a test target:
+target can import them too. Add `StateMachineTesting` to a test target in
+`Package.swift`.
 
 ```swift
 // swift-tools-version: 6.4
@@ -33,16 +34,16 @@ let package = Package(
 )
 ```
 
-The helpers cover the two ways a graph's work runs:
+The helpers cover the two ways a graph's work runs.
 
 - A managed owner, such as `Shared`, `ActorHost`, `MainActorHost`, or
   `IsolatedHost`, runs its operations through drivers. ``ControlledDriver``
   and ``KeyedControlledDriver`` stand in for those drivers when the operation's
   values are `Sendable`, and ``MainActorControlledDriver``,
   ``KeyedMainActorControlledDriver``, ``IsolatedControlledDriver``, and
-  ``KeyedIsolatedControlledDriver`` when they stay on the host's actor: each
-  call the host starts waits until the test finishes it, so a test orders every
-  event explicitly and never sleeps.
+  ``KeyedIsolatedControlledDriver`` do the same when values stay on the host's
+  actor. Each call the host starts waits until the test finishes it, so a test
+  orders every event explicitly without sleeping.
 - A `Local` owner leaves execution to its caller. ``ManualMachineTest`` drives
   one step by step through the owner's own methods and records every accepted
   change with the edge its receipt names, and ``GraphCoverage`` combines the
@@ -50,10 +51,10 @@ The helpers cover the two ways a graph's work runs:
   no test exercised.
 
 None of the helpers grants authority. They cannot construct a ticket, an
-observation, a prepared transition, or a completion, and none injects an
-outcome into a managed host: a managed host's work still reaches it only from
-its own drivers, and a `Local` admits only completions sealed by work it issued.
-A test therefore exercises the same admission rules that production code does.
+observation, a prepared transition, or a completion, and they never inject an
+outcome into a managed host. A managed host still receives work only from its
+own drivers, and a `Local` owner admits only completions sealed by work it
+issued. A test therefore exercises the same admission rules as production code.
 
 A helper that expects an outcome throws ``StateMachineTestFailure`` when the
 owner does something else. Its message names what was expected and what

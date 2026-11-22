@@ -199,8 +199,8 @@ private actor PlatformDesk {
     return total + UInt64(published.count)
 }
 
-/// Links the testing product at every deployment floor: the manual harness, graph coverage, and
-/// each controlled driver form.
+/// Links the manual harness, graph coverage, and each controlled driver form of the testing
+/// product at every deployment floor.
 public func stateMachineTestingPlatformCheck() async throws -> Int {
     var test = ManualMachineTest(PlatformLookup.Local())
     try test.send(.load(6))

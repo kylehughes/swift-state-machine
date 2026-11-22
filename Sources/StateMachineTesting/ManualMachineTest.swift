@@ -2,17 +2,17 @@ import StateMachine
 
 /// A noncopyable harness that drives one real `Local` owner step by step and records every accepted change.
 ///
-/// The harness consumes a generated `Local` and offers the same verbs: `send`, `commit`,
+/// The harness consumes a generated `Local` and offers the same verbs, including `send`, `commit`,
 /// `drainCommands`, `deliver`, `acknowledgeExecution`, `retryAdmission`, `reconcile`,
 /// `discardPending`, `reset(to:)` and `reset(to:expecting:)`, `reset()` and `reset(expecting:)` when
 /// the schema declares a default initial payload, the restoring resets of a schema with a
 /// `@Restoration` function, and `close`. Each one calls the owner's own method and returns the
 /// owner's own result, so the test sees real receipts, real command batches with real work, and
 /// real rejections. A completion reaches the owner only through `deliver`, sealed by work the owner
-/// issued; the harness cannot construct a ticket, an observation, or a completion.
+/// issued, and the harness cannot construct a ticket, an observation, or a completion.
 ///
-/// Every call that the owner accepts appends a ``Step`` to ``history``: the accepted snapshot, the
-/// phase it left and the phase it holds, and the graph edge the owner's receipt names. A
+/// Every call that the owner accepts appends a ``Step`` to ``history`` containing the accepted
+/// snapshot, the phase it left, the phase it holds, and the graph edge the owner's receipt names. A
 /// ``GraphCoverage`` combines histories to report the edges and phases that no test exercised.
 ///
 /// ```swift
@@ -52,19 +52,20 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
             /// `close` ended admission.
             case close
             /// The owner changed inside `withOwner`, which reports no receipt, so the step names no
-            /// edge; when it changed more than once, only the last change is recorded. A step that
-            /// follows a replaced owner records the replacement's state.
+            /// edge. When it changed more than once, only the last change is recorded, and a step
+            /// that follows a replaced owner records the replacement's state.
             case unattributed
         }
 
         /// What the test did to produce this step.
         public let kind: Kind
         /// The identifier of the graph edge the owner's receipt names, or `nil` for a step that takes
-        /// no edge: the initial step, a reset, closure, a discard, or an unattributed change.
+        /// no edge, such as the initial step, a reset, closure, a discard, or an unattributed change.
         public let edge: String?
-        /// What took the edge, when the step went through one: an input, or an operation's success or failure.
+        /// What took the edge when the step went through one, either an input or an operation's
+        /// success or failure.
         public let trigger: StateMachineGraph.Trigger?
-        /// The phase the owner held before the step; for the initial step, the phase it holds.
+        /// The phase the owner held before the step, or for the initial step, the phase it holds.
         public let source: String
         /// The phase the owner holds after the step.
         public let phase: String
@@ -103,7 +104,7 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     /// A terminal outcome that a router or completion edge refused while `deliver` or `reconcile`
     /// prepared it, so the owner retained it for reconciliation.
     public struct CompletionRejection {
-        /// The call that prepared the outcome: ``Step/Kind/delivery`` or ``Step/Kind/reconciliation``.
+        /// The call that prepared the outcome, either ``Step/Kind/delivery`` or ``Step/Kind/reconciliation``.
         public let kind: Step.Kind
         /// The phase the owner held when it refused the outcome.
         public let phase: String
@@ -132,11 +133,14 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     /// in order, with the route the owner says refused it.
     public private(set) var rejections: [Rejection] = []
     /// Every terminal outcome whose router or completion edge refused it in a `deliver` or `reconcile`
-    /// call, in order, with the route that call's result names; a result that names no route, as one
-    /// that found the outcome already retained, records none.
+    /// call, in order, with the route that call's result names.
+    ///
+    /// A result that names no route, such as one that found the outcome already retained, records none.
     public private(set) var completionRejections: [CompletionRejection] = []
-    /// How many accepted changes the harness never observed, because `withOwner` made them before
-    /// the last change of its body; their snapshots were not checked against any invariant.
+    /// How many accepted changes the harness never observed because `withOwner` made them before the
+    /// last change of its body.
+    ///
+    /// Their snapshots were not checked against any invariant.
     public private(set) var unobservedChanges = 0
     /// How many times a `withOwner` body replaced the owner with another, so that ``history`` no
     /// longer describes one owner.
@@ -160,8 +164,10 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     /// The identifier of the phase the owner currently holds.
     public var phase: String { Owner.phase(of: owner.snapshot()) }
 
-    /// Whether the harness observed every change one owner accepted, so ``history`` holds every
-    /// accepted snapshot; `false` once `withOwner` made more than one change or replaced the owner.
+    /// Whether the harness observed every change one owner accepted so ``history`` holds every
+    /// accepted snapshot.
+    ///
+    /// Becomes `false` once `withOwner` makes more than one change or replaces the owner.
     public var isHistoryComplete: Bool { unobservedChanges == 0 && replacedOwners == 0 }
 
     /// The graph edges that this run exercised, in the order it first exercised them.
@@ -264,10 +270,10 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
     ///
     /// The owner reports no receipt to the harness, so a change it accepts inside `body` is recorded as
     /// an ``Step/Kind/unattributed`` step with no edge. When `body` makes several changes, the harness
-    /// sees only the last: each earlier one counts toward ``unobservedChanges``, the history is no longer
-    /// complete, and ``requireInvariants(fileID:filePath:line:column:)`` and
-    /// ``GraphCoverage/requireCoverage(excluding:includingRejectingRouters:fileID:filePath:line:column:)`` fail, because they can
-    /// no longer vouch for every accepted snapshot.
+    /// sees only the last. Each earlier one counts toward ``unobservedChanges``, the history is no
+    /// longer complete, and ``requireInvariants(fileID:filePath:line:column:)`` and
+    /// ``GraphCoverage/requireCoverage(excluding:includingRejectingRouters:fileID:filePath:line:column:)``
+    /// fail because they can no longer vouch for every accepted snapshot.
     ///
     /// The harness compares the owner `body` leaves with the one it lent. When `body` assigns another
     /// owner, even a fresh one with an equal model at the same revision, the harness counts it in
@@ -335,8 +341,8 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
 
     /// Ends the harness and returns the owner it drove.
     ///
-    /// The harness holds nothing of its own: every batch it has not handed to the test is still queued
-    /// in the owner, so the returned owner keeps all of its work.
+    /// The harness holds nothing of its own. Every batch it has not handed to the test is still
+    /// queued in the owner, so the returned owner keeps all of its work.
     public consuming func finish() -> Owner { owner }
 
     /// Records the change a call made, if the owner accepted one, with the edge its receipt names.
@@ -345,7 +351,7 @@ public struct ManualMachineTest<Owner: LocalStateMachine & ~Copyable>: ~Copyable
         guard after.revision > before.revision else { return }
         let changes = after.revision - before.revision
         // Revisions count acceptances, so a call that advanced it more than once made changes the
-        // harness never saw; only the last snapshot is available.
+        // harness never saw, leaving only the last snapshot available.
         if changes > 1 { unobservedChanges += Int(changes - 1) }
         let observed = receipt.flatMap { $0.snapshot.revision == after.revision ? $0 : nil }
         let edge = observed?.edgeID
@@ -442,8 +448,8 @@ extension ManualMachineTest where Owner: DrainingLocalStateMachine & ~Copyable {
 
     /// Transfers the one queued batch, or throws a failure when no batch or several are queued.
     ///
-    /// It counts the queued batches before it transfers any, so a failed expectation transfers
-    /// nothing: every batch stays queued in the owner for the next ``drainCommands(limit:)``,
+    /// It counts the queued batches before transferring any, so a failed expectation transfers
+    /// nothing and every batch stays queued in the owner for the next ``drainCommands(limit:)``,
     /// ``drainFlattenedCommands()``, or the owner ``finish()`` returns.
     public mutating func drainBatch(
         fileID: String = #fileID,

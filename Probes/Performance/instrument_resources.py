@@ -39,11 +39,11 @@ public final class RuntimeHostWeakProbe {
 
 
 def swift_tokens(text):
-    """Token offsets for task inventory; comments/strings never become constructors.
+    """Return token offsets for task inventory while skipping comments and strings.
 
-    This is a bounded lexical scanner, not a Swift semantic parser. Unknown Task
-    members/constructor spellings fail closed. Task-bearing string interpolation
-    is rejected rather than silently omitted.
+    This is a bounded lexical scanner rather than a Swift semantic parser. Unknown Task
+    members and constructor spellings fail closed, and Task-bearing string interpolation
+    raises an error rather than being silently omitted.
     """
     tokens = []
     i = 0
@@ -250,7 +250,7 @@ extension LatestMailbox {
 '''
 
 
-# Record preparation counts for each scheduling turn; reset between cohorts.
+# Record preparation counts for each scheduling turn and reset between cohorts.
 DELIVERY = '''
 public enum RuntimeDeliveryProbe {
     private static let storage = AtomicRecordStorage<[Int]>([])
@@ -291,12 +291,12 @@ def copy_resources(command, destination):
             for site, binding in zip(sites, ['let worker = ', 'let watcher = ']):
                 line = text[text.rfind('\n', 0, site['start']) + 1:site['start']].strip()
                 if line != binding.strip(): raise ValueError('Coordinator task role drift')
-            disposition = 'Outcome worker joined by exact watcher; Void watcher registered at assignment'
+            disposition = 'Outcome worker joined by exact watcher, with Void watcher registered at assignment'
             needle = '            entries[index].watcher = watcher'
             if text.count(needle) != 1: raise ValueError('Coordinator watcher patch drift')
             amended = text.replace(needle, needle + '\n            RuntimeCoordinatorTaskProbe.keep(watcher)') + REGISTRY
             patches.append({'file': original.name, 'watcherAssignments': 1,
-                            'registry': 'Retain task handles in an atomically replaced registry; drain and await each cohort until empty.'})
+                            'registry': 'Retain task handles in an atomically replaced registry, then drain and await each cohort until empty.'})
         elif original.name == 'RuntimeSharedHost.swift':
             disposition = 'all Void constructions registered and joined'
             amended = track(text, 10)
@@ -321,21 +321,21 @@ def copy_resources(command, destination):
         elif original.name in SEQUENCE_EXCLUSIONS:
             actual = {}
             for site in sites:
-                if site['generic']: raise ValueError('Sequence generic Task spelling changed; review exclusion')
+                if site['generic']: raise ValueError('Sequence generic Task spelling changed. Review exclusion')
                 actual[site['kind']] = actual.get(site['kind'], 0) + 1
             if actual != SEQUENCE_EXCLUSIONS[original.name]:
                 raise ValueError('Excluded sequence Task inventory drift: ' + original.name + ' ' + str(actual))
-            disposition = 'explicitly excluded: sequence and publisher tasks; the benchmark registers callbacks only'
+            disposition = 'explicitly excluded sequence and publisher tasks because the benchmark registers callbacks only'
             patches.append({'file': original.name, 'excludedTaskSites': len(sites), 'constructorKinds': actual,
                             'reason': disposition})
         elif original.name in CONFINED_EXCLUSIONS:
             actual = {}
             for site in sites:
-                if site['generic']: raise ValueError('Confined generic Task spelling changed; review exclusion')
+                if site['generic']: raise ValueError('Confined generic Task spelling changed. Review exclusion')
                 actual[site['kind']] = actual.get(site['kind'], 0) + 1
             if actual != CONFINED_EXCLUSIONS[original.name]:
                 raise ValueError('Excluded confined-host Task inventory drift: ' + original.name + ' ' + str(actual))
-            disposition = 'explicitly excluded: unused confined host; Shared/Local benchmark never instantiates it'
+            disposition = 'explicitly excluded unused confined host because the Shared/Local benchmark never instantiates it'
             patches.append({'file': original.name, 'excludedTaskSites': len(sites), 'constructorKinds': actual,
                             'reason': disposition})
         elif sites:

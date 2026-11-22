@@ -1,10 +1,10 @@
 """Build public package products and run a smoke app on an owned iOS Simulator.
 
 The default runtime is iOS 17.5. Pass --runtime and a compatible --device-type to run on
-another installed runtime; the app must report the selected runtime's version.
+another installed runtime. The app must report the selected runtime's version.
 
 The app writes Documents/result.json with a status, systemVersion, and named
-checks. Every expected check must pass; EXPECTED_CHECKS lists those of the default
+checks. Every expected check must pass. EXPECTED_CHECKS lists the checks in the default
 app source. The helper always deletes its own device.
 """
 import argparse
@@ -32,7 +32,7 @@ def digest(path):
 
 
 def validate_result(result, expected, version):
-    """Require success on the selected runtime: `version` is its major.minor, such as 17.5."""
+    """Require success on the selected runtime, where `version` is its major.minor (such as 17.5)."""
     reported = result.get("systemVersion", "")
     if result.get("status") != "pass" or not (reported == version or reported.startswith(version + ".")):
         raise ValueError(f"The app did not report success on iOS {version}: reported {reported!r}")
@@ -81,9 +81,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="Absent directory for the complete evidence")
     parser.add_argument("--source", type=Path, default=Path("Probes/iOSSmoke/Smoke.swift"))
     parser.add_argument("--expect", nargs="+", default=EXPECTED_CHECKS,
-                        help="Exact individual check identifiers; defaults to every check of the default app")
+                        help="Exact individual check identifiers (defaults to every check in the default app)")
     parser.add_argument("--configuration", choices=["debug", "release"], default="release")
-    parser.add_argument("--scratch-path", type=Path, help="SwiftPM build directory; the package is built before using its outputs")
+    parser.add_argument("--scratch-path", type=Path, help="SwiftPM build directory. Builds the package before using its outputs")
     parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.iOS-17-5")
     parser.add_argument("--device-type", default="com.apple.CoreSimulator.SimDeviceType.iPhone-15")
     parser.add_argument("--timeout", type=int, default=120, help="Maximum seconds for the app result")
@@ -123,7 +123,7 @@ def main():
         report["commands"].append({"name": name, "command": command, "exit": code, "log": str(log)})
         save()
         if code != 0:
-            raise RuntimeError(name + " failed (" + str(code) + "); see " + str(log))
+            raise RuntimeError(name + " failed (" + str(code) + "). See " + str(log))
         return output.strip()
 
     try:

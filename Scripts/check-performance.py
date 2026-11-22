@@ -60,7 +60,7 @@ class Evidence:
         self.commands.append(receipt)
         (self.directory / 'commands.json').write_text(json.dumps(self.commands, indent=2) + '\n')
         if timed_out or (code and not allow_failure):
-            raise RuntimeError(f'{name} failed (exit {code}, timeout {timed_out}); see {log}')
+            raise RuntimeError(f'{name} failed (exit {code}, timeout {timed_out}). See {log}')
         return log.read_text()
 
 
@@ -96,7 +96,7 @@ def summarize(row):
 
 
 def aggregate(samples):
-    """Keep each repetition; recursively report medians of corresponding scalar results."""
+    """Keep each repetition and recursively report medians of corresponding scalar results."""
     if not samples:
         return None
     if all(isinstance(v, dict) for v in samples):
@@ -176,8 +176,8 @@ def instrument(evidence, commands, sdk, shipping_modules, shipping_objects, plug
     modules = output / 'Modules'
     modules.mkdir()
     core = output / 'StateMachine.o'
-    # Preserve native semantic, target, SDK, warning, package and optimization options;
-    # redirect outputs/caches and emit one WMO object instead of per-file parallel output.
+    # Preserve native semantic, target, SDK, warning, package, and optimization options.
+    # Redirect outputs and caches, and emit one WMO object instead of per-file parallel output.
     arguments = commands['StateMachine']['otherArguments'][:]
     for flag in ['-num-threads', '-emit-objc-header-path', '-module-cache-path']:
         if flag in arguments:
@@ -236,13 +236,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='Fresh external evidence directory')
     parser.add_argument('--mode', choices=['full', 'control'], default='full')
-    parser.add_argument('--operations', type=int, help='Development control only; full is fixed at 10,000')
-    parser.add_argument('--control-payload-bytes', type=int, choices=[64, 65536], help='Development control only; choose one real matrix payload')
+    parser.add_argument('--operations', type=int, help='Development control only. Full mode fixes 10,000 operations')
+    parser.add_argument('--control-payload-bytes', type=int, choices=[64, 65536], help='Development control only. Choose one real matrix payload')
     parser.add_argument('--workloads', nargs='+', choices=['pt001', 'pt002', 'pt003', 'pt004', 'pt006', 'lock', 'resource'],
                         default=['pt001', 'pt002', 'pt003', 'pt004', 'pt006', 'lock', 'resource'])
-    parser.add_argument('--build-root', type=Path, help='Existing native Release bin path; build it before selecting its plan')
-    parser.add_argument('--reuse-build-root', type=Path, help='Development control only: skip package build with explicitly preliminary existing Release artifacts')
-    parser.add_argument('--scratch-path', type=Path, help='Independent SwiftPM scratch directory; defaults inside external output')
+    parser.add_argument('--build-root', type=Path, help='Existing native Release bin path. Build it before selecting its plan')
+    parser.add_argument('--reuse-build-root', type=Path, help='Development control only. Skip package build and reuse preliminary Release artifacts')
+    parser.add_argument('--scratch-path', type=Path, help='Independent SwiftPM scratch directory (defaults inside external output)')
     args = parser.parse_args()
     if args.mode == 'full' and (args.operations is not None or args.control_payload_bytes is not None or args.reuse_build_root):
         parser.error('Full mode fixes 10,000 operations and requires a current observed native build')
@@ -265,13 +265,13 @@ def main():
                               ('os', ['sw_vers']), ('hardware', ['sysctl', 'hw.model', 'hw.memsize', 'hw.ncpu', 'machdep.cpu.brand_string']),
                               ('git-head', ['git', 'rev-parse', '--verify', 'HEAD']), ('git-status', ['git', 'status', '--porcelain'])]:
             evidence.run('environment/' + name, command, timeout=120, allow_failure=name == 'git-head')
-        status['candidateIdentity'] = 'Used-source SHA-256 map; git HEAD is supplementary and may be absent in this uncommitted checkout.'
+        status['candidateIdentity'] = 'Used-source SHA-256 map. Git HEAD is supplementary and may be absent in this uncommitted checkout.'
         sdk = evidence.run('environment/sdk', ['xcrun', '--sdk', 'macosx', '--show-sdk-path'], timeout=120).strip()
         manifest_scratch = args.scratch_path.resolve() if args.scratch_path else (args.build_root.resolve().parent.parent if args.build_root else output / 'swiftpm')
         manifest = json.loads(evidence.run('environment/package', ['swift', 'package', '--scratch-path', manifest_scratch, 'dump-package'], timeout=120))
         if args.reuse_build_root:
             build_root = args.reuse_build_root.resolve()
-            status['limitations'].append('Development reuse: shipping source/object identity is not established by a fresh package build.')
+            status['limitations'].append('Development reuse leaves shipping source and object identity unestablished by a fresh package build.')
         else:
             scratch = args.scratch_path.resolve() if args.scratch_path else (args.build_root.resolve().parent.parent if args.build_root else output / 'swiftpm')
             status['nativeBuildScratch'] = {'path': str(scratch), 'existedBeforeBuild': scratch.exists()}
@@ -284,7 +284,7 @@ def main():
         executable = output / 'Performance'
         compile_consumer(evidence, 'build/consumer', executable, modules, plugin, objects, sdk)
         status['linkedBenchmark'] = {'path': str(executable), 'bytes': executable.stat().st_size, 'sha256': digest(executable),
-                                     'meaning': 'Representative linked macOS benchmark executable; not App Store/download/install size.'}
+                                     'meaning': 'Representative linked macOS benchmark executable, not App Store, download, or install size.'}
         dylib = output / 'libAllocationProbe.dylib'
         evidence.run('build/allocator', ['xcrun', 'clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fno-builtin', '-dynamiclib',
                                         FIXTURES / 'Allocator/probe.c', '-o', dylib])
@@ -373,7 +373,7 @@ def main():
                     save()
         final = identities()
         status['sourceIdentityUnchanged'] = final == initial
-        if final != initial: raise ValueError('Sources changed during measurement; samples are preliminary stale-source evidence')
+        if final != initial: raise ValueError('Sources changed during measurement. Samples are preliminary stale-source evidence')
         status['status'] = 'pass'
         status['artifactHashes'] = {str(p.relative_to(output)): digest(p) for p in [executable, dylib, *objects]}
         if instrumented: status['artifactHashes'][str(instrumented.relative_to(output))] = digest(instrumented)

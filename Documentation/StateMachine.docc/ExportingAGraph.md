@@ -3,13 +3,12 @@
 Read a schema's declared structure as data, and render it as a Mermaid or Graphviz diagram.
 
 Every schema generates a static `graph`, a ``StateMachineGraph`` that describes
-exactly the declarations the macro read: its data mode and the owners it
-generates, its phases, inputs, named scopes, operations, events, edges, and
-routers, in declaration order, with its initial, terminal, and restorable
-phases. It holds names and type spellings, never a payload, a ticket, an
-observation, or a reference to an owner, so it grants no authority. It is
-`Sendable`, `Hashable`, and `Codable`, so it can be compared, encoded, and
-rendered anywhere.
+the declarations the macro read. It records the data mode and generated owners,
+the phases, inputs, named scopes, operations, events, edges, and routers in
+declaration order, and the initial, terminal, and restorable phases. It holds
+names and type spellings, never a payload, a ticket, an observation, or a
+reference to an owner, so it grants no authority. It is `Sendable`, `Hashable`,
+and `Codable`, so it can be compared, encoded, and rendered anywhere.
 
 The encoded form records ``StateMachineGraph/formatVersion``, which is
 ``StateMachineGraph/currentFormatVersion`` for every graph the package creates.
@@ -21,9 +20,9 @@ package wrote. The mode and owners encode as their case names, such as
 ## Render a diagram
 
 `mermaid()` renders the phases and edges as a Mermaid `stateDiagram-v2`, and
-`dot()` as a Graphviz `digraph`. Both follow declaration order, so equal graphs
-render identical text, and a rendered diagram checked into a repository shows
-every structural change in review:
+`dot()` renders them as a Graphviz `digraph`. Both follow declaration order, so
+equal graphs render identical text, and a rendered diagram checked into a
+repository shows every structural change in review.
 
 ```swift
 import StateMachine
@@ -38,7 +37,7 @@ func printDiagrams() {
 `Sources/StateMachineExamples`. It loads a profile in `loading`, cancels back
 to `idle`, ends a load in `loaded` or `failed`, and retries or refreshes from
 those. Its `@Restoration` function can restore `idle`, `loaded`, and `failed`.
-`mermaid()` returns:
+Calling `mermaid()` produces this diagram.
 
 ```text
 stateDiagram-v2
@@ -73,12 +72,12 @@ terminal phase, because `loaded` and `failed` each have an edge out.
 
 `dot()` returns the same structure for Graphviz. Each phase is a node named
 `p0`, `p1`, and so on in declaration order and labeled with the phase's name, so
-no name is read as DOT syntax or meets the entry point, a point node named
-`entry`, which enters the initial phase, and with a dashed edge labeled
-`restored` each other restorable phase. Terminal phases have a double outline,
-and each edge is labeled with its function's name. A label escapes a quotation
-mark, a backslash, and `&`, one Unicode scalar at a time, and writes every line
-ending as a line break, so each renders as itself:
+no name is read as DOT syntax or collides with the entry point, a point node
+named `entry`. That entry node connects to the initial phase and, with a dashed
+edge labeled `restored`, to each other restorable phase. Terminal phases have a
+double outline, and each edge is labeled with its function's name. A label
+escapes quotation marks, backslashes, and `&`, one Unicode scalar at a time, and
+writes every line ending as a line break, so each renders as itself.
 
 ```text
 digraph "GeneratedProfile" {
@@ -121,17 +120,18 @@ where it may run, its admission policy, and its key, input, output, and failure
 type spellings, so an alias keeps its own name.
 ``StateMachineGraph/Operation/canFail`` and
 ``StateMachineGraph/Operation/canSucceed`` report whether each outcome can
-happen, as the macro reads the `Failure` and `Output` through the schema's own
-declarations; read them rather than interpreting a spelling.
+happen, as the macro reads `Failure` and `Output` through the schema's own
+declarations. Read those properties rather than interpreting a spelling.
 
-Each type spelling is the author's text: the tokens of the type as written, in
-order, with one space wherever whitespace, a line break, or a comment separated
-two of them, and nothing else. `@Initial case draft(Self.Draft)` exports
-`Self.Draft`, and `case run((@Sendable () -> Int))` exports
-`(@Sendable () -> Int)`. A spelling means what it means where it was written: a
-phase's payload inside the schema, an input case's payload inside `Input`, and
-an operation's or event's types inside its namespace. A type the namespace omits is spelled through the standard
-library's module, `Swift::Void` or `Swift::Never`, which no declaration shadows.
+Each type spelling preserves the author's text verbatim, keeping the type's
+tokens in order with one space wherever whitespace, a line break, or a comment
+separated two of them. `@Initial case draft(Self.Draft)` exports `Self.Draft`,
+and `case run((@Sendable () -> Int))` exports `(@Sendable () -> Int)`. Each
+spelling resolves in the scope where it was written, so a phase's payload
+resolves inside the schema, an input case's payload inside `Input`, and an
+operation's or event's types inside its namespace. A type the namespace omits is
+spelled through the standard library's module, `Swift::Void` or `Swift::Never`,
+which no declaration shadows.
 
 ```swift
 func describe(_ graph: StateMachineGraph) {

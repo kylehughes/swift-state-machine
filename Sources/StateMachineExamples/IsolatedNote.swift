@@ -2,7 +2,7 @@ import StateMachine
 
 /// A handwritten editor whose immutable value data is deliberately non-Sendable.
 nonisolated public enum IsolatedNote {
-    /// Independent draft data; copying its strings and tags cannot mutate an owner.
+    /// Independent draft data whose strings and tags cannot mutate an owner when copied.
     public struct Draft: ~Sendable {
         /// The note text.
         public let text: String
@@ -26,7 +26,7 @@ nonisolated public enum IsolatedNote {
         public let text: String
         /// The saved value-semantic tags.
         public let tags: [String]
-        /// Creates result data; completion authority is issued separately by committed work.
+        /// Creates result data without granting completion authority, which committed work issues separately.
         public init(text: String, tags: [String] = []) {
             self.text = text
             self.tags = tags
@@ -41,7 +41,9 @@ nonisolated public enum IsolatedNote {
     }
     /// A typed external storage failure.
     public enum SaveFailure: Error { case unavailable }
-    /// Synchronous domain or routing rejection; a plan defect travels inside `Prepared` to admission.
+    /// Synchronous domain or routing rejection.
+    ///
+    /// Any plan defect travels inside `Prepared` to admission.
     public enum PreparationRejection: Error {
         case emptyText
         case invalidPhase
@@ -198,7 +200,9 @@ nonisolated public enum IsolatedNote {
                 return project(admission)
             }
         }
-        /// Transfers whole batches; the caller releases mutable access before executing their work.
+        /// Transfers whole batches.
+        ///
+        /// Release mutable access before executing their work.
         public mutating func drainCommands(limit: Int = .max) -> [CommandBatch] {
             engine.drain(limit: limit).map { project($0) }
         }
@@ -263,7 +267,7 @@ nonisolated public enum IsolatedNote {
         /// Whether closure, transferred commands, execution, and delivery have settled.
         public var isQuiescent: Bool { engine.isQuiescent }
     }
-    /// A sole MainActor writer; its private raw host directly owns the value engine and ledger.
+    /// A sole `MainActor` writer whose private raw host directly owns the value engine and ledger.
     @MainActor public final class MainActorHost {
         private let host: RuntimeMainActorHost<Model, Draft, Completion, PreparationRejection>
         /// Creates a managed editor with fresh authority and immutable confined drivers.
@@ -285,7 +289,7 @@ nonisolated public enum IsolatedNote {
         }
         /// Copies a complete historical observation.
         public func snapshot() -> Snapshot { project(host.snapshot()) }
-        /// Prepares and admits synchronous input in one MainActor turn.
+        /// Prepares and admits synchronous input in one `MainActor` turn.
         public func send(_ input: Input) throws(PreparationRejection) -> CommitResult {
             let observation = snapshot()
             let prepared = try prepare(input, on: observation)
@@ -315,7 +319,7 @@ nonisolated public enum IsolatedNote {
         ) throws(SubscriptionFailure) -> SnapshotSequence<Projection> {
             try host.sendableSnapshots { transform(project($0)) }
         }
-        /// Reads immutable first-outcome records; the owner delivers its own work's outcomes.
+        /// Reads immutable first-outcome records for work whose outcomes the owner delivers.
         public func pendingCompletions() -> [Ledger.Pending] { host.pendingCompletions() }
         /// Explicitly claims a fresh attempt for a retained result.
         public func reconcile(id: RuntimePendingID) -> ReconcileResult { reconciled(host.reconcile(id: id)) }
@@ -331,7 +335,7 @@ nonisolated public enum IsolatedNote {
         /// Closes, then joins all physical and retained obligations or stops waiting at `deadline`.
         ///
         /// A timeout reports the obligations observed in the main-actor turn that found the deadline
-        /// expired; the owner stays closed and that work stays tracked.
+        /// expired, while the owner stays closed and that work stays tracked.
         @discardableResult
         public func shutdown(deadline: ContinuousClock.Instant? = nil) async -> ShutdownResult {
             await host.shutdown(deadline: deadline).map { .timedOut($0) } ?? .quiescent
@@ -349,7 +353,7 @@ nonisolated public enum IsolatedNote {
     public enum ShutdownResult: Equatable, Sendable {
         /// Every execution, delivery, and preparation obligation settled.
         case quiescent
-        /// The deadline passed first; the diagnostics describe what was still outstanding.
+        /// The deadline passed first, and the diagnostics describe what was still outstanding.
         case timedOut(ShutdownDiagnostics)
     }
     /// The decision `deliver` made about one terminal result.
@@ -401,7 +405,9 @@ nonisolated public enum IsolatedNote {
         }
         return Prepared(candidate: Engine.propose(on: observation.stamp, next: next, plan: plan))
     }
-    /// The lower-guarantee engine type; live facade instances remain private.
+    /// The lower-guarantee engine type.
+    ///
+    /// Live facade instances remain private.
     public typealias Engine = RuntimeState<Model, Draft>
     /// The lower-guarantee delivery algorithm, never a live facade handle.
     public typealias Ledger = RuntimeDeliveryLedger<Model, Draft, Completion, PreparationRejection>
@@ -442,7 +448,7 @@ nonisolated public enum IsolatedNote {
         case .notPending: .notPending
         }
     }
-    // The raw host reports only the cases each operation can produce; the rest cannot occur.
+    // The raw host reports only the cases each operation can produce, so the rest cannot occur.
     private static func reconciled(_ delivery: RuntimeHostDelivery<Model, Draft>) -> ReconcileResult {
         switch delivery {
         case .committed(let stamp): .committed(Receipt(snapshot: project(stamp)))

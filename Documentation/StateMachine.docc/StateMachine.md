@@ -4,26 +4,26 @@ Declare a typed graph of phases, own its transitions, and manage the asynchronou
 
 State Machine models a workflow as a graph of phases and generates a typed Swift
 API for it. Each phase holds its own data and exposes only the transitions
-declared from it. `import StateMachine` is the only import a graph needs: the
-macros that declare it, the generated owners' runtime types, and `Change` and
-`Advance` all live in this module.
+declared from it. A graph needs only `import StateMachine`, because the macros
+that declare it, the generated owners' runtime types, and `Change` and `Advance`
+all live in this module.
 
 State Machine separates model data from the authority to change a workflow. A
 consuming edge transfers ownership of its phase. A hosted edge prepares a
-proposal from an observation; the host checks that observation again when it
+proposal from an observation, and the host checks that observation again when it
 commits the proposal. Constructing a model value does not grant either kind of
 authority. Domain code decides whether a transition is valid and which inert
 effects it describes. The runtime decides whether a hosted proposal, or the
 result of work a transition started, still has authority to change the model.
 
-Start with <doc:DeclaringAGraph>, which builds a graph one declaration at a
-time and explains the structural checks every graph passes. <doc:HostingAGraph>
-chooses an owner and drives it, <doc:ObservingState> reads its snapshots as they
-change, and <doc:RunningEffectsYourself> executes the work of `Owned` and
-`Local` owners by hand. <doc:Persistence> restores saved data into a graph, and
-<doc:TestingAGraph> tests each part of it with the companion
-`StateMachineTesting` library. The raw runtime that generated owners rely on is
-advanced material at the end.
+Start with <doc:DeclaringAGraph> to build a graph one declaration at a time and
+learn the structural checks every graph passes. Next, read <doc:HostingAGraph>
+to choose and drive an owner, <doc:ObservingState> to read snapshots as they
+change, and <doc:RunningEffectsYourself> to execute `Owned` and `Local` work by
+hand. <doc:Persistence> covers restoring saved data into a graph, and
+<doc:TestingAGraph> walks through testing each part with the companion
+`StateMachineTesting` library. The raw runtime that generated owners rely on
+appears in the advanced topics at the end.
 
 ## Topics
 

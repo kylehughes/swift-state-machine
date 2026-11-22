@@ -3,21 +3,21 @@ import os
 
 /// Hands each started call to the test that awaits it, in start order.
 ///
-/// A wait may accept only the calls that match a predicate, such as one key's calls; a call that no
-/// waiting test accepts is kept until a wait that accepts it. A test whose task is cancelled while it
-/// waits receives `nil` and leaves later calls for the next wait.
+/// A wait may accept only the calls that match a predicate, such as one key's calls, while any call
+/// that no waiting test accepts stays queued until a matching wait arrives. A test whose task is
+/// cancelled while it waits receives `nil` and leaves later calls for the next wait.
 ///
 /// Predicates are test code, such as a key's equality, so they run outside the queue's lock. Matching
-/// still happens in one order: each started call and each new wait is an arrival, and one matcher at a
-/// time takes the arrivals in the order they happened, so a call goes to the oldest waiting test that
-/// accepts it and a wait receives the oldest unclaimed call it accepts, exactly as if every arrival
-/// were matched the moment it happened. Whichever offer or wait finds no matcher running becomes the
-/// matcher, and it stops once no arrival is left.
+/// still happens in one order. Each started call and each new wait is recorded as an arrival, and one
+/// matcher at a time processes arrivals in the order they happened, so a call goes to the oldest
+/// waiting test that accepts it and a wait receives the oldest unclaimed call it accepts, as if every
+/// arrival were matched the moment it happened. Whichever offer or wait finds no matcher running
+/// becomes the matcher and stops once no arrival is left.
 ///
 /// A match records the call as the wait's answer under the lock, and the continuation only wakes the
 /// wait, which takes its answer under the lock once it resumes. The Swift runtime does not report to
-/// the thread sanitizer the ordering of a continuation resumed before its task suspends, so a call
-/// carried in that resumption would look unsynchronized with the thread that started it; the lock
+/// Thread Sanitizer the ordering of a continuation resumed before its task suspends, so a call
+/// carried in that resumption would look unsynchronized with the thread that started it. The lock
 /// orders the two in a way the sanitizer observes.
 nonisolated package final class CallQueue<Call: Sendable>: Sendable {
     private struct Waiter: Sendable {
@@ -57,11 +57,11 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
     private struct State: Sendable {
         /// Every started call no wait has claimed, by identifier.
         var calls: [UInt64: Call] = [:]
-        /// The matched calls that no wait accepted, in start order; a claimed one is skipped.
+        /// The matched calls that no wait accepted in start order, skipping any already claimed.
         var unclaimed = ArrivalQueue<UInt64>()
         /// Every wait that has not ended.
         var waits: [UInt64: Wait] = [:]
-        /// The matched waits that no call answered, in registration order; an ended one is skipped.
+        /// The matched waits that no call answered in registration order, skipping any already ended.
         var unanswered = ArrivalQueue<UInt64>()
         /// The arrivals the matcher has not taken, oldest first.
         var arrivals = ArrivalQueue<Arrival>()
@@ -133,8 +133,8 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
         if matches { match() }
     }
 
-    /// The oldest call that `accepts` matches, or the oldest call when it is `nil`, that no test has
-    /// taken, once one has started; `nil` if the waiting task is cancelled.
+    /// Returns the oldest unclaimed call that `accepts` matches (or the oldest unclaimed call when
+    /// `accepts` is `nil`) once one has started, or `nil` if the waiting task is cancelled.
     package func next(where accepts: (@Sendable (Call) -> Bool)? = nil) async -> Call? {
         let id = state.withLock { state -> UInt64 in
             state.nextWait += 1
@@ -145,7 +145,7 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let matches = state.withLock { state -> Bool? in
                     guard case .registering = state.waits[id] else {
-                        // Cancelled first: the wait ends without arriving.
+                        // Cancelled first, so the wait ends without arriving.
                         state.waits[id] = nil
                         return nil
                     }
@@ -168,14 +168,14 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
                 case .waiting(let waiter)?:
                     state.waits[id] = nil
                     return waiter
-                // Answered or already ended: the first outcome stands.
+                // Answered or already ended, so the first outcome stands.
                 case .answered?, .cancelledWhileRegistering?, nil: return nil
                 }
             }
             waiter?.continuation.resume()
         }
-        // A match left the wait's call in its entry; a cancellation removed the entry. A wait that
-        // ended unanswered stays queued until the waits that ended so outnumber the live ones.
+        // A match left the wait's call in its entry, while a cancellation removed the entry. A wait
+        // that ended unanswered stays queued until ended waits outnumber live ones.
         let outcome = state.withLock { state in
             let outcome = state.waits.removeValue(forKey: id)
             var unanswered = exchange(&state.unanswered, with: ArrivalQueue())
@@ -205,9 +205,9 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
 
     /// Hands a started call to the oldest matched wait that accepts it, or leaves it unclaimed.
     ///
-    /// Only the matcher claims, so the call stays unclaimed while its predicates run; a candidate wait
-    /// can only end by cancellation, and the call then goes to the next one. The candidates end at the
-    /// oldest wait that accepts every call, which needs no predicate.
+    /// Only the matcher claims, so the call stays unclaimed while its predicates run. A candidate
+    /// wait can end only by cancellation, in which case the call goes to the next one. The candidates
+    /// end at the oldest wait that accepts every call, which needs no predicate.
     private func matchCall(_ id: UInt64) {
         // A candidate that accepted the call but ended meanwhile lets a later wait, beyond the oldest
         // that accepts every call, take it, so the candidates are read again.
@@ -254,7 +254,7 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
     ///
     /// A wait that accepts every call takes the oldest unclaimed one under the lock. Otherwise only the
     /// matcher claims, so every unclaimed call stays available while the predicate runs outside the
-    /// lock; the wait can only end by cancellation.
+    /// lock, and the wait can end only by cancellation.
     private func matchWait(_ id: UInt64) {
         let found = state.withLock { state -> Found in
             guard case .waiting(let waiter) = state.waits[id] else {
@@ -305,8 +305,8 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
 
 /// Records that the host cancelled one driver call's task, and wakes the tests waiting for it.
 ///
-/// Each wait ends with whichever happens first: the driver call's cancellation, which answers `true`,
-/// or the cancellation of the waiting task, which answers `false`. Every wait's progress lives under
+/// Each wait ends with whichever happens first, either the driver call's cancellation (answering
+/// `true`) or cancellation of the waiting task (answering `false`). Every wait's progress lives under
 /// the signal's one lock, and each of those events decides the answers it settles inside that lock,
 /// so whichever reaches the lock first is the answer, and a wait that had begun when ``isCancelled``
 /// reads `true` has already been answered `true`. Suspended waits are resumed after the lock is
@@ -314,8 +314,8 @@ nonisolated package final class CallQueue<Call: Sendable>: Sendable {
 ///
 /// A wait begins once it has armed its task's cancellation handler and registered. A wait whose task
 /// is cancelled before it begins answers `false`, as a wait for a call does, even when the driver
-/// call's cancellation also came before it began; otherwise a wait that begins after the driver
-/// call's cancellation answers `true` at once, whatever its task does afterward.
+/// call's cancellation also came before it began. Otherwise a wait that begins after the driver
+/// call's cancellation answers `true` at once regardless of what its task does afterward.
 nonisolated package final class CancellationSignal: Sendable {
     /// Where one wait is between its arrival and its answer.
     private enum Wait: Sendable {
@@ -356,8 +356,9 @@ nonisolated package final class CancellationSignal: Sendable {
     /// Whether the driver call's task has been cancelled.
     package var isCancelled: Bool { state.withLock { $0.cancelled } }
 
-    /// Records the cancellation and answers every wait that has begun; called from the driver task's
-    /// cancellation handler.
+    /// Records the cancellation and answers every wait that has begun.
+    ///
+    /// Called from the driver task's cancellation handler.
     package func cancel() {
         let suspended = state.withLock { state -> [CheckedContinuation<Bool, Never>] in
             guard !state.cancelled else { return [] }
@@ -415,7 +416,7 @@ nonisolated package final class CancellationSignal: Sendable {
                 case .suspended(let continuation)?:
                     state.waits[id] = nil
                     return continuation
-                // Answered already: the first answer stands.
+                // Answered already, so the first answer stands.
                 case .answered?, nil: return nil
                 }
             }
@@ -427,7 +428,7 @@ nonisolated package final class CancellationSignal: Sendable {
 /// The result a test chooses for one driver call, which the suspended driver returns.
 ///
 /// The test stores the result under the lock and the continuation only wakes the driver, which takes
-/// the result under the lock once it resumes, so the thread sanitizer observes the hand-off also when
+/// the result under the lock once it resumes, so Thread Sanitizer observes the hand-off even when
 /// the test chooses the result before the driver suspends, as ``CallQueue`` explains.
 nonisolated package final class ResultSlot<Output: Sendable, Failure: Error>: Sendable {
     private struct State: Sendable {
@@ -444,7 +445,9 @@ nonisolated package final class ResultSlot<Output: Sendable, Failure: Error>: Se
     /// Whether the test has chosen the result.
     package var isFinished: Bool { state.withLock { $0.finished } }
 
-    /// Suspends the driver until the test chooses its result; cancellation does not end the wait.
+    /// Suspends the driver until the test chooses its result.
+    ///
+    /// Cancellation does not end the wait.
     package func wait(afterInstalling started: @Sendable () -> Void) async -> Result<Output, Failure> {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let ready = state.withLock { state -> Bool in

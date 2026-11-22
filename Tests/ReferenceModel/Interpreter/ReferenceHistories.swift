@@ -159,8 +159,9 @@ struct ReferenceTraceStep: Equatable, Sendable {
     let command: ReferenceCommand
     let response: ReferenceResponse
 }
-/// Fixed LCG parameters make seeds portable; wrapping is confined to test generation,
-/// never used for authoritative revisions or identities.
+/// Fixed LCG parameters make seeds portable.
+///
+/// Wrapping is confined to test generation and never used for authoritative revisions or identities.
 enum ReferenceTraceGenerator {
     static func commands(seed: UInt64, count: Int = 100) -> [ReferenceCommand] {
         var value = seed

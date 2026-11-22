@@ -14,7 +14,7 @@ static void report(const char *phase,probe_stats s) {
  printf("%s events=%llu bytes=%llu live=%llu live_bytes=%llu peak=%llu dropped=%llu\n",phase,s.events,s.requested_bytes,s.live_blocks,s.live_requested_bytes,s.peak_live_blocks,s.dropped_records);
 }
 int main(void) {
- // Warm pthread creation outside measurement; synchronization bookkeeping remains visible in concurrent result.
+ // Warm pthread creation outside measurement. Synchronization bookkeeping remains visible in the concurrent result.
  pthread_t threads[4];
  for(size_t i=0;i<4;i++) pthread_create(&threads[i],NULL,worker,(void*)i);
  for(size_t i=0;i<4;i++) pthread_join(threads[i],NULL);

@@ -39,7 +39,7 @@ def run(name, args, expected=0, location=None, pattern=None):
     (OUT / 'results.json').write_text(json.dumps(records, indent=2) + '\n')
     if not passed:
         print(output)
-        raise SystemExit(f'{name}: unexpected outcome; see {OUT}')
+        raise SystemExit(f'{name}: unexpected outcome. See {OUT}')
     return output
 
 run('toolchain', ['xcrun', 'swift', '--version'])
@@ -109,4 +109,4 @@ files += list(DIST.glob('*.swiftinterface')) + list(OUT.glob('*.log'))
 files += [OUT / 'results.json', OUT / 'Package.resolved', OUT / 'distribution-positive.o']
 hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 (OUT / 'hashes.json').write_text(json.dumps(hashes, indent=2) + '\n')
-print(f'G0-P04 {CONFIGURATION} passed: external consumer built and ran; binary and interface-only external imports passed controls and seven intended negative object-compilation checks each.')
+print(f'G0-P04 {CONFIGURATION} passed. External consumer built and ran, and binary and interface-only external imports passed controls and seven intended negative object-compilation checks each.')

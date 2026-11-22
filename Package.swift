@@ -62,7 +62,7 @@ let package = Package(
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
         .target(name: "StateMachineUI", dependencies: ["StateMachine"], swiftSettings: [.treatAllWarnings(as: .error)]),
-        // Test helpers that drive real owners; they link no test framework, so an app can import them too.
+        // Test helpers that drive real owners without linking a test framework, so an app can import them.
         .target(
             name: "StateMachineTesting",
             dependencies: ["StateMachine"],
@@ -73,7 +73,7 @@ let package = Package(
             dependencies: ["StateMachine", "StateMachineExamples", "StateMachineTesting"],
             swiftSettings: [.treatAllWarnings(as: .error)]
         ),
-        // Example graphs for the tests and probes; no product publishes them.
+        // Example graphs for tests and probes. No product publishes them.
         .target(
             name: "StateMachineExamples",
             dependencies: ["StateMachine", "StateMachineUI"],

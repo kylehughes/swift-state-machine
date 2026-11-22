@@ -2,7 +2,7 @@ import SwiftDiagnostics
 import SwiftParser
 import SwiftSyntax
 
-/// The lexical schema consumed by generation; semantic type relationships are compiler witnesses.
+/// The lexical schema consumed by generation, leaving semantic type relationships to compiler witnesses.
 struct Schema {
     struct Phase {
         let caseName: String
@@ -65,7 +65,7 @@ struct Schema {
             case input
             case success
             case failure
-            /// A direct call on an owned phase, in an `.ownedOnly` schema; the name is the function's.
+            /// A direct call on an owned phase in an `.ownedOnly` schema, named after the function.
             case direct
         }
 
@@ -103,8 +103,8 @@ struct Schema {
         let inputType: String
         /// The declared output spelling, `Swift::Void` when the namespace declares no `Output` alias.
         let outputType: String
-        /// The declared failure spelling as the author wrote it, `Swift::Never` when the namespace
-        /// declares no `Failure` alias; ``isInfallible`` says whether it names the standard library's `Never`.
+        /// The declared failure spelling as the author wrote it, or `Swift::Never` when the namespace
+        /// declares no `Failure` alias. ``isInfallible`` reports whether it names the standard library's `Never`.
         let failureType: String
         /// Whether the namespace declares an `Input` alias.
         let declaresInput: Bool
@@ -128,17 +128,19 @@ struct Schema {
         /// Whether the operation's `Output` names the standard library's `Never`, so it never succeeds
         /// and has no success edge or router.
         let neverSucceeds: Bool
-        /// Whether the macro confirms that the `Input` is a function type, so a driver receives it
-        /// `@escaping` and can keep it; otherwise a driver receives it as it is.
+        /// Whether the macro confirms that `Input` is a function type so a driver receives it `@escaping`
+        /// and can keep it.
+        ///
+        /// Otherwise a driver receives it as it is.
         var inputEscapes = false
 
         /// The primary scope's key: the named case, or a private key that no authored reference can spell.
         var scopeKey: String { scope ?? "\(name).self" }
-        /// The input type as generated code spells it; an undeclared alias is never referenced.
+        /// The input type as generated code spells it, without referencing undeclared aliases.
         var input: String { declaresInput ? "\(name).Input" : "Swift::Void" }
-        /// The output type as generated code spells it; an undeclared alias is never referenced.
+        /// The output type as generated code spells it, without referencing undeclared aliases.
         var output: String { declaresOutput ? "\(name).Output" : "Swift::Void" }
-        /// The failure type as generated code spells it; an undeclared alias is never referenced.
+        /// The failure type as generated code spells it, without referencing undeclared aliases.
         var failure: String { declaresFailure ? "\(name).Failure" : "Swift::Never" }
         /// Whether the operation declares a `Key`, so admission applies its policy to each key.
         var isKeyed: Bool { keyType != nil }
@@ -165,8 +167,9 @@ struct Schema {
         let payloadType: String
         /// Whether the namespace declares a `Payload` alias.
         let declaresPayload: Bool
-        /// Whether the event carries a payload, so its effect case, command, and handler take one; a
-        /// schema that declares its own `Void` type keeps a payload of that type.
+        /// Whether the event carries a payload, so its effect case, command, and handler take one.
+        ///
+        /// A schema that declares its own `Void` type keeps a payload of that type.
         let takesPayload: Bool
 
         /// The payload type as generated code spells it inside the schema.
@@ -178,7 +181,7 @@ struct Schema {
     struct Transition {
         /// How the authored function spells its result.
         enum Shape {
-            /// The destination payload itself; the edge starts nothing.
+            /// The destination payload itself, when the edge starts nothing.
             case destination
             /// `Change<Destination, Effect.Edge>`.
             case change
@@ -200,9 +203,10 @@ struct Schema {
         var payloadType: String?
         /// The passing convention generated parameters repeat for the payload, such as `@escaping `, or empty.
         var payloadConvention = ""
-        /// The ownership the authored parameter declares for the payload as spelled, `borrowing `,
-        /// `consuming `, `__shared `, or `__owned `, or empty; generated parameters that pass the payload on
-        /// once repeat it.
+        /// The ownership the authored parameter declares for the payload as spelled (`borrowing `,
+        /// `consuming `, `__shared `, `__owned `, or empty).
+        ///
+        /// Generated parameters that pass the payload on once repeat it.
         var payloadOwnership = ""
         /// The authored source parameter type, or `nil` for a transition that lists its sources in `from:`.
         let sourceType: String?
@@ -312,7 +316,7 @@ struct Schema {
     /// resolves in every generated owner.
     let initialDefault: String?
     let scopes: [String]
-    /// The phases each `Scope` case marked `@Active(in:)` lists; an unmarked case spans every phase.
+    /// The phases each `Scope` case marked `@Active(in:)` lists, defaulting to every phase when unmarked.
     let scopeActiveIn: [String: [String]]
     let phases: [Phase]
     let inputs: [Case]
@@ -342,8 +346,10 @@ struct Schema {
     /// The checks the expansion makes of the conclusions the macro drew from readings it cannot
     /// confirm, in declaration order.
     var typeChecks: [TypeCheck] = []
-    /// The ``tables`` of the schema, computed once when first read; replacing the transitions or the routes
-    /// replaces the memo, so a copy that changes them never reads another's.
+    /// The ``tables`` of the schema, computed once when first read.
+    ///
+    /// Replacing the transitions or routes replaces the memo, so a copy that changes them never reads
+    /// another's.
     var tablesMemo = TablesMemo()
     /// Where the parser's drafts of the schema, the schema, and every copy of it count their ``work``.
     var workCounter = WorkCounter()
@@ -574,7 +580,7 @@ extension Schema {
     struct Work: Equatable {
         /// The triggers functions found by name, an `Input` case or an operation, each looked up in a table.
         var triggersFound = 0
-        /// The inputs and operations searches compared to find one by name or effect; only diagnostics search.
+        /// The inputs and operations compared during diagnostic searches by name or effect.
         var triggersScanned = 0
         /// The ``Tables`` built, and the phases, scopes, operations, events, edges, and routers they read.
         var tablesBuilt = 0
@@ -738,8 +744,10 @@ enum TypeQualifier {
             }
     }
 
-    /// Whether name lookup resolves the reference: a type anywhere outside an attribute, or the name
-    /// of a custom attribute; an attribute's arguments and a built-in attribute's name are not.
+    /// Whether name lookup resolves the reference, covering a type outside an attribute or the name of
+    /// a custom attribute.
+    ///
+    /// An attribute's arguments and a built-in attribute's name are not resolved.
     private static func resolvesByLookup(_ reference: IdentifierTypeSyntax) -> Bool {
         var node = reference.parent
         var child = Syntax(reference)
@@ -1219,7 +1227,7 @@ private struct SchemaParser {
                 var defaultValue: String?
                 if let parameter = parameters?.first {
                     let defaultable = element.name.unescaped == initial
-                    // A payload is a value of its type; Swift gives a case's payload no passing convention.
+                    // A payload is a value of its type, and Swift gives a case's payload no passing convention.
                     if let modifier = parameter.modifiers.first {
                         try reject(modifier, "Declare the payload as its type alone, without modifiers.")
                     }
@@ -1248,9 +1256,8 @@ private struct SchemaParser {
                 result.append(
                     Schema.Case(
                         caseName: element.name.unescaped,
-                        // The spelling is the author's, and means what it means inside this enum, where
-                        // Swift resolves it, members of the enum's extensions included; generated code
-                        // never repeats it elsewhere.
+                        // The spelling is the author's and resolves inside this enum (including members
+                        // declared in extensions). Generated code never repeats it elsewhere.
                         payloadType: parameters?.first.map { Schema.displaySpelling($0.type) },
                         payload: parameters?.first?.type,
                         defaultValue: defaultValue
@@ -1585,8 +1592,8 @@ private struct SchemaParser {
                 "Mark exactly one phase case with @Initial."
             )
         }
-        // A name in a body may be written in any normalization form; one that is not composed has the bytes
-        // of no name a generated alias takes, so it is left out, and every comparison with the set is exact.
+        // A name in a body may be written in any normalization form. One that is not composed has the bytes
+        // of no name a generated alias takes, so it is left out and every comparison with the set is exact.
         let authoredIdentifiers = Set(
             declaration.tokens(viewMode: .sourceAccurate)
                 .compactMap { token -> String? in
@@ -1611,8 +1618,8 @@ private struct SchemaParser {
                 declaredNames.append(name)
             } else if let value = member.decl.as(FunctionDeclSyntax.self) {
                 // Beside the generated `static let graph`, only a synchronous static method without
-                // parameters is the same declaration; an instance method, an `async` one, or one that
-                // takes arguments is another, as Swift's redeclaration rules have it.
+                // parameters is the same declaration. An instance method, an `async` one, or one that
+                // takes arguments is a separate declaration under Swift's redeclaration rules.
                 let name = value.name.lookupName
                 let redeclaresGraph =
                     isStatic(value.modifiers) && value.signature.parameterClause.parameters.isEmpty
@@ -1699,7 +1706,7 @@ private struct SchemaParser {
             )
         }
         let inputs = try inputEnum.map { try cases($0, payloads: 0 ... 1) } ?? []
-        // A noncopyable model is held only by `Owned`; every other owner publishes snapshots of it, which
+        // A noncopyable model is held only by `Owned`, because every other owner publishes snapshots that
         // copy its phases.
         if suppressesCopyable(declaration), let keeper = owners.first(where: { $0 != .owned }) {
             try reject(
@@ -1707,8 +1714,8 @@ private struct SchemaParser {
                 "The schema is noncopyable, which only Owned supports: '.\(keeper.rawValue)' publishes snapshots that copy its phases; list only .owned in owners:, or make the schema and its phases copyable."
             )
         }
-        // A noncopyable input is passed on once, by an `Owned` verb; every other owner keeps the input it
-        // routes until a transition accepts it, which copies it.
+        // A noncopyable input is passed on once by an `Owned` verb, because every other owner keeps the
+        // input it routes until a transition accepts it, which copies it.
         if let inputEnum, suppressesCopyable(inputEnum), let keeper = owners.first(where: { $0 != .owned }) {
             try reject(
                 inputEnum.name,
@@ -1903,8 +1910,8 @@ private struct SchemaParser {
                 guard !reading.isConfirmedNever else { try reject(alias.initializer.value, message) }
                 check(.isNotNever(message: message), name)
             }
-            // An outcome happens unless the macro confirms its type is `Never`; with an unconfirmed reading,
-            // the author's edges and routers say whether it happens, and the expansion checks the type.
+            // An outcome happens unless the macro confirms its type is `Never`. With an unconfirmed reading,
+            // the author's edges and routers indicate whether it happens, and the expansion checks the type.
             let output = readings["Output"]
             let failure = readings["Failure"]
             let neverSucceeds: Bool
@@ -1927,8 +1934,8 @@ private struct SchemaParser {
             } else {
                 isInfallible = true
             }
-            // A success carries no value when the macro confirms the output is `Void`; with an unconfirmed
-            // reading, when no success edge or router takes an output parameter.
+            // A success carries no value when the macro confirms the output is `Void`, or with an unconfirmed
+            // reading when no success edge or router takes an output parameter.
             let producesVoid: Bool
             if let output, !output.confirmsShape {
                 producesVoid = !authored.takesOutput
@@ -2051,8 +2058,8 @@ private struct SchemaParser {
             let eventScope = typeScopes.memberScope(namespace.name.unescaped) ?? LexicalScopes.schema
             let reading = try payload.map { try read($0, in: eventScope, typeScopes) }
             // An effect that carries `Never` can never be constructed, so no transition could emit the event.
-            // A payload read as `Void` is omitted, which is checked; any other reading the macro cannot
-            // confirm is carried, and checked not to be `Never` with the message that rejects one.
+            // A payload read as `Void` is omitted and checked. Any other reading the macro cannot confirm is
+            // carried and checked not to be `Never` with the message that rejects one.
             if let alias = aliases.first, let reading, !reading.confirmsValues || reading.isNever {
                 let message =
                     "Event '\(namespace.name.unescaped)' carries Never, so no transition can emit it; declare a payload type that has values, or remove the event."
@@ -2115,7 +2122,7 @@ private struct SchemaParser {
         var routeResults: [Int: TypeSyntax] = [:]
         /// The authored functions, by position, for diagnostics that need every edge.
         var functions: [Int: FunctionDeclSyntax] = [:]
-        // An edge's name is unique among the edges and routers that leave one phase; the same name may
+        // An edge's name is unique among the edges and routers that leave one phase. The same name may
         // leave several phases, as Swift overloads on the source payload.
         var phasesByName: [String: Set<String>] = [:]
         let edgeFunctionNames = Set(
@@ -2202,8 +2209,8 @@ private struct SchemaParser {
             let needsPayload = (operation != nil && !omitsOutput) || input?.payloadType != nil
             let outcome = on.kind == .failure ? "failure" : "output"
             // A completion edge or router takes its operation's request in the parameter labeled
-            // `request:`, after every other parameter, and no other function takes one: the label, not
-            // the parameter's type, says which parameter is the request.
+            // `request:`, after every other parameter, and no other function takes one. The label
+            // identifies the request parameter regardless of its type.
             let requestPosition = parameters.firstIndex(where: Self.takesRequest)
             if let requestPosition {
                 let labeled = parameters[requestPosition]
@@ -2372,7 +2379,7 @@ private struct SchemaParser {
             // A payload of an `.isolated` schema need not be `Sendable`, so generated code hands it to a
             // `sending` parameter as it is only from a value it holds alone and uses once. An observing
             // owner keeps an input it receives and each outcome until a transition accepts it, so there
-            // the expansion requires the type to be `Sendable`, which a value of it can be shared as; an
+            // the expansion requires the type to be `Sendable`, which a value of it can be shared as. An
             // `Owned` router's reuse is decided once its candidates are known.
             let observing = owners.contains { $0 != .owned }
             if mode == .isolated, let payload, payload.convention.contains("sending"), observing {
@@ -2395,7 +2402,7 @@ private struct SchemaParser {
             {
                 checks.require(.isSendable, at: operation.request)
             }
-            // A transition becomes a method of each phase wrapper the owners use; a router's methods
+            // A transition becomes a method of each phase wrapper the owners use. A router's methods
             // exist only once it has edges to choose, which is checked after every edge is known.
             if !isRoute {
                 let owned = (payloadType == nil ? [] : ["_"]) + (requestType == nil ? [] : ["request"])
@@ -2693,13 +2700,13 @@ private struct SchemaParser {
         // to the router and then passes them to the edge it selects, so what an edge may send there is
         // decided by every value the router joins, measured against Swift's region checker:
         //
-        // - a value the router takes as `sending` and an edge then takes must be `Sendable`;
-        // - a value one edge takes as `sending` and another takes without must be `Sendable`, because
-        //   the method keeps the value it may give away;
-        // - a value an edge takes as `sending` that the router reads without it joins the source phase
-        //   and every other value the router reads that way, so the value, or each of those, must be
-        //   `Sendable`; another value is exempt when the method receives it as `sending`, because some
-        //   function of the group sends it, and that edge leaves it out.
+        // - A value the router takes as `sending` and an edge then takes must be `Sendable`.
+        // - A value one edge takes as `sending` and another takes without must be `Sendable`, because
+        //   the method keeps the value it may give away.
+        // - A value an edge takes as `sending` that the router reads without it joins the source phase
+        //   and every other value the router reads that way, so the value or each of those must be
+        //   `Sendable`. Another value is exempt when the method receives it as `sending` (because some
+        //   function of the group sends it) and that edge leaves it out.
         //
         // Each is checked by the expansion with a message, because only the compiler knows which types
         // are `Sendable`.
@@ -3000,7 +3007,7 @@ private struct SchemaParser {
             )
         }
         // Generated code names the schema's types through the schema's name, which a direct member type or
-        // alias of that name would capture; a value of that name is not looked up where a type is.
+        // alias of that name would capture. A value of that name is not looked up where a type is.
         guard
             !Set(reservedSchema.schemaNameReservations)
                 .contains(declaration.name.unescaped),
@@ -3085,11 +3092,11 @@ private struct SchemaParser {
         // A public or package schema generates members of its own access that name its phase payloads, `Input`, its
         // operation and event namespaces with their aliases, and the types its payloads, outputs, keys, requests,
         // saved data, and failures spell. Each declaration of the schema that one of those spellings names, as
-        // Swift resolves it where it is written, needs that access; a helper that none of them names may keep less,
+        // Swift resolves it where it is written, needs that access. A helper that none of them names may keep less,
         // whatever it is called.
         if access == .public || access == .package {
             let sufficient: Set<String> = access == .public ? ["public", "open"] : ["public", "open", "package"]
-            // Each spelling with the scope it is written in; a namespace's alias is read from its declaration.
+            // Each spelling paired with the scope it is written in. A namespace's alias is read from its declaration.
             var spellings: [(TypeSyntax, Int)] = []
             var authored = phases.map(\.typeName) + ["Input"] + operations.map(\.name) + events.map(\.name)
             for (name, aliases) in operations.map({ ($0.name, ["Input", "Output", "Failure", "Key"]) })
@@ -3302,8 +3309,8 @@ private struct SchemaParser {
     ///
     /// `owned` and `observed` are the argument labels of its `Owned` and `Observed` methods, or `nil`
     /// for a wrapper that has no method for it. A method redeclares a property of its name when it
-    /// takes no arguments, and a method of the same full name; a method that takes arguments beside a
-    /// property, or other arguments than a method, is a different declaration.
+    /// takes no arguments, and redeclares a method with the same full name. A method that takes
+    /// arguments beside a property, or different arguments than a method, is a separate declaration.
     private func checkWrapperMembers(
         _ function: FunctionDeclSyntax,
         owned: [String]?,
@@ -3313,7 +3320,7 @@ private struct SchemaParser {
     ) throws {
         let name = function.name.unescaped
         func spelled(_ labels: [String]) -> String { name + "(" + labels.map { "\($0):" }.joined() + ")" }
-        // A method redeclares a property; one with the full name of an `Owned` verb overloads it, and
+        // A method redeclares a property. One with the full name of an `Owned` verb overloads it, so
         // the edge's method would take a call meant for the verb.
         var collision: (method: String, effect: String)?
         if let owned, owners.contains(.owned) {
