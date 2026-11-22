@@ -34,7 +34,7 @@ let package = Package(
         .library(name: "StateMachineTesting", targets: ["StateMachineTesting"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", exact: "604.0.0")
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", "604.0.0" ..< "605.0.0")
     ],
     targets: [
         .macro(

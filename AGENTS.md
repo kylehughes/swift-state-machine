@@ -12,8 +12,9 @@ original working name `AtomicState`; apply its contracts to the current names.
 
 Use Swift 6.4 in Swift 6 language mode. Keep the deployment minima in
 `Package.swift`: iOS 16, macOS 13, tvOS 16, watchOS 9, visionOS 1, and Mac Catalyst
-16. SwiftSyntax is pinned to an exact compatible version; update its resolved
-identity and compiler fixtures together.
+16. SwiftSyntax is required within major version 604, which matches Swift 6.4,
+so clients can resolve its patch releases; `Package.resolved` records the version
+the checks run against. Update the resolved version and compiler fixtures together.
 
 Use `--build-system native` for SwiftPM verification. The Xcode backend in the
 selected toolchain adds an experimental compiler feature to otherwise ordinary
