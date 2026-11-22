@@ -647,9 +647,12 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
 - **I25** Q, presentation alive: at most one registration of the presentation holds a slot.
 - **I26** An asynchronous `observe(snapshotsFrom:)` that returns without throwing, and was not replaced, shows its
   registration's first snapshot or a newer one by then. Source: async `observe` reference.
-- **I27** Q: an `applyBelow` that returned `false` was refused because a value at least as new is or will be shown,
-  so the shown revision at quiescence is at least its revision. Skipped when a hook ran inside that call. Source:
-  `apply` reference.
+- **I27** P: an `applyBelow` that returned `false` (with no hook running inside that call) must be justified at the
+  call by a shown snapshot at least as new or by a newer pending value in a current generation (or left pending by
+  an earlier event of the same callback), or else by the end of that top-level event by an in-progress publication
+  whose value already existed at refusal and belongs to the same or an earlier observation. A later observation's
+  lower baseline does not invalidate a justified refusal, and a later value or observation cannot excuse an
+  unjustified one. Source: `apply` reference.
 - **I28** T: a subscriber that attaches to any of the owner's publishers after the owner was released without
   closing (its `weak` reference reads `nil`) receives no ordinary value, only `.finished`. As an exception, an owner
   released without closing first processes every batch it accepted, delivering each (`ObservingState.md`, "An

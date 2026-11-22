@@ -128,7 +128,7 @@ struct ExplorerOutcome: Sendable {
     private var deferrable: Set<Int> = []
     private var accepted: [(revision: UInt64, attempt: Int?)] = []
     private var refused: Set<Int> = []
-    private var refusedApplies: [UInt64] = []
+    private var refusedApplies: [(id: Int, revision: UInt64, observation: Int)] = []
     private var fired = 0
     private var tearingDown = false
     private var echoHost: Int?
@@ -140,8 +140,6 @@ struct ExplorerOutcome: Sendable {
     private var hookLeftPending = false
     // The first value made after each follower's cancellation: a value applied before it is withdrawn.
     private var cancelMarks: [Int: Int] = [:]
-    // `applyBelow` refusals that a pending newer value justified when they happened.
-    private var justifiedRefusals: Set<UInt64> = []
     private var claimed: [SnapshotSequence<ExplorerShot>.AsyncIterator] = []
     // Enumeration prunes an arm whose hook stays idle for the next event; a replayed script runs as written.
     private let pruning: Bool
@@ -689,11 +687,12 @@ struct ExplorerOutcome: Sendable {
             // Just below the newest value made so far, above every older one.
             let newest = world.state.withLock { $0.revision }
             let below = newest >= 5 ? newest - 5 : 0
-            let value = world.makeValue(.applied(attempt: epoch), attempt: epoch, revision: below)
-            if inHook { deferrable.insert(value.id) }
+            let observation = epoch
+            let value = world.makeValue(.applied(attempt: observation), attempt: observation, revision: below)
+            let id = value.id
+            if inHook { deferrable.insert(id) }
             let armedBefore = armed.count
-            if !subject.apply(value), armed.count == armedBefore {
-                refusedApplies.append(below)
+            if !subject.apply(value), armed.count == armedBefore, lastShownNow().revision < below {
                 // Justified when a newer value accepted in a generation still current was pending then.
                 let pending = accepted.contains { entry in
                     entry.revision >= below
@@ -701,7 +700,9 @@ struct ExplorerOutcome: Sendable {
                 }
                 // Or when an earlier event of the same callback left a newer value pending (an apply, or a
                 // new observation's baseline) that no stop had withdrawn yet.
-                if pending || (inHook && hookLeftPending) { justifiedRefusals.insert(below) }
+                if !pending && !(inHook && hookLeftPending) {
+                    refusedApplies.append((id, below, observation))
+                }
             }
         case .then(let first, let second):
             performNow(first)
@@ -1372,6 +1373,21 @@ struct ExplorerOutcome: Sendable {
     private func boundary(topLevel: Bool) {
         if subject.held(), let shot = subject.snapshot() {
             let (id, revision) = (shot.id, shot.revision)
+            // A publication already in progress can justify a refusal from its callback once it assigns
+            // the announced value. A later observation or a value made after the refusal cannot.
+            if !refusedApplies.isEmpty {
+                let observation = world.observation(of: id)
+                refusedApplies.removeAll { id < $0.id && observation <= $0.observation && revision >= $0.revision }
+                if topLevel {
+                    for refusal in refusedApplies {
+                        world.violate(
+                            .refusedApplyLost,
+                            "apply of r\(refusal.revision) in observation \(refusal.observation) was refused without a justifying value (r\(revision) of observation \(observation) shown)"
+                        )
+                    }
+                    refusedApplies.removeAll()
+                }
+            }
             if id != lastShown.id {
                 // Revision order belongs to one observation; a newer observation's first snapshot is a new
                 // baseline (I11).
@@ -1488,13 +1504,6 @@ struct ExplorerOutcome: Sendable {
                 // Withdrawn: its generation ended, or the follower it was applied for was cancelled.
                 if let attempt, world.isLetGo(attempt) || cancelledFollowers.contains(attempt) { continue }
                 world.violate(.applyLost, "r\(revision) was accepted by apply but r\(lastShown.revision) is shown")
-            }
-            for revision in refusedApplies where lastShown.revision < revision && !justifiedRefusals.contains(revision)
-            {
-                world.violate(
-                    .refusedApplyLost,
-                    "apply of r\(revision) was refused but only r\(lastShown.revision) is shown at quiescence"
-                )
             }
             for subscriber in subscribers where subscriber.wantsMore {
                 if subscriber.received.last?.id != lastShown.id {

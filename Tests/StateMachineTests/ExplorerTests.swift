@@ -312,6 +312,20 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         #expect(settlement() == .settled)
     }
 
+    @Test(.parksCooperativeThread) func refusedApplyBeforeClosedSourceHandoff() async throws {
+        var kinds: [ExplorerPassiveKind] = [.combine]
+        if #available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            kinds.append(.observation)
+        }
+        for kind in kinds {
+            let configuration = ExplorerConfiguration(kind: kind, families: [.core, .callback, .reentrant], depth: 4)
+            let outcome = try #require(
+                await explorerRun(configuration, [.observe(0), .applyBelow, .close, .observe(2)])
+            )
+            #expect(outcome.violations.isEmpty)
+        }
+    }
+
     // Each invariant that guards a past defect class reports a planted defect and accepts its control
     // (`ExplorerSelfCheck.swift`).
     @Test func selfCheck() {
