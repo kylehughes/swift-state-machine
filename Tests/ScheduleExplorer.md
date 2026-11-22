@@ -405,8 +405,8 @@ The labels E1 to E15 name the scenarios that the families below cover. The code'
 - **58** `holdDrainer`, `releaseDrainer` — E4. An emission whose handler holds the batch drainer (once per
   sequence), and its release, after which the harness awaits `flush(through:)` of the current root.
 - **59** `edit` — E4. An unrelated edit that advances the root.
-- **59a** `releaseDrivers` — E13. The held drivers return. The step waits until the owner runs no work, with a
-  safety net. Once per sequence.
+- **59a** `releaseDrivers` — E13. The held drivers return, and the step settles once their executions,
+  deliveries, and reports finish. Once per sequence.
 - **60** `reconcile(k)`, `discard(k)` — E13. Explicit `reconcile(id:)` or `discardPending(id:)` of work k's
   retained completion, enabled while one is retained. `redeliver(k)` (once per sequence while work k's completion is
   retained) delivers another payload under the same ticket explicitly. It must prepare nothing (I44), and every
@@ -748,8 +748,10 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   rest of the handler's own batch) precedes the reconciled completion's next report, so with B1's handler reconciling
   B the order is B1, C1, B2. Once the owner is idle, every refused attempt, and the current attempt of every entry
   that requires reconciliation, has been reported. Each step waits, with a five-second safety net, until no
-  preparation or handler is running, no entry is being admitted or prepared, and every entry that requires
-  reconciliation has been reported. Source: SPEC's completion-policy contract (each attempt reported once, in attempt
+  preparation or handler is running, draining has finished unless held, unheld queued executions, released
+  executions, and post-termination outcome deliveries have completed, no completion is awaiting admission,
+  preparation, or a scheduled retry, and every refused attempt and entry that requires reconciliation has been
+  reported. Source: SPEC's completion-policy contract (each attempt reported once, in attempt
   order, with synchronous reconciliation from a handler permitted), DELIVERY-005, DELIVERY-008.
 - **I45** D: a creation that the host refuses, after delivering a newer snapshot inside `subscribe` or because the
   slot is occupied, shows the snapshot read at creation, is not observing, and records the failure. A creation

@@ -116,6 +116,15 @@ nonisolated final class ExplorerReportsLog: Sendable {
         /// Preparations and report handlers running now.
         var inFlight = 0
 
+        func unreportedRefusals(of work: Int) -> [UInt64] {
+            let reports = reported[work] ?? []
+            return (preparations[work] ?? []).enumerated()
+                .compactMap { index, candidate in
+                    let attempt = UInt64(index + 1)
+                    return !candidate && !reports.contains(attempt) ? attempt : nil
+                }
+        }
+
         // The staged works occupy slots 1 through 3. A committed completion can launch
         // successors too, each with its own first outcome and attempt history.
         mutating func work(of ticket: RuntimeTicket) -> Int {
@@ -289,19 +298,39 @@ nonisolated final class ExplorerReportsLog: Sendable {
         state.withLock { $0.owedBefore[work] = (UInt64($0.preparations[work]?.count ?? 0), owed) }
     }
 
-    /// Whether no preparation or handler runs, no entry is being admitted or prepared, and every entry
-    /// that requires reconciliation has had its current attempt reported.
-    func caughtUp(_ pending: [ExplorerReportsHost.Ledger.Pending]) -> Bool {
+    enum Settlement {
+        case working, awaitingReports, settled
+    }
+
+    func settlement(of owner: ExplorerReportsHost, drainerHeld: Bool, driversReleased: Bool) -> Settlement {
         state.withLock { state in
-            state.inFlight == 0
-                && pending.allSatisfy { entry in
-                    entry.status != .awaitingAdmission && entry.status != .preparing
+            guard state.inFlight == 0 else { return .working }
+            let activity = owner.diagnostics()
+            guard drainerHeld || !activity.isDraining else { return .working }
+            for execution in activity.outstandingExecutions {
+                switch execution.disposition {
+                case .queued where !drainerHeld, .issued where driversReleased:
+                    return .working
+                case .terminated where execution.delivery == .awaitingOutcome:
+                    // The coordinator acknowledges termination before delivering the driver's outcome.
+                    return .working
+                default: break
                 }
-                && pending.allSatisfy { entry in
-                    guard entry.status == .reconciliationRequired else { return true }
-                    let work = state.work(of: entry.outcome.ticket)
-                    return (state.reported[work] ?? []).contains(entry.attempts)
-                }
+            }
+            let pending = owner.pendingCompletions()
+            guard
+                !pending.contains(where: {
+                    $0.status == .awaitingAdmission || $0.status == .preparing || $0.status == .retryScheduled
+                })
+            else {
+                return .working
+            }
+            for entry in pending where entry.status == .reconciliationRequired {
+                let work = state.work(of: entry.outcome.ticket)
+                if !(state.reported[work] ?? []).contains(entry.attempts) { return .awaitingReports }
+            }
+            return state.preparations.keys.allSatisfy { state.unreportedRefusals(of: $0).isEmpty }
+                ? .settled : .awaitingReports
         }
     }
 
@@ -309,18 +338,14 @@ nonisolated final class ExplorerReportsLog: Sendable {
     /// requires reconciliation, has been reported.
     func checkSettled(_ pending: [ExplorerReportsHost.Ledger.Pending]) {
         state.withLock { state in
-            for (work, made) in state.preparations.sorted(by: { $0.key < $1.key }) {
-                let reported = state.reported[work] ?? []
-                for (index, candidate) in made.enumerated() where !candidate {
-                    let attempt = UInt64(index + 1)
-                    if !reported.contains(attempt) {
-                        state.violations.append(
-                            .init(
-                                invariant: .attemptOrder,
-                                detail: "attempt \(attempt) of work \(work) was refused and never reported"
-                            )
+            for work in state.preparations.keys.sorted() {
+                for attempt in state.unreportedRefusals(of: work) {
+                    state.violations.append(
+                        .init(
+                            invariant: .attemptOrder,
+                            detail: "attempt \(attempt) of work \(work) was refused and never reported"
                         )
-                    }
+                    )
                 }
             }
             for entry in pending where entry.status == .reconciliationRequired {
@@ -568,8 +593,24 @@ nonisolated final class ExplorerReportsLog: Sendable {
     /// entry that requires reconciliation has had its current attempt reported.
     private func settle() async {
         if !drainerHeld { _ = await owner.flush(through: owner.snapshot()) }
-        if await !hop(until: { self.log.caughtUp(self.owner.pendingCompletions()) }) {
-            world.violate(.attemptOrder, "an entry that requires reconciliation was never reported")
+        var settlement = ExplorerReportsLog.Settlement.working
+        if await !hop(until: {
+            settlement = self.log.settlement(
+                of: self.owner,
+                drainerHeld: self.drainerHeld,
+                driversReleased: self.driversReleased
+            )
+            return settlement == .settled
+        }) {
+            if settlement == .working {
+                world.violate(.stuck, "the owner did not finish processing the step's work")
+            } else {
+                log.checkSettled(owner.pendingCompletions())
+                collect()
+                if world.violations.isEmpty {
+                    world.violate(.attemptOrder, "an entry that requires reconciliation was never reported")
+                }
+            }
         }
     }
     // Main-actor turns until `condition` holds, with a five-second safety net for the owner's own tasks
@@ -653,8 +694,6 @@ nonisolated final class ExplorerReportsLog: Sendable {
         case .releaseDrivers:
             driversReleased = true
             await drivers.releaseAll()
-            for _ in 0 ..< 2000 where owner.runningCount > 0 { await Task { @MainActor in }.value }
-            if owner.runningCount > 0 { world.violate(.stuck, "the released drivers never finished") }
         case .holdDrainer:
             drainerUsed = true
             drainerHeld = true

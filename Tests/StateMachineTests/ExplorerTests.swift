@@ -267,6 +267,51 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         #expect(log.state.withLock { $0.violations }.isEmpty)
     }
 
+    @Test func reportsWaitForReleasedExecutionsAndTheirDeliveries() throws {
+        let scope = RuntimeScopeID(kind: 1)
+        let log = ExplorerReportsLog()
+        let owner = ExplorerReportsHost(
+            manual: 0,
+            scopes: [scope],
+            limits: .default,
+            ticket: { $0.ticket },
+            prepare: { attempt in
+                _ = log.prepare(attempt.outcome, model: attempt.snapshot.model)
+                log.left()
+                return .failure(.preparation(ExplorerRefusal()))
+            }
+        )
+        let candidate = try ExplorerRuntimeEngine.prepare(
+            on: owner.snapshot(),
+            next: 1,
+            plan: .init(starts: [.init(.init(kind: 5, scope: scope), descriptor: 5)])
+        )
+        _ = owner.commit(candidate)
+        func settlement(drainerHeld: Bool = false, driversReleased: Bool = true) -> ExplorerReportsLog.Settlement {
+            log.settlement(of: owner, drainerHeld: drainerHeld, driversReleased: driversReleased)
+        }
+        #expect(settlement(drainerHeld: true) == .settled)
+        #expect(settlement() == .working)
+        guard case .start(let work) = owner.drainCommands(limit: 1).first?.commands.first else {
+            Issue.record("Expected a drained start command")
+            return
+        }
+        #expect(settlement(driversReleased: false) == .settled)
+        #expect(settlement() == .working)
+        _ = owner.acknowledge(work.ticket, skipped: false)
+        #expect(settlement() == .working)
+        let outcome = ExplorerReportsOutcome(ticket: work.ticket, accepts: false, serial: 1)
+        log.offered(outcome)
+        _ = owner.deliver(outcome)
+        #expect(settlement() == .awaitingReports)
+        let pending = try #require(owner.pendingCompletions().first)
+        _ = owner.discardPending(id: pending.id)
+        #expect(owner.pendingCompletions().isEmpty)
+        #expect(settlement() == .awaitingReports)
+        log.report(pending)
+        #expect(settlement() == .settled)
+    }
+
     // Each invariant that guards a past defect class reports a planted defect and accepts its control
     // (`ExplorerSelfCheck.swift`).
     @Test func selfCheck() {
