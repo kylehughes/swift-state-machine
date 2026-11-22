@@ -51,6 +51,13 @@ struct SchemaTests {
         #expect(result.operations.first?.inputType == "Int")
     }
 
+    @Test func acceptsEscapedKeywordArgumentLabel() throws {
+        let escaped = Self.schema.replacingOccurrences(of: "@Active(in:", with: "@Active(`in`:")
+        let result = try Self.parse(escaped)
+        #expect(result.scopes == ["load"])
+        #expect(result.operations.first?.activeIn == ["loading"])
+    }
+
     @Test func acceptsModuleQualifiedMarkersAndRuntimeTypes() throws {
         let qualified = Self.schema
             .replacingOccurrences(of: "@StateMachine(mode:", with: "@StateMachine.StateMachine(mode:")
@@ -214,6 +221,10 @@ struct SchemaTests {
 
     @Test func diagnosesEndpointsAndReferencesAtTheirSpelling() throws {
         let failures: [(String, String)] = [
+            (
+                Self.schema.replacingOccurrences(of: "@Active(in:", with: "@Active(`in`: [], in:"),
+                "Specify 'in' only once."
+            ),
             (
                 Self.schema.replacingOccurrences(of: "borrowing Idle", with: "borrowing Missing"),
                 "Source 'Missing' is not a phase payload type declared in this schema."
