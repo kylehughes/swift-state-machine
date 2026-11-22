@@ -870,7 +870,7 @@ private struct SchemaParser {
         }
         var result: [String: ExprSyntax] = [:]
         for argument in arguments {
-            guard let label = argument.label?.unescaped, required.union(optional).contains(label) else {
+            guard let label = argument.label?.lookupName, required.union(optional).contains(label) else {
                 try reject(
                     argument,
                     "Unexpected metadata argument; supported labels are \(required.union(optional).sorted().joined(separator: ", "))."
@@ -1093,7 +1093,7 @@ private struct SchemaParser {
                     case .argumentList(let arguments) = attribute.arguments
                 else { continue }
                 for argument in arguments {
-                    guard let label = argument.label?.unescaped, ["onSuccess", "onFailure"].contains(label),
+                    guard let label = argument.label?.lookupName, ["onSuccess", "onFailure"].contains(label),
                         let reference = argument.expression.as(MemberAccessExprSyntax.self),
                         let base = reference.base?.as(DeclReferenceExprSyntax.self)
                     else { continue }
@@ -1282,7 +1282,7 @@ private struct SchemaParser {
     private func admission(_ expression: ExprSyntax) throws -> Schema.Admission {
         if let call = expression.as(FunctionCallExprSyntax.self) {
             guard try member(call.calledExpression) == "parallel", call.arguments.count == 1,
-                let argument = call.arguments.first, argument.label?.unescaped == "limit",
+                let argument = call.arguments.first, argument.label?.lookupName == "limit",
                 let limit = argument.expression.integerLiteralValue, limit > 0,
                 call.trailingClosure == nil, call.additionalTrailingClosures.isEmpty
             else {

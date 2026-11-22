@@ -75,6 +75,11 @@ DOC = ROOT / 'Documentation/StateMachine.docc/DeclaringAGraph.md'
 # the refused expansion leaves behind (CASCADE) or one the entry lists as its consequence (`consequent`). Every
 # interface allowance must explain every line of the difference, not a part of it.
 
+FAILURE_SPLIT_CLIENT = (
+    r"thrown expression type '[^']+\.PreparationRejection' cannot be converted to error type '[^']+'|"
+    r"cannot convert return expression of type '[^']+\.Route\.\w+Result' to return type '(?:StateMachine\.)?Advance<[^']+>'"
+)
+
 LIMITS = [
     dict(id='phase-alias', rewrites=r'^alias-', observed='macro-diagnostic', role='phase',
          pattern=r"Phase '[^']*' needs a distinct nongeneric struct or enum declared directly inside the schema, named with a Swift identifier that needs no backticks; aliases are unsupported\.|"
@@ -129,9 +134,11 @@ LIMITS = [
     # throws PreparationRejection and its Owned method returns the routed result instead of one shared Advance.
     dict(id='unconfirmed-failure-split', rewrites=r'^(alias-nested|sugar|swift-dot|module-selector)$', observed='interface|client-error',
          pattern=r'PreparationRejection|Route\.\w+Result',
+         client_pattern=FAILURE_SPLIT_CLIENT,
          doc='Every other pair counts as two failures, which keeps the generated code correct'),
     dict(id='outside-alias-failure', rewrites=r'^alias-file$', observed='interface|client-error',
          pattern=r'PreparationRejection|Route\.\w+Result',
+         client_pattern=FAILURE_SPLIT_CLIENT,
          doc='an alias declared outside the schema is invisible to the macro'),
     dict(id='outside-never', rewrites=r'^alias-file$', observed='expansion-error',
          pattern=r'.*names Never through a declaration the macro cannot read.*',
@@ -429,8 +436,8 @@ nonisolated enum Relay: Sendable {
 
 func fuzzReport() -> String {
     switch Relay.owned(Relay.Idle()).choose({ 3 }) {
-    case .run(let ran): return "ran \\(ran.withValue { $0.value })"
-    case .skip: return "skipped"
+    case .run(let ran): return "produced \\(ran.withValue { $0.value })"
+    case .skip: return "no evaluation"
     }
 }
 ''',
@@ -457,8 +464,8 @@ nonisolated enum Bench: Sendable {
 
 func fuzzReport() -> String {
     switch Bench.owned(Bench.Idle()).choose({ 3 }) {
-    case .run(let ran): return "ran \\(ran.withValue { $0.value })"
-    case .keep: return "kept"
+    case .run(let ran): return "produced \\(ran.withValue { $0.value })"
+    case .keep: return "no evaluation"
     }
 }
 ''',
@@ -843,15 +850,18 @@ nonisolated enum Gauge: Sendable {
 }
 
 @available(macOS 26, *)
-func pinned(_ start: Gauge.Observed<Gauge.Start>) -> (Int) throws(Gauge.Problem<10>) -> Gauge.Prepared {
-    { value throws(Gauge.Problem<10>) in try start.read(value) }
-}
-
-@available(macOS 26, *)
 func fuzzReport() -> String {
     var gauge = Gauge.Local(Gauge.Start())
     let low = (try? gauge.send(.read(3)))?.edgeID ?? "rejected"
     return low
+}
+// fuzz-client
+@testable import Fz
+import StateMachine
+
+@available(macOS 26, *)
+func pinned(_ start: Gauge.Observed<Gauge.Start>) -> (Int) throws(Gauge.Problem<10>) -> Gauge.Prepared {
+    { value throws(Gauge.Problem<10>) in try start.read(value) }
 }
 ''',
     # A schema available above the deployment floor, with its payload types; the edges carry no availability.
@@ -1157,8 +1167,8 @@ final class FuzzLog: Sendable {
         if case .done = host.snapshot() { break }
         await Task.yield()
     }
-    let done = if case .done = host.snapshot() { "done" } else { "stuck" }
-    return "\\(input) \\(done) \\(log.lines.withLock { $0.sorted() }.joined(separator: ","))"
+    let phase = if case .done = host.snapshot() { Swap.graph.terminal[0] } else { "stuck" }
+    return "\\(input) \\(phase) \\(log.lines.withLock { $0.sorted() }.joined(separator: ","))"
 }
 
 @MainActor func fuzzReportAsync() async -> String { "\\(await fuzzSwapRun(.left)); \\(await fuzzSwapRun(.right))" }
@@ -1369,7 +1379,7 @@ public nonisolated enum Leaf: Swift::Sendable {
     fileprivate static func use(_ source: Idle, _ value: N.Hidden) -> Done { Done() }
 }
 
-func fuzzReport() -> String { Leaf.owned(Leaf.Idle()).use(Leaf.Box.Hidden()).withValue { _ in "done" } }
+func fuzzReport() -> String { Leaf.owned(Leaf.Idle()).use(Leaf.Box.Hidden()).withValue { _ in Leaf.graph.terminal[0] } }
 ''',
     # The same leaf through a specialized namespace alias and in a typed throw; `leaf-access` lowers the leaf's
     # access, spelled through the alias and through the directly specialized base.
@@ -1391,7 +1401,7 @@ public nonisolated enum Special: Swift::Sendable {
 
 func fuzzReport() -> String {
     switch Special.owned(Special.Idle()).use() {
-    case .advanced(let done, _): done.withValue { _ in "done" }
+    case .advanced(let done, _): done.withValue { _ in Special.graph.terminal[0] }
     default: "not advanced"
     }
 }
@@ -1495,8 +1505,9 @@ def code_mask(text):
 
 
 class Site:
-    def __init__(self, start, end, kind, text, context):
+    def __init__(self, start, end, kind, text, context, phase=False):
         self.start, self.end, self.kind, self.text, self.context = start, end, kind, text, context
+        self.phase = phase
 
     def __repr__(self):
         return f'{self.kind}:{self.text}'
@@ -1505,16 +1516,51 @@ class Site:
 MODIFIERS = r'(?:(?:borrowing|consuming|__owned|__shared|sending|inout|isolated)\s+|@escaping\s+|@autoclosure\s+)*'
 
 
+SCHEMA_DECLARATION = re.compile(r'@StateMachine\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?(\w+)`?[^{]*\{')
+
+
+def schema_declarations(text, mask=None):
+    if mask is None:
+        mask = code_mask(text)
+    return [declaration for marker in re.finditer(r'@StateMachine\(', text)
+            if mask[marker.start()] and (declaration := SCHEMA_DECLARATION.match(text, marker.start()))]
+
+
 def schema_names(text):
-    return re.findall(r'@StateMachine\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?(\w+)`?', text)
+    return [m.group(1) for m in schema_declarations(text)]
+
+
+def schema_bounds(text, mask=None):
+    """Each schema declaration and the offset of its closing brace."""
+    if mask is None:
+        mask = code_mask(text)
+    braces = re.compile(r'[{}]')
+    for declaration in schema_declarations(text, mask):
+        depth, end = 1, len(text)
+        for brace in braces.finditer(text, declaration.end()):
+            if mask[brace.start()]:
+                depth += 1 if brace.group() == '{' else -1
+                if depth == 0:
+                    end = brace.start()
+                    break
+        yield declaration, end
+
+
+def schema_phase_sites(text, mask=None):
+    """For each schema body, yield `(start, end, payloads)` mapping each direct phase payload's start offset to its
+    core type name."""
+    opening = re.compile(r'\w+`?\s*\(')
+    for declaration, end in schema_bounds(text, mask):
+        start = declaration.end()
+        body = text[start:end]
+        direct = direct_member_text(body)
+        payloads = {start + opening.match(direct, offset).end(): core_name(payload)
+                    for _, offset, payload in direct_case_items(body, direct) if payload is not None}
+        yield start, end, payloads
 
 
 def phase_payloads(text):
-    names = set()
-    for match in re.finditer(r'^    (?:@[\w.]+(?:\([^)\n]*\))?\s+)*case\s+`?\w+`?\((.*)\)\s*$', text, re.M):
-        payload = match.group(1).split('=')[0].strip()
-        names.add(core_name(payload))
-    return names
+    return {payload for _, _, sites in schema_phase_sites(text) for payload in sites.values()}
 
 
 def core_name(spelling):
@@ -1529,6 +1575,9 @@ def type_sites(text):
     """Type spellings in function signatures, aliases, and case payloads, with nested generic arguments."""
     mask = code_mask(text)
     sites = []
+    phase_sites = list(schema_phase_sites(text, mask))
+    schemas = [(start, end, set(payloads.values())) for start, end, payloads in phase_sites]
+    phases = {offset for _, _, payloads in phase_sites for offset in payloads}
 
     def add(start, end, kind, context):
         if end <= start or not mask[start]:
@@ -1537,7 +1586,11 @@ def type_sites(text):
         if re.fullmatch(r'\s*-?\d[\w]*\s*', spelling):
             # An integer argument of a value generic is a value, not a type.
             return
-        sites.append(Site(start, end, kind, spelling, context))
+        phase = kind == 'phase-case'
+        if kind in ('param', 'return', 'return-arg'):
+            names = next((names for lower, upper, names in reversed(schemas) if lower <= start < upper), ())
+            phase = core_name(spelling) in names
+        sites.append(Site(start, end, kind, spelling, context, phase))
         # Generic arguments of a nominal spelling are sites of their own.
         head = re.match(r'[\w.`:]+<', spelling)
         if head:
@@ -1590,13 +1643,11 @@ def type_sites(text):
         indent = text.rfind('\n', 0, match.start())
         nested = text[indent + 1:match.start()].startswith('        ') or text[indent + 1:match.start()].lstrip().startswith(('enum', '@'))
         add(match.end(), type_end, 'alias', 'nested' if nested else ('file' if text[indent + 1:match.start()] == '' else 'schema'))
+    for start in phases:
+        add(start, scan_type_end(text, start, ',='), 'phase-case', 'case')
     for match in re.finditer(r'\bcase\s+`?\w+`?\(', text):
-        if not mask[match.start()]:
-            continue
-        type_end = scan_type_end(text, match.end(), ',=')
-        line_start = text.rfind('\n', 0, match.start()) + 1
-        phase = re.match(r'    (?:@[\w.]+(?:\([^)\n]*\))?\s+)*case', text[line_start:])
-        add(match.end(), type_end, 'phase-case' if phase and text[line_start:].startswith('    ') and not text[line_start:].startswith('     ') else 'case', 'case')
+        if mask[match.start()] and match.end() not in phases:
+            add(match.end(), scan_type_end(text, match.end(), ',='), 'case', 'case')
     sites.sort(key=lambda site: (site.start, -site.end))
     unique = []
     seen = set()
@@ -1612,17 +1663,13 @@ def schema_body_start(text):
     return match.end() if match else None
 
 
-def site_role(text, site):
+def site_role(site):
     """`phase` for a phase payload, `shape` for the result shape of an edge (its `Change`, `Advance`, or router choice
     and what they name), else `value`."""
-    if site.kind in ('phase-case',):
-        return 'phase'
-    if core_name(site.text) in phase_payloads(text) and site.kind in ('param', 'return', 'return-arg', 'phase-case'):
+    if site.phase:
         return 'phase'
     if site.context == 'edge' and (site.kind == 'return-arg' or (site.kind == 'return' and re.match(r'\s*(Self\.|\w+\.)?(Route|Change|Advance)\b', site.text))):
         return 'shape'
-    if core_name(site.text) in phase_payloads(text) and site.kind in ('param', 'return', 'return-arg', 'phase-case'):
-        return 'phase'
     return 'value'
 
 
@@ -1676,7 +1723,7 @@ def at_sites(text, predicate, transform, extra=None):
         new = text[:site.start] + spelling + text[site.end:]
         if extra:
             new = extra(new, site)
-        results.append((new, dict(site=repr(site), role=site_role(text, site))))
+        results.append((new, dict(site=repr(site), role=site_role(site))))
     return results
 
 
@@ -1784,7 +1831,7 @@ def alias_rewrite(text, make, predicate=lambda s: True, phases=False):
     for site in type_sites(text):
         if not within_schema(text, site) or not predicate(site) or not not_generated(site):
             continue
-        if not phases and site_role(text, site) == 'phase':
+        if not phases and site_role(site) == 'phase':
             continue
         made = make(text, site)
         if made is None:
@@ -1820,21 +1867,53 @@ def alias_rewrite(text, make, predicate=lambda s: True, phases=False):
         new = text[:site.start] + spelling + text[site.end:]
         new = insert_in_schema(new, declaration, site.start) if scope == 'schema' else insert_at_file_scope(new, declaration)
         if new:
-            results.append((new, dict(site=repr(site), role=site_role(text, site))))
+            results.append((new, dict(site=repr(site), role=site_role(site))))
     return results
 
 
+def type_lookup_roots(spelling):
+    """Matches for unqualified root identifiers in a type spelling, excluding tuple labels, member names, and module
+    selectors."""
+    code = ''.join(char if visible else ' ' for char, visible in zip(spelling, code_mask(spelling)))
+    delimiters = []
+    for match in re.finditer(r'->|[()[\]<>]|`[^`]+`|[^\W\d]\w*', code):
+        token = match.group(0)
+        if token in ('(', '[', '<'):
+            delimiters.append(token)
+        elif token in (')', ']', '>'):
+            if delimiters:
+                delimiters.pop()
+        elif token != '->':
+            before, after = code[:match.start()].rstrip(), code[match.end():].lstrip()
+            tuple_label = (delimiters[-1:] == ['('] and before.endswith(('(', ','))
+                           and after.startswith(':') and not after.startswith('::'))
+            if not tuple_label and not before.endswith(('.', '::')) and not after.startswith('::'):
+                yield match
+
+
 def qualify_for_file_scope(text, site):
-    schema = schema_of(text, site.start)
-    body = '\n'.join('\n'.join(text.split('\n')[a:b - 1]) for a, b in schema_lines(text))
-    members = schema_types(text) | set(re.findall(r'typealias\s+(\w+)', body))
-    def qualify(match):
-        name = match.group(1)
-        before = site.text[:match.start()]
-        if before.endswith('.') or name not in members or name in STANDARD:
-            return match.group(0)
-        return f'{schema}.{name}'
-    return re.sub(r'(?<![\w`.])([A-Za-z_]\w*)', qualify, site.text)
+    line = text.count('\n', 0, site.start) + 1
+    scope = next(((a, b, path) for (a, b), path in zip(schema_lines(text), schema_path_list(text))
+                  if a <= line <= b), None)
+    if scope is None:
+        return site.text
+    start, end, path = scope
+    schema = path.rsplit('.', 1)[-1]
+    body = '\n'.join(text.split('\n')[start:end - 1])
+    members = declared_types(body) | set(re.findall(r'typealias\s+`?(\w+)', body))
+
+    pieces, last = [], 0
+    for match in type_lookup_roots(site.text):
+        name = match.group(0).strip('`')
+        if name in ('Self', schema):
+            qualified = path
+        elif name in members and name not in STANDARD:
+            qualified = f'{path}.{match.group(0)}'
+        else:
+            continue
+        pieces.extend((site.text[last:match.start()], qualified))
+        last = match.end()
+    return ''.join(pieces) + site.text[last:]
 
 
 @rewrite('alias-local', 'eq', 'With `typealias Unit = Void` in the schema')
@@ -1859,7 +1938,30 @@ def _(text, rng):
 
 @rewrite('alias-file', 'eq', 'an alias declared outside the schema is invisible to the macro')
 def _(text, rng):
+    mask = code_mask(text)
+    bindings = []
+    for declaration in re.finditer(r'\b(typealias|enum|struct|class|actor)\s+`?\w+`?\s*<', text):
+        if not mask[declaration.start()]:
+            continue
+        parameters_end = scan_type_end(text, declaration.end(), '')
+        parameters = {name.group(1) for parameter in split_top(text[declaration.end():parameters_end])
+                      if (name := re.match(r'\s*(?:(?:let|each)\s+)?`?(\w+)', parameter))}
+        if declaration.group(1) == 'typealias':
+            equals = re.match(r'\s*>\s*=\s*', text[parameters_end:])
+            if equals:
+                start = parameters_end + equals.end()
+                bindings.append((start, scan_type_end(text, start, ';\n'), parameters))
+        else:
+            opening = re.match(r'\s*>[^{};]*\{', text[parameters_end:])
+            if opening:
+                start = parameters_end + opening.end()
+                bindings.append((start, start + len(body_of(text, re.compile(r'\{').match(text, start - 1))), parameters))
+
     def make(t, s):
+        # A file-scope alias cannot refer to the generic parameters bound where the original spelling appears.
+        roots = {root.group(0).strip('`') for root in type_lookup_roots(s.text)}
+        if any(start <= s.start < end and roots & names for start, end, names in bindings):
+            return None
         # A site inside `Input` or an operation's namespace reads that namespace's members first, an extension's
         # among them; at file scope the alias names them through the namespace.
         spelled = s.text
@@ -1913,12 +2015,20 @@ def _(text, rng):
 
 def desugar(spelling):
     stripped = spelling.strip()
-    match = re.fullmatch(r'\[([^\[\]:]+)\]', stripped)
-    if match and not re.search(r'\sof\s', match.group(1)):
-        return f'Array<{match.group(1).strip()}>'
-    match = re.fullmatch(r'\[([^\[\]:]+):([^\[\]]+)\]', stripped)
+    match = re.fullmatch(r'\[([^\[\]]+)\]', stripped)
     if match:
-        return f'Dictionary<{match.group(1).strip()}, {match.group(2).strip()}>'
+        element = match.group(1).strip()
+        syntax = ''.join(c if present else ' ' for c, present in zip(element, code_mask(element)))
+        syntax = re.sub(r'`[^`]*`|::', lambda m: '_' * len(m.group()), syntax)
+        if re.search(r'\sof\s', syntax):
+            return None
+        end = scan_type_end(syntax, 0, ':')
+        if not syntax[end:].strip():
+            return f'Array<{element}>'
+        if syntax[end:].lstrip().startswith(':'):
+            colon = syntax.index(':', end)
+            return f'Dictionary<{element[:colon].strip()}, {element[colon + 1:].strip()}>'
+        return None
     match = re.fullmatch(r'([\w.`]+)\?', stripped)
     if match:
         return f'Optional<{match.group(1)}>'
@@ -2112,13 +2222,13 @@ def shared_parameters(text, source):
             continue
         opening = text.rfind('(', 0, site.start)
         first = not text[opening + 1:site.start].count(',')
-        if first != source or (source and site_role(text, site) != 'phase'):
+        if first != source or (source and site_role(site) != 'phase'):
             continue
         before = text[:site.start]
         if re.search(r'(borrowing|consuming|__owned|__shared|sending|@escaping|inout)\s+$', before):
             continue
         new = before + '__shared ' + text[site.start:]
-        results.append((new, dict(site=repr(site), role=site_role(text, site))))
+        results.append((new, dict(site=repr(site), role=site_role(site))))
     return results
 
 
@@ -2492,7 +2602,7 @@ def authored_functions_at(text):
             depth += {'(': 1, ')': -1}.get(text[index], 0)
             index += 1
         brace = text.find('{', index)
-        found.append(dict(attribute=match.group(1), modifiers=match.group(2), name=match.group(3), name_at=match.start(3),
+        found.append(dict(attribute=match.group(1), attribute_at=match.start(), modifiers=match.group(2), name=match.group(3), name_at=match.start(3),
                           func_at=text.rfind('static func', 0, match.start(3)), after=index, effects=text[index:brace]))
     return found
 
@@ -2605,9 +2715,8 @@ def _(text, rng):
 
 
 def schema_span(text):
-    lines = text.split('\n')
-    spans = schema_lines(text)
-    return spans[0] if spans else None
+    return next((span for span, name, path in zip(schema_lines(text), schema_names(text), schema_path_list(text))
+                 if path == name), None)
 
 
 def nest_schema(text, opener, closer, prefix, extra=''):
@@ -2619,7 +2728,24 @@ def nest_schema(text, opener, closer, prefix, extra=''):
     start, end = span[0] - 1, span[1] - 1
     schema = schema_names('\n'.join(lines[start:end + 1]))[0]
     outside = '\n'.join(lines[:start]), '\n'.join(lines[end + 1:])
-    qualify = lambda chunk: re.sub(r'(?<![\w.`])' + re.escape(schema) + r'\b', f'{prefix}.{schema}', chunk)
+    def qualify(chunk):
+        mask = code_mask(chunk)
+        name = r'(?<![\w`])(?:`' + re.escape(schema) + r'`|' + re.escape(schema) + r')(?![\w`])'
+        declarations = {m.start(1) for m in re.finditer(
+            r'\b(?:struct|enum|class|actor|protocol|typealias|func|case|var|let)\s+(' + name + ')', chunk)}
+
+        def replace(match):
+            at = match.start()
+            before = chunk[:at].rstrip()
+            if mask[at] and at not in declarations and not before.endswith(('.', '::')):
+                # An existing extension must remain visible to the schema inside a generic enclosing type.
+                # Specialize references from ordinary code, but keep the extension itself unspecialized.
+                enclosing = prefix.partition('<')[0] if re.search(r'\bextension$', before) else prefix
+                return f'{enclosing}.{match.group(0)}'
+            return match.group(0)
+
+        return re.sub(name, replace, chunk)
+
     body = '\n'.join(lines[start:end + 1])
     return (qualify(outside[0]) + f'\n// fuzz-outer: {prefix}\n{opener}\n' + body + f'\n{closer}\n{extra}' + qualify(outside[1])), schema
 
@@ -2824,12 +2950,18 @@ def public_types(text):
 def _(text, rng):
     """An unused private helper whose member shares its basename with a public phase type of the schema."""
     results = []
+    taken = identifier_tokens(text)
+    helper = 'FuzzNotes'
+    suffix = 2
+    while helper in taken:
+        helper = f'FuzzNotes{suffix}'
+        suffix += 1
     names = [n for n in public_types(text) if n not in ('Input', 'Scope') and n not in schema_names(text)] or sorted(phase_payloads(text))
     for name in names[:4]:
-        for declaration in (f'private enum FuzzNotes {{ struct {name} {{}} }}', f'private struct FuzzNotes {{ typealias {name} = Swift::Int }}'):
+        for declaration in (f'private enum {helper} {{ struct {name} {{}} }}', f'private struct {helper} {{ typealias {name} = Swift::Int }}'):
             new = insert_in_schema(text, declaration)
             if new:
-                results.append((new, dict(site=declaration, role='value', added=[r'Fz\.(\w+\.)*FuzzNotes\b'])))
+                results.append((new, dict(site=declaration, role='value', added=[rf'Fz\.(\w+\.)*{helper}\b'])))
     return results
 
 
@@ -2937,9 +3069,7 @@ def _(text, rng):
             if word in tokens:
                 continue
             variant = rename(text, case, word)
-            # The report may print the old name as text of its own, so the renaming maps the printed graphs only.
-            results.append((variant, dict(site=f'phase {case} -> {word}', role='value', control=text, mapping={case: word},
-                                          inside=True, graphs_only=True)))
+            results.append((variant, dict(site=f'phase {case} -> {word}', role='value', control=text, mapping={case: word})))
     rng.shuffle(results)
     return results[:6]
 
@@ -3065,10 +3195,10 @@ def _(text, rng):
         members = [m.strip() for m in match.group(2).split('&')]
         prefix = match.group(1) or ''
         repeated = text[:site.start] + prefix + ' & '.join(members + members[:1]) + text[site.end:]
-        results.append((repeated, dict(site=f'{site.text} with {members[0]} twice', role=site_role(text, site))))
+        results.append((repeated, dict(site=f'{site.text} with {members[0]} twice', role=site_role(site))))
         aliased = text[:site.start] + prefix + ' & '.join(['FuzzPair'] + members[2:]) + text[site.end:]
         aliased = insert_in_schema(aliased, f'typealias FuzzPair = {members[0]} & {members[1]}', site.start)
-        results.append((aliased, dict(site=f'{site.text} through FuzzPair', role=site_role(text, site))))
+        results.append((aliased, dict(site=f'{site.text} through FuzzPair', role=site_role(site))))
     return results
 
 
@@ -3159,6 +3289,62 @@ def phase_of_type(text, payload):
     return None
 
 
+def starts_eligible(attribute, schema, destination):
+    """Whether literal `@Transition`, `@Operation`, and `Scope` metadata confirm every started operation is active
+    in `destination`. Returns `True` when nothing is started and `False` when eligibility cannot be confirmed."""
+    metatype = r'`?(\w+)`?\s*\.\s*`?self`?'
+    scope_name = r'`?Scope`?\s*\.\s*`?(\w+)`?'
+
+    def arguments(attribute):
+        return {key.strip().strip('`'): value.strip() for item in split_top(attribute)
+                for key, separator, value in [item.partition(':')] if separator}
+
+    def code(source):
+        return ''.join(char if visible or char == '\n' else ' ' for char, visible in zip(source, code_mask(source)))
+
+    def references(value, pattern):
+        if not re.fullmatch(r'\[[^\[\]]*\]', value):
+            return None
+        matches = [re.fullmatch(pattern, item.strip()) for item in split_top(value[1:-1]) if item.strip()]
+        return [match[1] for match in matches] if all(matches) else None
+
+    head = re.match(r'@(?:StateMachine\.)?Transition\s*\((.*)\)', code(attribute))
+    if not head:
+        return False
+    starts = references(arguments(head[1]).get('starts', '[]'), metatype)
+    if not starts:
+        return starts == []
+
+    schema = code(schema)
+    scope_enum = re.search(r'^    (?:\w+\s+)*enum\s+`?Scope`?\s*(?::[^{]*)?\{', schema, re.M)
+    scopes = body_of(schema, scope_enum) if scope_enum else ''
+
+    def scope_allows(name):
+        if not scopes:
+            return False
+        if not re.search(r'\bActive\b', scopes):
+            return True
+        active = re.search(r'@(?:StateMachine\.)?`?Active`?\(\s*`?in`?\s*:\s*(\[[^\]]*\])\s*\)\s*case\s+`?'
+                           + re.escape(name) + r'`?(?!\w)', scopes)
+        return bool(active and destination in (references(active[1], metatype) or []))
+
+    for start in starts:
+        declarations = re.findall(r'^    @(?:StateMachine\.)?`?Operation`?\(([^\n]*)\)\s*(?:\w+\s+)*enum\s+`?'
+                                  + re.escape(start) + r'`?(?!\w)', schema, re.M)
+        if len(declarations) != 1:
+            return False
+        metadata = arguments(declarations[0])
+        needed = references(metadata.get('requires', '[]'), scope_name)
+        primary = re.fullmatch(scope_name, metadata.get('scope', ''))
+        if primary:
+            needed = [primary[1]] + needed if needed is not None else None
+        elif destination not in (references(metadata.get('activeIn', ''), metatype) or []):
+            return False
+        if needed is None or not all(scope_allows(scope) for scope in needed):
+            return False
+    return True
+
+
 @rewrite('redirect-entrance', 'break', 'every phase must be reachable from the initial phase')
 def _(text, rng):
     """The sole transition into a phase leads to another phase instead; the body becomes `fatalError()`."""
@@ -3167,15 +3353,20 @@ def _(text, rng):
     results = []
     destinations = edge_destinations(text)
     initial = re.search(r'@Initial\b[^\n]*case\s+\w+\((\w+)', text)
+    lines = text.split('\n')
     spans = [(a, b) for a, b in schema_lines(text)]
     schema_at = lambda index: next((s for s in spans if s[0] <= text.count('\n', 0, index) + 1 <= s[1]), None)
     for function, destination, (start, end) in destinations:
         if sum(1 for _, d, _ in destinations if d == destination) != 1 or (initial and initial.group(1) == destination):
             continue
-        others = [d for f, d, _ in destinations if d != destination and schema_at(f['func_at']) == schema_at(function['func_at'])]
-        if not others:
+        span = schema_at(function['func_at'])
+        schema = '\n'.join(lines[span[0] - 1:span[1]]) if span else ''
+        attribute = text[function['attribute_at']:function['func_at']]
+        # A changed destination can make an operation's start ineligible before the graph is checked.
+        other = next((d for f, d, _ in destinations if d != destination and schema_at(f['func_at']) == span
+                      and starts_eligible(attribute, schema, d)), None)
+        if other is None:
             continue
-        other = others[0]
         brace = text.find('{', function['after'])
         body = body_of(text, re.compile(r'\{').match(text, brace))
         new = text[:start] + other + text[end:brace] + '{ fatalError() }' + text[brace + len(body) + 2:]
@@ -3401,15 +3592,23 @@ def _(text, rng):
     """A static property named like the schema, declared directly inside it or in an extension of it: a value cannot
     shadow the schema's name where a type is expected, so both compile alike."""
     results = []
-    for schema in schema_names(text):
-        opened, closed = schema_opening(text, schema)
-        if opened is None:
+    paths = schema_path_list(text)
+    mask = code_mask(text)
+    for index, declaration in enumerate(schema_declarations(text)):
+        schema = declaration.group(1)
+        path = paths[index] if index < len(paths) else None
+        bodies = [body_of(text, declaration)]
+        if path:
+            extensions = re.finditer(r'\bextension\s+' + re.escape(path) + r'\s*\{', text)
+            bodies.extend(body_of(text, m) for m in extensions if mask[m.start()])
+        property_name = re.compile(r'\s*(?:\w+\s+)*static\s+(?:let|var)\s+`?' + re.escape(schema) + r'`?(?!\w)')
+        if any(property_name.match(line) for body in bodies for line in direct_lines(body)):
             continue
+        opened = declaration.end()
         member = f'    static var {schema}: Swift::Int {{ 0 }}'
         added = [rf'\.{re.escape(schema)}\.{re.escape(schema)}\b', rf'\b{re.escape(schema)}\.getter : Swift\.Int']
         results.append((text[:opened] + '\n' + member + text[opened:], dict(site=f'static var {schema} inside {schema}', role='value', added=added)))
-        path = schema_paths(text).get(schema, schema)
-        if 'func fuzzLocalSchema()' not in text:
+        if path:
             results.append((append_to_module(text, f'extension {path} {{ static var {schema}: Swift::Int {{ 0 }} }}'),
                             dict(site=f'static var {schema} in an extension', role='value', added=added)))
     return results
@@ -3439,11 +3638,30 @@ def _(text, rng):
     """The negative control of `schema-named-value`: a nested type named like the schema shadows it where a type is
     expected, which the macro refuses at that type's name."""
     results = []
+    paths = schema_paths(text)
     for schema in schema_names(text):
-        opened, _ = schema_opening(text, schema)
-        if opened is not None:
-            results.append((text[:opened] + f'\n    struct {schema}: Swift::Sendable {{}}' + text[opened:],
-                            dict(site=f'struct {schema} inside {schema}', role='value', expect='reserved-names')))
+        opened, closed = schema_opening(text, schema)
+        if opened is None:
+            continue
+        body = text[opened:closed]
+        mask = code_mask(body)
+        nested = [(m.start(), m.end() + len(body_of(body, m))) for m in re.finditer(
+            r'\b(?:struct|enum|class|actor|protocol)\s+`?\w+`?[^;{}\n]*\{', body) if mask[m.start()]]
+
+        def preserve_reference(match):
+            at = match.start()
+            if not mask[at] or body[:at].rstrip().endswith(('.', '::')):
+                return match.group(0)
+            # Keep authored references pointing at the schema after inserting the shadow. Use `Self` at direct
+            # schema scope so the macro still reads phase types syntactically, and `Fz::<path>` inside nested types.
+            if any(start <= at <= end for start, end in nested):
+                return 'Fz::' + paths.get(schema, schema)
+            return 'Self'
+
+        body = re.sub(r'(?<![\w`])(?:`' + re.escape(schema) + r'`|' + re.escape(schema) + r')(?=\s*\.)',
+                      preserve_reference, body)
+        results.append((text[:opened] + f'\n    struct {schema}: Swift::Sendable {{}}' + body + text[closed:],
+                        dict(site=f'struct {schema} inside {schema}', role='value', expect='reserved-names')))
     return results
 
 
@@ -3451,19 +3669,82 @@ def _(text, rng):
 def _(text, rng):
     """An alias the schema declares keeps its name and changes what it names (`Swift::Int` to `Swift::Int64`), so
     every exported spelling that uses it is unchanged and names another type: the spelling probes must see it."""
+    # Leave aliases unchanged when they reach edge signatures, enum case payloads, or operation
+    # aliases (`Input`, `Output`, `Failure`, `Key`, `Request`), including through alias chains.
+    fixed = {'Input', 'Output', 'Failure', 'Key', 'Request'}
+    for site in type_sites(text):
+        if site.context == 'edge' or site.kind in ('case', 'phase-case'):
+            fixed.update(identifier_tokens(site.text))
+    mask = code_mask(text)
+    aliases = [(alias, text[alias.end():scan_type_end(text, alias.end(), ';\n')])
+               for alias in re.finditer(r'\btypealias\s+`?(\w+)`?(?:<[^>=]*>)?\s*=\s*', text) if mask[alias.start()]]
+    dependencies = collections.defaultdict(set)
+    for alias, target in aliases:
+        dependencies[alias.group(1)].update(identifier_tokens(target))
+    guarded_aliases = set()
+    literal = re.compile(r'\s*\(\s*(?:"(?:[^"\\\n]|\\\((?:[^()]|\([^()]*\))*\)|\\.)*"|-?[0-9][\da-fA-Fboxo_]*)\s*\)')
+    aliases_by_start = {alias.start(): (alias, target) for alias, target in aliases}
+    event_head = r'@(?:StateMachine(?:\.|::))?Event\b\s*(?:\(\s*\)\s*)?(?:\w+\s+)*enum\s+`?(\w+)`?[^{}\n]*\{'
+    case_pattern = re.compile(r'\bcase\b\s*(?:(?:let|var)\s+)?(?:`?\w+`?\s*\.\s*)*'
+                              r'(?:`?\w+`?\s*)?$')
+    visible_text = ''.join(char if visible else ' ' for char, visible in zip(text, mask))
+    for event in re.finditer(event_head, visible_text):
+        event_name = event.group(1)
+        run = next((i for i, char in enumerate(event_name) if not char.isupper()), len(event_name))
+        if 1 < run < len(event_name) and event_name[run].islower():
+            run -= 1
+        effect_name = unicodedata.normalize('NFC', event_name[:run].lower() + event_name[run:])
+        mentions = re.finditer(r'\.\s*`?' + re.escape(effect_name) + r'`?(?![\w`])', text)
+        producers = (mention for mention in mentions if mask[mention.start()]
+                     and not case_pattern.search(visible_text, 0, mention.start()))
+        if all(literal.match(text, producer.end()) for producer in producers):
+            continue
+        # Only an event used with context-inferred literals can safely change its payload here. Protect the aliases
+        # an event reads inside its namespace first, then follow any dependencies outside that namespace.
+        body = body_of(text, event)
+        local_aliases, local_types, depth = {}, set(), 0
+        for member in re.finditer(r'[{}]|\b(?:typealias|struct|enum|class|actor|protocol)\s+`?(\w+)', body):
+            start = event.end() + member.start()
+            if not mask[start]:
+                continue
+            if member.group(1) is None:
+                depth += 1 if member.group(0) == '{' else -1
+            elif depth == 0:
+                if start in aliases_by_start:
+                    local_aliases[member.group(1)] = aliases_by_start[start]
+                else:
+                    local_types.add(member.group(1))
+        if 'Payload' not in local_aliases:
+            continue
+        pending = ['Payload']
+        seen = set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if name in local_aliases:
+                alias, target = local_aliases[name]
+                guarded_aliases.add(alias.start())
+                target = re.sub(r'(?<![\w.])(?:Self|' + re.escape(event_name) + r')\s*\.\s*', '', target)
+                qualified = re.findall(r'\b\w+\s*(?:\.|::)\s*`?(\w+)', target)
+                fixed.update(qualified)
+                pending.extend(identifier_tokens(target) - set(qualified))
+            elif name not in local_types:
+                fixed.add(name)
+    pending = list(fixed)
+    while pending:
+        names = dependencies[pending.pop()] - fixed
+        fixed.update(names)
+        pending.extend(names)
+
     results = []
-    for alias in re.finditer(r'\btypealias\s+(\w+)\s*=\s*(?:Swift::)?(Int|String)\b(?!\s*[.<])', text):
-        # An alias an Input case carries would change the payload its edge declares; those stay.
-        opened = re.search(r'enum\s+Input\b[^{]*\{', text)
-        if opened and re.search(r'\b' + re.escape(alias.group(1)) + r'\b', body_of(text, opened)):
+    for alias in re.finditer(r'\btypealias\s+`?(\w+)`?\s*=\s*(Swift::)?(Int|String)\b(?!\s*[.<])', text):
+        if not mask[alias.start()] or alias.group(1) in fixed or alias.start() in guarded_aliases:
             continue
-        # An operation's output, request, or failure is spelled again by the functions that take it, so it stays too.
-        if alias.group(1) in ('Output', 'Failure', 'Key', 'Request') or re.search(
-                r'typealias\s+(?:Output|Failure|Key|Request)\s*=\s*(?:[\w:]*<[^\n]*)?\b' + re.escape(alias.group(1)) + r'\b', text):
-            continue
-        other = {'Int': 'Swift::Int64', 'String': 'Swift::Substring'}[alias.group(2)]
-        start = alias.start(2) - (7 if text[alias.start(2) - 7:alias.start(2)] == 'Swift::' else 0)
-        results.append((text[:start] + other + text[alias.end(2):], dict(site=f'{alias.group(1)} = {other}', role='value')))
+        other = {'Int': 'Swift::Int64', 'String': 'Swift::Substring'}[alias.group(3)]
+        start = alias.start(2) if alias.group(2) else alias.start(3)
+        results.append((text[:start] + other + text[alias.end(3):], dict(site=f'{alias.group(1)} = {other}', role='value')))
     return results
 
 
@@ -3616,8 +3897,10 @@ def schema_path_list(text):
             paths.append(f'{match.group(1)}.{match.group(3)}')
             continue
         # The enclosing types the declaration stands in, outermost first, from the braces open before it.
-        enclosing, stack = [], []
-        for opener in re.finditer(r'\b(?:extension|enum|struct|class|actor)\s+(`?[\w.]+`?)[^{;]*\{|[{}]', text[:match.start()]):
+        stack = []
+        identifier = r'(?:`[^`\n]+`|\w+)'
+        path = identifier + r'(?:\.' + identifier + r')*'
+        for opener in re.finditer(r'\b(?:extension|enum|struct|class|actor)\s+(' + path + r')[^{;]*\{|[{}]', text[:match.start()]):
             if not mask[opener.start()]:
                 continue
             token = opener.group(0)
@@ -3627,7 +3910,7 @@ def schema_path_list(text):
                 if stack:
                     stack.pop()
             else:
-                stack.append(opener.group(1).strip('`'))
+                stack.append(opener.group(1))
         enclosing = [s for s in stack if s]
         paths.append('.'.join(enclosing + [match.group(3)]))
 
@@ -3693,10 +3976,9 @@ HARNESS_MARKER = '// fuzz-harness: the graphs of the schemas this file declares\
 NAMED_GRAPHS = ['R&D', 'R&amp;D', 'a\\b', 'say "hi"']
 
 
-def graph_accessor(text, everywhere=None):
-    """A function the schema's own file declares, so it reaches a schema of any access, returning every graph: of the
-    schemas every file of the module declares (`everywhere`), not only this file's."""
-    graphs = ', '.join(f'{schema}.graph' for schema in schema_path_list(everywhere if everywhere is not None else text))
+def graph_accessor(text, paths):
+    """Return a module-level `fuzzGraphs()` accessor for `paths`, wrapped in any `#available` guard `text` requires."""
+    graphs = ', '.join(f'{schema}.graph' for schema in paths)
     guard = availability_guard(text)
     body = f'if #available({guard}) {{ return [{graphs}] }}; return []' if guard and graphs else f'[{graphs}]'
     return '\n' + HARNESS_MARKER + f'func fuzzGraphs() -> [StateMachine::StateMachineGraph] {{ {body} }}\n'
@@ -3894,15 +4176,11 @@ def authored_functions(text):
 
 def schema_lines(text):
     """Line ranges of the schemas' declarations in a source."""
-    spans, lines = [], text.split('\n')
-    for index, line in enumerate(lines):
-        if line.startswith('@StateMachine('):
-            end = next((j for j in range(index, len(lines)) if lines[j].startswith('}')), len(lines) - 1)
-            spans.append((index + 1, end + 1))
-    return spans
+    return [(text.count('\n', 0, declaration.start()) + 1, text.count('\n', 0, end) + 1)
+            for declaration, end in schema_bounds(text)]
 
 
-def classify_located(text, spans=(), case_file='Case.swift'):
+def classify_located(text, schema_spans=None):
     """Errors with where they arise: the macro's diagnostics, its expansion, the schema's own declarations, or client
     code outside the schema, which an equivalent rewrite can break only by changing what the macro generates. Each is
     (place, message, file name, line)."""
@@ -3913,8 +4191,11 @@ def classify_located(text, spans=(), case_file='Case.swift'):
         message = re.sub(r'\s*\[#\w+(?:::\w+)*\]$', '', re.sub(r'\s*\(from macro \'\w+\'\)', '', message).strip())
         name = os.path.basename(path)
         place = 'macro' if macro else ('expansion' if '@__swiftmacro' in path or 'macro expansion' in path else 'authored')
-        if place == 'authored' and (name != case_file or (spans and not any(a <= int(line) <= b for a, b in spans))):
-            place = 'client'
+        if place == 'authored':
+            in_schema = (name == 'Case.swift' if schema_spans is None else
+                         any(a <= int(line) <= b for a, b in schema_spans.get(name, ())))
+            if not in_schema:
+                place = 'client'
         if name in ('Main.swift',) and place == 'client':
             place = 'harness'
         error = (place, message, name, int(line))
@@ -3933,9 +4214,9 @@ def columns_of(text):
     return found
 
 
-def classify(text, spans=()):
+def classify(text, schema_spans=None):
     unique = []
-    for place, message, _, _ in classify_located(text, spans):
+    for place, message, _, _ in classify_located(text, schema_spans):
         if (place, message) not in unique:
             unique.append((place, message))
     return unique
@@ -3953,8 +4234,10 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
     files, client = split_case(text)
     harness_from = None
     if toolchain.run:
+        source = module_text(text)
+        graph_paths = schema_path_list(source)
         harness_from = files['Case.swift'].count('\n') + 2
-        files['Case.swift'] = files['Case.swift'] + graph_accessor(files['Case.swift'], module_text(text))
+        files['Case.swift'] += graph_accessor(source, graph_paths)
     sources = []
     for name, content in files.items():
         (directory / name).write_text(content)
@@ -3970,13 +4253,12 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
         log, code = log + f'\n{result.verdict} after {result.seconds}s at {result.peak_mb} MB', result.verdict
     elapsed = time.monotonic() - started
     (directory / 'compile.log').write_text(log)
-    case_text = files['Case.swift']
-    spans = schema_lines(case_text)
+    spans = {name: schema_lines(source) for name, source in files.items()}
     located = [(('harness' if harness_from and name == 'Case.swift' and line >= harness_from else place), message, name, line)
                for place, message, name, line in classify_located(log, spans)]
     outcome = dict(seconds=round(elapsed, 2), errors=[(p, m) for p, m, _, _ in located], located=located, command=command,
                    peak_mb=result.peak_mb, columns=columns_of(log),
-                   client_lines=sorted({line for place, _, name, line in located if place == 'client' and name == 'Case.swift'}))
+                   client_sites=[(name, line) for place, _, name, line in located if place == 'client' and name in files])
     if code in ('timeout', 'memory', 'launch'):
         outcome['status'] = code
         outcome['crash'] = {'memory': 'over memory cap', 'timeout': 'timeout', 'launch': 'cannot launch'}[code] + f' ({result.peak_mb} MB, {result.seconds}s)'
@@ -4012,6 +4294,7 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
             located = classify_located(linked.stdout)
             outcome['located'] = outcome['located'] + located
             outcome['errors'] = [(p, m) for p, m, _, _ in located] or [('link', linked.stdout[-300:])]
+            outcome['client_sites'] = [(name, line) for p, _, name, line in located if p == 'client']
             if linked.verdict != 'ok':
                 outcome['status'], outcome['crash'] = 'run-timeout', f'harness compilation {linked.verdict} ({linked.seconds}s)'
             elif any(p == 'client' for p, _, _, _ in located):
@@ -4033,6 +4316,7 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
             return outcome
         graphs = raw_graphs(ran.stdout)
         outcome['run'] = normalize_run(ran.stdout)
+        outcome['graph_paths'] = graph_paths
         outcome['report'] = next((line[len('report: '):] for line in ran.stdout.splitlines() if line.startswith('report: ')), None)
         outcome['spellings'] = sorted({json.dumps(g, sort_keys=True) for g in graphs})
         outcome['diagram_problems'] = diagram_problems(ran.stdout)
@@ -4315,31 +4599,53 @@ def split_top(text, braces=False):
     return parts + [current]
 
 
+def direct_member_text(body):
+    """Mask nested brace bodies, comments, and literals with spaces, preserving newlines and direct-member offsets."""
+    depth, out = 0, []
+    for char, code in zip(body, code_mask(body)):
+        if code and char == '}':
+            depth -= 1
+        out.append(char if (code and depth == 0) or char == '\n' else ' ')
+        if code and char == '{':
+            depth += 1
+    return ''.join(out)
+
+
+def direct_case_items(body, direct=None):
+    """Each direct enum case's name, offset, and optional payload spelling, including multiline case lists."""
+    if direct is None:
+        direct = direct_member_text(body)
+    name = re.compile(r'\s*`?(\w+)`?\s*')
+    separator = re.compile(r'\s*,')
+    for declaration in re.finditer(r'\bcase\s+', direct):
+        index = declaration.end()
+        while match := name.match(direct, index):
+            index, payload = match.end(), None
+            if direct[index:index + 1] == '(':
+                start = index + 1
+                depth, index = 1, start
+                while index < len(direct) and depth:
+                    depth += {'(': 1, ')': -1}.get(direct[index], 0)
+                    index += 1
+                payload = split_top(strip_comments(body[start:index - 1]))[0].split('=')[0].strip()
+            yield match.group(1), match.start(1), payload
+            comma = separator.match(direct, index)
+            if not comma:
+                break
+            index = comma.end()
+
+
+def case_namespace(body, direct, name):
+    opened = re.search(r'\benum\s+`?' + name + r'`?(?![\w`])[^{]*\{', direct)
+    return body_of(body, opened) if opened else ''
+
+
 def authored_payloads(text, schema):
     """The authored payload spellings of a schema's phases and Input cases, by case name."""
-    opening = find_schema(text, schema)
-    if not opening:
-        return {}, {}
-    body = body_of(text, opening)
-    phases = {}
-    plain = strip_comments(body)
-    # A payload may continue over lines: it ends at the parenthesis that closes the one after the case name.
-    for match in re.finditer(r'^\s*(?:@[\w.]+(?:\([^)\n]*\))?\s+)*case\s+`?(\w+)`?\(', plain, re.M):
-        depth, index = 1, match.end()
-        while index < len(plain) and depth:
-            depth += {'(': 1, ')': -1}.get(plain[index], 0)
-            index += 1
-        phases.setdefault(match.group(1), split_top(plain[match.end():index - 1])[0].split('=')[0].strip())
-    inputs = {}
-    opened = re.search(r'enum\s+Input\b[^{]*\{', body)
-    if opened:
-        for case in re.finditer(r'\bcase\s+([^\n;}]+)', strip_comments(body_of(body, opened))):
-            for item in split_top(case.group(1)):
-                item = item.strip()
-                named = re.match(r'`?(\w+)`?\s*\((.*)\)\s*$', item, re.S)
-                if named:
-                    inputs[named.group(1)] = named.group(2).strip()
-    return phases, inputs
+    body = schema_body(text, schema) or ''
+    inputs = case_namespace(body, direct_member_text(body), 'Input')
+    return tuple({name: payload for name, _, payload in direct_case_items(source) if payload is not None}
+                 for source in (body, inputs))
 
 
 def strip_comments(text):
@@ -4397,7 +4703,7 @@ def find_schema(text, schema):
     """The declaration of the schema `schema` up to its opening brace: `Flow` names the first schema of that basename,
     `Flow#1` the second, so two schemas of one basename in different enclosing types stay apart."""
     name, _, occurrence = schema.partition('#')
-    matches = list(re.finditer(r'@StateMachine\([^)]*\)\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:\w+\s+)*enum\s+`?' + re.escape(name) + r'`?[^{]*\{', text))
+    matches = [m for m in schema_declarations(text) if m.group(1) == name]
     index = int(occurrence or 0)
     if index < len(matches):
         return matches[index]
@@ -4966,15 +5272,22 @@ def at_site(case, line, message, name='Case.swift'):
 
 
 def site_kind(case, line, message, name):
-    if name != 'Case.swift':
+    files, _ = split_case(case['text'])
+    if name not in files:
         return None
-    changed = rewritten_lines(case)
-    lines = case['text'].split('\n')
+    lines = files[name].split('\n')
+    if not 0 < line <= len(lines):
+        return None
+    changed, _ = diagnostic_changes(case, name)
     if line in changed:
         return 'token line'
     if declaration_span(lines, line) & changed:
         return 'enclosing declaration'
-    source = lines[line - 1] if 0 < line <= len(lines) else ''
+    source = lines[line - 1]
+    if ('nest-generic' in case['rewrites'] and source.lstrip().startswith('@StateMachine(')
+            and re.fullmatch(DIAG_EXPECT['nest-generic'], message) and line - 1 in changed
+            and re.fullmatch(r'\s*(?:\w+\s+)*enum\s+\w+<[^>]+>\s*\{', lines[line - 2])):
+        return 'generic enclosing type'
     names = [n for n in quoted_names(message) if n]
     spelled = lambda text: any(re.search(r'(?<![\w])' + re.escape(n) + r'(?![\w])', text) for n in names)
     if spelled(source) or any(spelled(lines[n - 1]) for n in declaration_span(lines, line) if 0 < n <= len(lines) and n <= line + 1):
@@ -5000,7 +5313,9 @@ def anchored_token(case, name, line, column, message, token=None):
     if column is None:
         return False
     files, _ = split_case(case['text'])
-    lines = files.get(name, '').split('\n')
+    if name not in files:
+        return False
+    lines = files[name].split('\n')
     if not 0 < line <= len(lines):
         return False
     source_line = lines[line - 1]
@@ -5012,13 +5327,15 @@ def anchored_token(case, name, line, column, message, token=None):
         return False
     # At text the rewrite changed, character by character, or at the token whose inside it changed: a generic clause
     # it added, a list it emptied.
-    if name == 'Case.swift' and any(a - 1 <= column <= b for a, b in changed_columns(case).get(line, [])):
+    changed, columns = diagnostic_changes(case, name)
+    ranges = columns.get(line, [])
+    if any(a - 1 <= column <= b for a, b in ranges):
         return token is None or (TOKEN.match(source_line, column - 1) and re.fullmatch(token, TOKEN.match(source_line, column - 1).group(0)))
     # A string literal stands for its contents: a diagnostic at its opening quote is at the token when the rewrite
     # changed text inside it.
-    if name == 'Case.swift' and source_line[column - 1:column] == '"':
+    if source_line[column - 1:column] == '"':
         closing = source_line.find('"', column)
-        if closing > 0 and any(column < a and b <= closing + 1 for a, b in changed_columns(case).get(line, [])):
+        if closing > 0 and any(column < a and b <= closing + 1 for a, b in ranges):
             return token is None
     # A bracketed expression, or a declaration's name with its parameter or argument list, stands for the
     # whole of it: the diagnostic is at the token when the rewrite changed something inside, or when the
@@ -5035,7 +5352,7 @@ def anchored_token(case, name, line, column, message, token=None):
             if depth == 0:
                 break
         extent = source_line[start:cursor]
-        if name == 'Case.swift' and any(column <= a and b <= cursor + 1 for a, b in changed_columns(case).get(line, [])):
+        if any(column <= a and b <= cursor + 1 for a, b in ranges):
             return token is None
         payloads = dict(re.findall(r'\bcase\s+`?(\w+)`?\s*\(\s*(\w+)', case['text']))
         declared = set(re.findall(r'\b(?:struct|enum|class|actor|typealias|protocol|case|func)\s+`?(\w+)', case['text']))
@@ -5048,14 +5365,14 @@ def anchored_token(case, name, line, column, message, token=None):
         return False
     text = found.group(0)
     # A member expression (`.parallel(limit: 0x0)`) whose arguments the rewrite changed.
-    if text.startswith('.') and name == 'Case.swift' and source_line[found.end():found.end() + 1] == '(':
+    if text.startswith('.') and source_line[found.end():found.end() + 1] == '(':
         depth, end = 0, found.end()
         while end < len(source_line):
             depth += {'(': 1, ')': -1}.get(source_line[end], 0)
             end += 1
             if depth == 0:
                 break
-        if any(column <= a and b <= end + 1 for a, b in changed_columns(case).get(line, [])):
+        if any(column <= a and b <= end + 1 for a, b in ranges):
             return True
     if token is not None:
         return re.fullmatch(token, text) is not None
@@ -5075,7 +5392,7 @@ def anchored_token(case, name, line, column, message, token=None):
             return True
     # Or at text the rewrite wrote, which the seed nowhere holds: the payload a phase alias replaced, for one.
     seed = SEED_TEXTS.get(case.get('seed'), None)
-    if seed is None or line not in rewritten_lines(case):
+    if seed is None or line not in changed:
         return False
     if re.search(r'(?<![\w])' + re.escape(text) + r'(?![\w])', seed) is None:
         return True
@@ -5089,35 +5406,57 @@ def anchored_token(case, name, line, column, message, token=None):
 
 
 
-_CHANGED_COLUMNS = {}
+_DIAGNOSTIC_CHANGES = {}
 
 
-def changed_columns(case):
-    """For each line of the case's primary file a rewrite changed, the column ranges (1-based, inclusive) of the
-    characters it wrote; a line it added whole is changed from its first column to its last."""
+def diagnostic_changes(case, name):
+    """Return `(lines, columns)` of 1-based changed line numbers and inclusive column spans in `name` relative to
+    the seed. Diffs compiled argument order for `Client.swift`, and places the moved seed schema in the same
+    module file under `schema-to-file`."""
     import difflib
-    key = (case.get('seed'), case['text'])
-    if key in _CHANGED_COLUMNS:
-        return _CHANGED_COLUMNS[key]
-    seed = split_case(SEED_TEXTS.get(case.get('seed'), ''))[0]['Case.swift'].split('\n')
-    text = split_case(case['text'])[0]['Case.swift'].split('\n')
-    found = {}
+    moved_schema = 'schema-to-file' in case['rewrites']
+    key = (case.get('seed'), case['text'], name, moved_schema)
+    if key in _DIAGNOSTIC_CHANGES:
+        return _DIAGNOSTIC_CHANGES[key]
+    base = SEED_TEXTS.get(case.get('seed'), '')
+    seeds, seed_client = split_case(base)
+    files, client = split_case(case['text'])
+    if name == 'Client.swift' and client is not None:
+        # compile_case writes Client.swift through order_client_arguments. Diff that compiled text.
+        source_before = order_client_arguments(seed_client or '', base.split(CLIENT_MARKER, 1)[0])
+        source_after = order_client_arguments(client, case['text'].split(CLIENT_MARKER, 1)[0])
+    elif name in files:
+        source_before = seeds.get(name, '')
+        source_after = files[name]
+    else:
+        return set(), {}
+    if moved_schema and name in files:
+        # Move the same seed schema before diffing so its unchanged lines do not count as changed merely by moving.
+        for moved, _ in REWRITE_BY_NAME['schema-to-file'].function(base, None):
+            moved_files, _ = split_case(moved)
+            if schema_names(moved_files['Other.swift']) == schema_names(files.get('Other.swift', '')):
+                source_before = moved_files.get(name, '')
+                break
+    seed = source_before.split('\n')
+    text = source_after.split('\n')
+    lines, columns = set(), {}
     for tag, a1, a2, b1, b2 in difflib.SequenceMatcher(None, seed, text, autojunk=False).get_opcodes():
         if tag == 'equal':
             continue
+        lines.update(range(b1 + 1, b2 + 1))
         for offset, index in enumerate(range(b1, b2)):
             before = seed[a1 + offset] if tag == 'replace' and a1 + offset < a2 else None
             after = text[index]
             if before is None:
-                found[index + 1] = [(1, len(after) + 1)]
+                columns[index + 1] = [(1, len(after) + 1)]
                 continue
             spans = []
             for op, c1, c2, d1, d2 in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
                 if op != 'equal':
                     spans.append((d1 + 1, max(d2, d1 + 1)))
-            found[index + 1] = spans
-    _CHANGED_COLUMNS[key] = found
-    return found
+            columns[index + 1] = spans
+    _DIAGNOSTIC_CHANGES[key] = (lines, columns)
+    return lines, columns
 
 
 def column_of(variant, message, name, line):
@@ -5163,6 +5502,11 @@ def limit_for(case, observed, detail, role, variant=None):
         # added matches the pattern and each one removed reappears, respelled, among those added, so that no member
         # is lost beside the documented change.
         details = detail if isinstance(detail, list) else [detail]
+        if observed == 'client-error':
+            pattern = entry.get('client_pattern')
+            if pattern and details and all(re.fullmatch(pattern, message) for message in details):
+                return entry['id']
+            continue
         if observed == 'interface' and details and all(d[:1] in '+-' for d in details):
             added = [d[1:] for d in details if d.startswith('+')]
             removed = [d[1:] for d in details if d.startswith('-')]
@@ -5197,6 +5541,46 @@ def member_key(line):
     return head, labels
 
 
+def failure_split_signatures(difference):
+    """Whether every signature in `difference` is an `Observed` or `Owned` failure-split pair with matching
+    declaration, constraints, and parameter types."""
+    def signature_key(signature, split):
+        member = re.match(r'(Fz\.[\w.]+)\.(Observed|Owned)\.([^\s.<(]+)', signature)
+        if member is None:
+            return None
+        schema, owner, method = member.groups()
+        opening = signature.find('(', member.end())
+        if opening < 0:
+            return None
+        end = scan_type_end(signature, opening + 1, '') + 1
+        call, suffix = signature[:end], signature[end:]
+        if owner == 'Observed' and suffix.startswith(' throws('):
+            end = scan_type_end(suffix, len(' throws('), '')
+            failure, result = suffix[len(' throws('):end], suffix[end + 1:]
+            if result == f' -> {schema}.Prepared' and bool(failure) and (
+                    failure == f'{schema}.PreparationRejection') == split:
+                return call
+        if owner == 'Owned' and suffix.startswith(' -> '):
+            result = suffix[len(' -> '):]
+            if split:
+                companion = unicodedata.normalize('NFC', method[:1].upper() + method[1:])
+                phase = re.search(r'\bA == ' + re.escape(schema) + r'\.(\w+)(?=[,>])', call)
+                allowed = {f'{schema}.Route.{companion}Result'}
+                if phase:
+                    allowed.add(f'{schema}.Route.{phase.group(1)}.{companion}Result')
+                if result in allowed:
+                    return call
+            elif result.startswith('StateMachine.Advance<') and result.endswith('>'):
+                arguments = [argument.strip() for argument in split_top(result[len('StateMachine.Advance<'):-1])]
+                if len(arguments) == 4 and all(arg.startswith(f'{schema}.Owned<') for arg in arguments[:2]):
+                    return call
+        return None
+
+    before = collections.Counter(signature_key(line[1:], False) for line in difference if line.startswith('-'))
+    after = collections.Counter(signature_key(line[1:], True) for line in difference if line.startswith('+'))
+    return bool(before) and None not in before and before == after
+
+
 def apply_mapping(lines, mapping):
     out = []
     for line in lines:
@@ -5222,24 +5606,6 @@ def order_free(case):
     """Which declaration-ordered graph lists a case's rewrites may permute."""
     return [kind for rewrite, kind in (('reorder-members', 'members'), ('reorder-cases', 'cases'), ('reorder-lists', 'lists'))
             if rewrite in case['rewrites']]
-
-
-def rewritten_lines(case):
-    """Line numbers of the case's text that its rewrites changed relative to its seed."""
-    import difflib
-    key = (case['seed'], case['text'])
-    if key in _REWRITTEN:
-        return _REWRITTEN[key]
-    seed = SEED_TEXTS.get(case['seed'], '').split('\n')
-    lines = set()
-    for tag, a1, a2, b1, b2 in difflib.SequenceMatcher(None, seed, case['text'].split('\n'), autojunk=False).get_opcodes():
-        if tag != 'equal':
-            lines.update(range(b1 + 1, b2 + 2))
-    _REWRITTEN[key] = lines
-    return lines
-
-
-_REWRITTEN = {}
 
 
 def problems_of(outcome):
@@ -5282,9 +5648,26 @@ def judge(case, base, control, variant, prefix=None):
         if verdict.startswith('limit:') or verdict == 'artefact':
             # The other rewrites meet a documented limit (or a fuzzer artefact) first; this case cannot tell more.
             return verdict, 'the other rewrites alone meet a documented limit', observed
+    client_limit = None
+    if variant['status'] == 'client-error' and all(kind == 'eq' for kind in kinds):
+        errors = variant['errors']
+        if all(place == 'client' for place, _ in errors):
+            client_limit = limit_for(case, 'client-error', [message for _, message in errors], role)
+        if client_limit and 'fingerprint' in variant:
+            # A separate client can fail after the schema compiled. Its own diagnostic and the whole change in the
+            # schema's generated signatures must independently show the same documented limit.
+            reference = control if control is not None else base
+            mapping = case.get('mapping', {})
+            difference = interface_difference(reference, variant, mapping, case.get('added', ()))
+            if failure_split_signatures(difference):
+                return f'limit:{client_limit}', 'only the documented failure-split signature changes and matching client diagnostic', describe(variant)
+            return 'fail', 'only the documented failure-split signature changes matching the client diagnostic', describe(variant)
     # Swift rejecting client code where a rewrite changed it is the rewrite's error, not the macro's.
-    if variant['status'] == 'client-error' and set(variant.get('client_lines', [])[:1]) & rewritten_lines(case):
-        return 'artefact', 'valid rewritten client code', describe(variant)
+    if variant['status'] == 'client-error':
+        sites = variant.get('client_sites', [])
+        if sites and all(place == 'client' for place, _ in variant['errors']) and all(
+                line in diagnostic_changes(case, name)[0] for name, line in sites):
+            return 'artefact', 'valid rewritten client code', describe(variant)
     if case.get('expect'):
         entry = next(e for e in LIMITS if e['id'] == case['expect'])
         if variant['status'] == 'macro-diagnostic' and refusal_matches(entry['pattern'], case, variant, True, entry.get('token')):
@@ -5359,8 +5742,7 @@ def judge(case, base, control, variant, prefix=None):
             entry = limit_for(case, 'macro-diagnostic', '', role, variant)
             if entry and (nonnfc or entry not in ('nfc-refusal',)):
                 return f'limit:{entry}', 'as the seed with the declaration renamed, or the NFC refusal', describe(variant)
-        same, why = same_outcome(reference, variant, case.get('mapping', {}), case.get('behaviour', True), case.get('run_mapping'), order_free(case), case.get('added', ()), case['text'],
-                                 case.get('graphs_only', False))
+        same, why = same_outcome(reference, variant, case.get('mapping', {}), case.get('behaviour', True), case.get('run_mapping'), order_free(case), case.get('added', ()), case['text'])
         if same:
             if nonnfc and case.get('inside', True) and variant['status'] == 'ok':
                 return 'policy', 'the NFC refusal for a name not in NFC', 'compiles as the renamed seed does'
@@ -5396,10 +5778,11 @@ def judge(case, base, control, variant, prefix=None):
         return 'fail', 'as the seed (Swift reads the same program)', describe(variant)
     if variant['status'] == 'authored-error':
         return 'artefact', 'as the seed', describe(variant)
-    if variant['status'] in ('expansion-error', 'client-error'):
-        place = 'expansion' if variant['status'] == 'expansion-error' else 'client'
-        messages = sorted({m for p, m in variant['errors'] if p == place})
-        entry = limit_for(case, variant['status'], messages, role)
+    if client_limit:
+        return f'limit:{client_limit}', 'as the seed, or a documented limit', describe(variant)
+    if variant['status'] == 'expansion-error':
+        messages = sorted({m for p, m in variant['errors'] if p == 'expansion'})
+        entry = limit_for(case, 'expansion-error', messages, role)
         if entry:
             return f'limit:{entry}', 'as the seed, or a documented limit', describe(variant)
     if variant['status'] != 'ok':
@@ -5454,62 +5837,109 @@ def run_difference(a, b):
     return f'{len(a)} lines vs {len(b)} lines'
 
 
-def declared_position(text, key, item, owner=None):
-    """Where `text` declares a graph list's item: the offset of the declaration or reference that orders it, or None."""
-    name = item.get('id') if isinstance(item, dict) else item
-    if not isinstance(name, str):
-        return None
-    if key in ('phases', 'terminal', 'restorable'):
-        found = re.search(r'\bcase\s+`?' + re.escape(name) + r'`?\s*\(', text)
-    elif key in ('inputs', 'scopes'):
-        opened = re.search(r'enum\s+' + ('Input' if key == 'inputs' else 'Scope') + r'\b[^{]*\{', text)
-        found = opened and re.compile(r'(?:\bcase\s+|,\s*)`?' + re.escape(name) + r'`?\b').search(text, opened.end())
-    elif key in ('operations', 'events'):
-        found = re.search(r'\benum\s+`?' + re.escape(name) + r'`?\b', text)
-    elif key in ('edges', 'routers', 'candidates'):
-        # By the function that declares it: an edge or router is `<phase>.<name>`.
-        function = item.get('name') if isinstance(item, dict) else name.split('.', 1)[-1]
-        found = function and re.search(r'\bfunc\s+`?' + re.escape(function) + r'`?\s*[(<]', text)
-    elif key == 'activeIn':
-        found = re.search(r'\bcase\s+`?' + re.escape(name) + r'`?\s*\(', text)
-    else:
-        found = None
-    return found.start() if found else None
+def edge_positions(direct, phase_payloads):
+    """Map authored transitions and routers to `(declaration_offset, source_index)` sort keys, using `from:` order
+    for multi-source edges."""
+    phases = {core_name(payload): name for name, payload in phase_payloads.items()}
+    positions = {}
+    functions = collections.defaultdict(list)
+    attributes = None
+    tokens = r'@(?:StateMachine(?:::|\.))?(?:Transition|Route)\b(?:\s*\()?|\bfunc\s+`?(\w+)`?\s*\('
+    identifier = r'(?:\w+|`[^`]+`)'
+    parameter_prefix = re.compile(r'\s*' + identifier + r'(?:\s+' + identifier + r')?\s*:\s*' + MODIFIERS)
+    for token in re.finditer(tokens, direct):
+        if token.group().startswith('@'):
+            attributes = direct[token.end():scan_type_end(direct, token.end(), '')] if token.group().endswith('(') else ''
+        elif attributes is not None:
+            name = token.group(1)
+            functions[name].append(token.start())
+            source_list = re.search(r'(?<![\w`])`?from`?\s*:\s*\[([^\]]*)\]', attributes)
+            if source_list:
+                sources = [re.sub(r'\.\s*`?self`?\s*$', '', spelling) for spelling in split_top(source_list.group(1))]
+            else:
+                parameter = parameter_prefix.match(direct, token.end())
+                sources = [direct[parameter.end():scan_type_end(direct, parameter.end(), ',=')]] if parameter else []
+            for index, spelling in enumerate(sources):
+                phase = phases.get(core_name(spelling))
+                if phase is not None:
+                    positions[f'{phase}.{name}'] = (token.start(), index)
+            attributes = None
+    positions.update({name: (offsets[0], 0) for name, offsets in functions.items() if len(offsets) == 1})
+    return positions
 
 
 # Lists of an edge or an operation whose order StateMachineGraph documents nowhere.
 UNORDERED_LISTS = {'starts', 'emits', 'cancels', 'invalidates', 'requires'}
 
 
-def in_declaration_order(graph, text, keys):
+def in_declaration_order(graph, text, keys, schema):
     """The reference graph with every list under `keys` put in the order `text` declares its items: a rewrite that
     reorders declarations must reorder these lists exactly so, so each variant's lists derive from its own source."""
-    def arrange(value, key, owner):
+    body = schema_body(text, schema)
+    if body is None:
+        return graph
+    direct = direct_member_text(body)
+    phase_cases = list(direct_case_items(body))
+    phases = {name: offset for name, offset, _ in phase_cases}
+    namespaces = {m.group(1): m.start(1) for m in re.finditer(r'\benum\s+`?(\w+)`?', direct)}
+    edges = edge_positions(direct, {name: payload for name, _, payload in phase_cases if payload is not None})
+    orders = dict.fromkeys(('phases', 'terminal', 'restorable', 'activeIn'), phases)
+    orders.update(dict.fromkeys(('events', 'operations'), namespaces))
+    for key, name in (('inputs', 'Input'), ('scopes', 'Scope')):
+        if key in keys:
+            orders[key] = {case: offset for case, offset, _ in direct_case_items(case_namespace(body, direct, name))}
+
+    def position(key, item):
+        name = item.get('id') if isinstance(item, dict) else item
+        if not isinstance(name, str):
+            return None
+        if key in ('edges', 'routers', 'candidates'):
+            return edges.get(name, edges.get(name.partition('.')[2]))
+        return orders.get(key, {}).get(name)
+
+    def arrange(value, key):
         if isinstance(value, dict):
-            anchor = owner
-            if value.get('name') and value.get('source') is not None:
-                function = re.search(r'\bfunc\s+`?' + re.escape(value['name']) + r'`?\s*[(<]', text)
-                anchor = text.rfind('\n    @', 0, function.start()) if function else owner
-            elif value.get('activeIn') is not None:
-                namespace = re.search(r'\benum\s+`?' + re.escape(value.get('id', '')) + r'`?\b', text)
-                anchor = text.rfind('@', 0, namespace.start()) if namespace else owner
-            return {k: arrange(v, k, anchor) for k, v in value.items()}
+            return {k: arrange(v, k) for k, v in value.items()}
         if isinstance(value, list):
-            items = [arrange(v, key, owner) for v in value]
+            items = [arrange(v, key) for v in value]
             if key not in keys:
                 return items
             if key in UNORDERED_LISTS:
                 # The graph documents no order for these; they compare as collections on both sides.
                 return sorted(items, key=lambda v: json.dumps(v, sort_keys=True))
-            positions = [declared_position(text, key, v, owner) for v in value]
+            positions = [position(key, v) for v in value]
             if any(p is None for p in positions):
                 return items
             return [v for _, _, v in sorted(zip(positions, range(len(items)), items), key=lambda t: (t[0], t[1]))]
         return value
-    return arrange(graph, None, None)
+    return arrange(graph, None)
 
 
-def same_outcome(reference, variant, mapping, behaviour, run_mapping=None, order_free=(), added=(), text=None, graphs_only=False):
+def align_graph_lines(reference, variant, mapping):
+    """Reorder `reference`'s `graph:` lines to match `variant`'s `graph_paths` when rewrites move or rename
+    schemas."""
+    lines = reference.get('run', [])
+    paths = reference.get('graph_paths', [])
+    target = variant.get('graph_paths', [])
+    if len(paths) != len(target) or paths == target:
+        return lines
+    graphs = [line for line in lines if line.startswith('graph: ')]
+    if len(graphs) != len(paths):
+        return lines
+    mapped = apply_mapping(paths, mapping)
+    matched = {path: line for path, new, line in zip(paths, mapped, graphs) if path == new and path in target}
+    for path, new, line in zip(paths, mapped, graphs):
+        if path == new and path in target:
+            continue
+        # The demangled mapping omits backticks. Require a unique remaining path with that spelling.
+        choices = [candidate for candidate in target if candidate not in matched and candidate.replace('`', '') == new.replace('`', '')]
+        if len(choices) != 1:
+            return lines
+        matched[choices[0]] = line
+    return [matched[path] for path in target] + [line for line in lines if not line.startswith('graph: ')]
+
+
+def same_outcome(reference, variant, mapping, behaviour, run_mapping=None, order_free=(), added=(), text=None):
     """Whether two outcomes agree, with the control's names mapped onto the variant's (`run_mapping`, when given,
     for the printed output, whose graph names a nested schema by its own name). Under a reordering of members, the
     reference's initializer labels are put in the variant's declaration order, so labels compare in order."""
@@ -5532,19 +5962,16 @@ def same_outcome(reference, variant, mapping, behaviour, run_mapping=None, order
     # Under a reordering, the reference's declaration-ordered lists are put in the variant's own declaration order;
     # the variant's lists are compared as they are, so a generator that sorts them does not pass.
     source = module_text(text) if text is not None else None
-    ra = [('graph: ' + json.dumps(in_declaration_order(json.loads(line[7:]), source, keys), sort_keys=True, ensure_ascii=False)
+    aligned = align_graph_lines(reference, variant, mapping)
+    schemas = iter(graph_keys(raw_graphs('\n'.join(variant.get('run', []))))) if keys and source is not None else iter(())
+    ra = [('graph: ' + json.dumps(in_declaration_order(json.loads(line[7:]), source, keys, next(schemas, '')),
+                                 sort_keys=True, ensure_ascii=False)
            if line.startswith('graph: ') and keys and source is not None else line)
-          for line in apply_mapping(reference.get('run', []), run_mapping)]
+          for line in apply_mapping(aligned, run_mapping)]
     unordered = keys & UNORDERED_LISTS
     rb = [('graph: ' + json.dumps(unorder(json.loads(line[7:]), unordered), sort_keys=True, ensure_ascii=False)
            if line.startswith('graph: ') and unordered else line) for line in variant.get('run', [])]
 
-    if graphs_only and ra != rb:
-        # A renamed phase reaches the report through the owner (edge IDs, phase names), but a report may also print
-        # the old name as text of its own: either reading of each report line will do.
-        plain = [line for line in ra]
-
-        ra = [b if b in (m, q) else m for m, q, b in zip(ra, plain, rb)] if len(ra) == len(rb) else ra
     if behaviour and ra != rb:
         return False, 'run output differs: ' + run_difference(ra, rb)
     return True, ''
@@ -6083,7 +6510,7 @@ def _typecheck_timed(toolchain, directory, source, tag):
 
 def _outcome(result, text, started):
     log, code = result.stdout, (result.returncode if result.verdict == 'ok' else result.verdict)
-    errors = classify(log, schema_lines(text))
+    errors = classify(log, {'Case.swift': schema_lines(text)})
     status = ('memory' if code == 'memory' else 'timeout' if code == 'timeout' else 'launch' if code == 'launch' else
               'crash' if CRASH.search(log) or (isinstance(code, int) and code < 0) else 'ok' if code == 0 else
               'macro-diagnostic' if any(p == 'macro' for p, _ in errors) else 'expansion-error' if any(p == 'expansion' for p, _ in errors) else 'error')
@@ -6516,6 +6943,51 @@ def self_tests(toolchain, output):
     alias = dict(status='macro-diagnostic', errors=[('macro', phase_message)], located=[('macro', phase_message, 'Case.swift', phase_line)],
                  columns=[((phase_message, 'Case.swift', phase_line), alias_column)])
     check('phase alias refused for another reason', 'limit message', judge(alias_case, base, None, other)[0], judge(alias_case, base, None, alias)[0])
+    move_schema = REWRITE_BY_NAME['schema-to-file'].function
+    moved, _ = move_schema(aliased, None)[0]
+    moved_case = self_case(moved, rewrites=['alias-local', 'schema-to-file'], kinds=['eq', 'eq'], role='phase')
+    phase_line, source = next((i, line) for i, line in enumerate(split_case(moved)[0]['Other.swift'].splitlines(), 1)
+                              if 'case idle(FuzzAlias)' in line)
+    def moved_refusal(name, token):
+        return dict(alias, located=[('macro', phase_message, name, phase_line)],
+                    columns=[((phase_message, name, phase_line), source.index(token) + 1)])
+
+    correct = moved_refusal('Other.swift', 'FuzzAlias')
+    check('refusal at an unchanged token of a moved schema', 'refusal token',
+          judge(moved_case, base, None, moved_refusal('Other.swift', 'case'))[0], judge(moved_case, base, None, correct)[0])
+    check('refusal at the moved schema coordinates in another file', 'refusal site',
+          judge(moved_case, base, None, moved_refusal('Case.swift', 'FuzzAlias'))[0], judge(moved_case, base, None, correct)[0])
+    client_seed = base_text + CLIENT_MARKER + 'let before = 1\nlet after = 2\n'
+    SEED_TEXTS['selftest-client-lines'] = client_seed
+    client_case = self_case(client_seed.replace('let after', 'let inserted = 0\nlet after'),
+                            seed='selftest-client-lines', rewrites=['unrelated-declarations'])
+    def client_error(name, line):
+        message = 'cannot convert value to expected argument type'
+        return dict(status='client-error', errors=[('client', message)], located=[('client', message, name, line)],
+                    client_sites=[(name, line)])
+
+    changed_client = judge(client_case, base, None, client_error('Client.swift', 2))[0]
+    check('client error on untouched line after an insertion', 'client error site',
+          judge(client_case, base, None, client_error('Client.swift', 3))[0],
+          'pass' if changed_client == 'artefact' else changed_client)
+    deleted = dict(client_case, text=client_seed.replace('let before = 1\n', ''))
+    check('client error on untouched line after a deletion', 'client error site',
+          judge(deleted, base, None, client_error('Client.swift', 1))[0],
+          'pass' if changed_client == 'artefact' else changed_client)
+    check('client error in a missing source file', 'client error site',
+          judge(client_case, base, None, client_error('Missing.swift', 2))[0],
+          'pass' if changed_client == 'artefact' else changed_client)
+    unordered_client = ('func usePlant() {\n'
+                        '    _ = Plant.MainActorHost(Plant.Idle(), /*fuzz-args*/ onClosing: {}, onLogged: { _ in } /*end-args*/)\n'
+                        '}\n')
+    ordered_client = order_client_arguments(unordered_client, base_text)
+    SEED_TEXTS['selftest-client-order'] = base_text + CLIENT_MARKER + unordered_client
+    ordered = dict(client_case, seed='selftest-client-order', text=base_text + CLIENT_MARKER + ordered_client)
+    check('client error on a line whose compiled arguments were unchanged', 'client error site',
+          judge(ordered, base, None, client_error('Client.swift', 2))[0],
+          'pass' if ordered_client != unordered_client and changed_client == 'artefact' else 'fail')
+    del SEED_TEXTS['selftest-client-lines']
+    del SEED_TEXTS['selftest-client-order']
     unexit = "Phase 'busy' has no outgoing transitions; mark it '@Terminal' or declare a transition from it."
     broken = self_case(base_text.replace('@Terminal case busy', 'case busy'), rewrites=['terminal-flip'], kinds=['break'],
                        refusal=r"Phase 'busy' has no outgoing transitions; mark it '@Terminal' or declare a transition from it\.")
@@ -6565,6 +7037,40 @@ def self_tests(toolchain, output):
     check('renaming whose control fails', 'distinction control', judge(renamed, ran, crashed, ran)[0], judge(renamed, ran, ran, ran)[0])
 
     # (6) Client module and labels.
+    nested_source = ('extension Outer {\n    @StateMachine(mode: .shared)\n    enum Nested {\n'
+                     '        struct Payload { let text = "}" }\n    }\n}\nfunc outside() {}')
+    spans = {'Case.swift': [], 'Other.swift': schema_lines(nested_source)}
+    message = "cannot convert return expression"
+    check('a schema error attributed to client code after a file move', 'diagnostic origin',
+          'fail' if classify(f'Other.swift:4:3: error: {message}', spans) == [('authored', message)] else 'pass',
+          'pass' if spans['Other.swift'] == [(2, 5)]
+          and classify(f'Case.swift:4:3: error: {message}', spans) == [('client', message)]
+          and classify(f'Other.swift:7:3: error: {message}', spans) == [('client', message)] else 'fail')
+    named_values = REWRITE_BY_NAME['schema-named-value'].function
+    decoys = '/* outer /* inner */ @StateMachine(mode: .shared) enum Decoy {} */\n'
+    decoys += 'let example = "@StateMachine(mode: .shared) enum AlsoDecoy {}"\n'
+    initial = named_values(decoys + base_text, None)
+    check('a comment or string treated as a schema', 'rewrite applicability',
+          'fail' if not named_values(decoys, None) else 'pass',
+          'pass' if {info['site'] for _, info in initial} == {'static var Plant inside Plant', 'static var Plant in an extension'} else 'fail')
+    check('a rewrite redeclares a property already in the schema or an extension', 'rewrite applicability',
+          'fail' if initial and all(not named_values(text, None) for text, _ in initial) else 'pass',
+          'pass' if len(initial) == 2 else 'fail')
+    sugar_cases = {
+        '[Swift::Int]': 'Array<Swift::Int>',
+        '[Swift::String: Swift::Int]': 'Dictionary<Swift::String, Swift::Int>',
+        '[(left: Int, right: Int)]': 'Array<(left: Int, right: Int)>',
+        '[2 of Swift::Int]': None,
+    }
+    check('a module selector read as a dictionary separator', 'collection type spelling',
+          'fail' if desugar('[Swift::Int]') != 'Dictionary<Swift, :Int>' else 'pass',
+          'pass' if all(desugar(source) == wanted for source, wanted in sugar_cases.items()) else 'fail')
+    add_helper = REWRITE_BY_NAME['helper-basename'].function
+    first_helper = add_helper(base_text, None)[0][0]
+    helpers = add_helper(first_helper, None)
+    check('two helper rewrites declare the same type', 'rewrite applicability',
+          'fail' if helpers and all('FuzzNotes2' in info['site'] for _, info in helpers) else 'pass',
+          'pass' if all(text.count('FuzzNotes2') == 1 for text, _ in helpers) else 'fail')
     stub = '''import StateMachine
 
 // @Event
@@ -6706,6 +7212,92 @@ func fuzzReport() -> String { "stub" }
     in_order = self_case(base_text, rewrites=['reorder-members'])
     check('declaration-ordered list alphabetized by the generator', 'order comparison',
           judge(in_order, base, None, synthetic(sorted_events))[0], judge(in_order, base, None, synthetic())[0])
+
+    idle_edge = dict(id='idle.retry', name='retry', source='idle')
+    busy_edge = dict(id='busy.retry', name='retry', source='busy')
+    schema = """@StateMachine(mode: .shared)
+enum SCHEMA {
+    @Initial case idle(Idle)
+    case busy(Busy)
+    EDGES
+}
+"""
+    idle_retry = '@Transition(on: Input.retry)\n    static func retry(_ source: Idle) -> Busy { Busy() }'
+    busy_retry = '@Transition(on: Input.retry)\n    static func retry(_ source: Busy) -> Busy { source }'
+    plant = schema.replace('SCHEMA', 'Plant').replace('EDGES', busy_retry + '\n    ' + idle_retry)
+    other = schema.replace('SCHEMA', 'Other').replace('EDGES', idle_retry + '\n    ' + busy_retry)
+    plant_graph = dict(name='Plant', edges=[idle_edge, busy_edge])
+    other_graph = dict(name='Other', edges=[idle_edge, busy_edge])
+    reversed_plant = dict(plant_graph, edges=[busy_edge, idle_edge])
+    reversed_other = dict(other_graph, edges=[busy_edge, idle_edge])
+
+    def graph_run(graphs, paths=(), report='planted'):
+        return dict(status='ok', graph_paths=paths,
+                    run=normalize_run('\n'.join('graph: ' + json.dumps(graph) for graph in graphs) + f'\nreport: {report}'))
+
+    def comparison(reference, variant, **kwargs):
+        return 'pass' if same_outcome(reference, variant, kwargs.pop('mapping', {}), True, **kwargs)[0] else 'fail'
+
+    original_order = graph_run([plant_graph, other_graph])
+    changed_order = graph_run([reversed_plant, other_graph])
+    check('overloaded edges left in seed order after their declarations move', 'order comparison',
+          comparison(original_order, original_order, text=plant + other, order_free=['members']),
+          comparison(original_order, changed_order, text=plant + other, order_free=['members']))
+    nested_input = plant.replace('case busy(Busy)', 'case busy(\n        Busy\n    )\n    enum Input { case retry(Idle) }')
+    check('an Input case mistaken for a phase case when ordering overloaded edges', 'order comparison',
+          comparison(original_order, original_order, text=nested_input + other, order_free=['members']),
+          comparison(original_order, changed_order, text=nested_input + other, order_free=['members']))
+    nested_schema = EMBEDDED_SEEDS['same-basename']
+    phase_alias = REWRITE_BY_NAME['alias-local'].function(nested_schema, None)
+    phase_aliases = {info['site']: info['role'] for _, info in phase_alias}
+    accepts_phase = any(info['site'] == 'return:End' for _, info in REWRITE_BY_NAME['alias-nested'].function(nested_schema, None))
+    has_phase_roles = lambda roles: roles.get('phase-case:Idle') == roles.get('return:End') == 'phase'
+    check('indented phase payloads treated as ordinary alias sites', 'phase site selection',
+          'pass' if has_phase_roles({'case:Idle': 'value', 'return:End': 'value'}) else 'fail',
+          'pass' if has_phase_roles(phase_aliases) and not accepts_phase else 'fail')
+    ordinary_end = nested_schema.replace('@Initial case idle(Idle)', 'struct End: Sendable {}\n        @Initial case idle(Idle)', 1)
+    ordinary_end = ordinary_end.replace('case go }', 'case go(End) }', 1).replace('func go(_ source: Idle)', 'func go(_ source: Idle, _ value: End)', 1)
+    roles = {repr(site): site_role(site) for site in type_sites(ordinary_end)}
+    separates_payloads = lambda roles: roles.get('param:End') == roles.get('case:End') == 'value' and roles.get('return:End') == 'phase'
+    check("another schema's phase type prevents a valid value alias", 'phase site selection',
+          'pass' if separates_payloads(dict(roles, **{'param:End': 'phase'})) else 'fail',
+          'pass' if separates_payloads(roles) else 'fail')
+    check('order from one schema applied to another schema with the same edge names', 'order comparison',
+          comparison(original_order, graph_run([reversed_plant, reversed_other]), text=plant + other, order_free=['members']),
+          comparison(original_order, changed_order, text=plant + other, order_free=['members']))
+    multi_source = '@Transition(from: [Busy.self, Idle.self], on: Input.retry)\n    static func retry() -> Busy { Busy() }'
+    listed = schema.replace('SCHEMA', 'Plant').replace('EDGES', multi_source)
+    check('multi-source edges kept in the old source-list order', 'order comparison',
+          comparison(graph_run([plant_graph]), graph_run([plant_graph]), text=listed, order_free=['lists']),
+          comparison(graph_run([plant_graph]), graph_run([reversed_plant]), text=listed, order_free=['lists']))
+
+    moved = graph_run([reversed_plant, plant_graph], ['Left.Plant', 'Right.Plant'])
+    before_move = graph_run([plant_graph, reversed_plant], ['Right.Plant', 'Left.Plant'])
+    wrong_after_move = graph_run([plant_graph, reversed_plant], ['Left.Plant', 'Right.Plant'])
+    check('graphs swapped between schemas of the same name after a file move', 'schema paths',
+          comparison(before_move, wrong_after_move), comparison(before_move, moved))
+
+    phase_rename = {'idle': 'href'}
+    renamed_graph = dict(plant_graph, edges=[dict(idle_edge, id='href.retry', source='href'), busy_edge])
+    report = graph_run([plant_graph], report='retained 1; idle.retry')
+    renamed_report = graph_run([renamed_graph], report='retained 1; href.retry')
+    check('phase rename with a stale receipt ID in the report', 'rename comparison',
+          comparison(report, graph_run([renamed_graph], report='retained 1; idle.retry'), mapping=phase_rename),
+          comparison(report, renamed_report, mapping=phase_rename))
+    check('phase rename with a changed status beside the correct receipt ID', 'rename comparison',
+          comparison(report, graph_run([renamed_graph], report='retained 2; href.retry'), mapping=phase_rename),
+          comparison(report, renamed_report, mapping=phase_rename))
+
+    raw = module_text(rename(EMBEDDED_SEEDS['same-basename'], 'Right', '`Left.Flow`'))
+    parsed_paths = schema_path_list(raw)
+    check('harness that flattens a raw identifier into a dotted path', 'schema paths',
+          'fail' if '`Left.Flow`.Flow.graph' not in graph_accessor(raw, ['Left.Flow', 'Left.Flow.Flow']) else 'pass',
+          'pass' if parsed_paths == ['Left.Flow', '`Left.Flow`.Flow'] and '`Left.Flow`.Flow.graph' in graph_accessor(raw, parsed_paths) else 'fail')
+    available = '// fuzz-file: Other.swift\n@available(macOS 14, *)\n' + plant
+    check('cross-file graph accessor omitting the schema availability guard', 'harness availability',
+          'fail' if 'if #available(macOS 14, *)' not in graph_accessor('', ['Plant']) else 'pass',
+          'pass' if 'if #available(macOS 14, *)' in graph_accessor(module_text(available), ['Plant']) else 'fail')
+
     pool = ('import StateMachine\n\n@StateMachine(mode: .shared, owners: [.mainActorHost])\nnonisolated enum Pool: Sendable {\n'
             '    struct Idle: Sendable {}\n    @Initial case idle(Idle)\n    @Operation(activeIn: [Idle.self])\n    enum Fetch {}\n'
             '    @Event\n    enum Logged {}\n}\n')
@@ -6818,6 +7410,140 @@ func fuzzReport() -> String { "stub" }
           'fail' if synthetic(misplaced)['inventory_problems'] else 'pass',
           'pass' if not synthetic()['inventory_problems'] else f"fail: {synthetic()['inventory_problems'][:1]}")
 
+    # (18b) Rewrite composition preserves authored lookup and declarations before the macro is checked.
+    def mutation(name, source, site):
+        return next((new for new, info in REWRITE_BY_NAME[name].function(source, random.Random(0))
+                     if info['site'] == site), '')
+
+    def compiled(source, name):
+        return compile_case(toolchain, directory / name, source) if source else {}
+
+    nested_plant = mutation('nest-schema', base_text, 'inside actor FuzzOuter')
+    outside_alias = mutation('alias-file', nested_plant, 'alias:Detail')
+    alias_target = 'typealias FuzzOutside = FuzzOuter.Plant.Logged.Detail'
+    missing_outer = outside_alias.replace(alias_target, 'typealias FuzzOutside = Plant.Logged.Detail')
+    check("file alias that loses the nested schema's enclosing type", 'rewrite composition',
+          'fail' if compiled(missing_outer, 'alias-without-enclosing-type').get('status') != 'ok' else 'pass',
+          'pass' if alias_target in outside_alias and compiled(outside_alias, 'alias-with-enclosing-type').get('status') == 'ok' else 'fail')
+
+    generic_aliases = base_text.replace('    typealias Detail = Swift::String',
+                                       '    typealias Identity<Item: ~Copyable> = Item\n'
+                                       '    typealias Map<Value> = [Swift::String:Value]\n'
+                                       '    typealias Closed<Item> = (Item: Swift::Int, value: Swift::Int)\n'
+                                       '    typealias Detail = Identity<Swift::String>')
+    escaping_alias = generic_aliases.replace('> = Item', '> = EscapingItem').replace(
+        'import StateMachine\n', 'import StateMachine\ntypealias EscapingItem = Item\n')
+    closed_alias = mutation('alias-file', generic_aliases, 'alias:(Item: Swift::Int, value: Swift::Int)')
+    check('file alias refers to an out-of-scope parameter of a generic alias', 'rewrite composition',
+          'fail' if compiled(escaping_alias, 'alias-free-parameter').get('status') != 'ok' else 'pass',
+          'pass' if not mutation('alias-file', generic_aliases, 'alias:Item')
+          and not mutation('alias-file', generic_aliases, 'alias:[Swift::String:Value]')
+          and compiled(closed_alias, 'alias-closed-generic').get('status') == 'ok' else 'fail')
+
+    extended = mutation('schema-named-value', base_text, 'static var Plant in an extension')
+    generic_plant = mutation('nest-generic', extended, 'inside a generic type')
+    broken_property = generic_plant.replace('static var Plant:', 'static var FuzzOuter.Plant:')
+    generic_refusal = DIAG_EXPECT['nest-generic']
+    generic_control = compiled(generic_plant, 'generic-unqualified-property')
+
+    def generic_plant_verdict(source, outcome):
+        candidate = self_case(source, rewrites=['schema-named-value', 'nest-generic'])
+        return 'pass' if refusal_matches(generic_refusal, candidate, outcome,
+                                         exact=True, consequent=DIAG_CONSEQUENCES) else 'fail'
+
+    check("nesting qualifies a value declaration's name", 'rewrite composition',
+          generic_plant_verdict(broken_property, compiled(broken_property, 'generic-qualified-property')),
+          generic_plant_verdict(generic_plant, generic_control))
+
+    generic_lines = generic_plant.split('\n')
+    initial_line = next(i for i, line in enumerate(generic_lines, 1) if '@Initial case' in line)
+    schema_line = next(i for i, line in enumerate(generic_lines, 1) if line.startswith('@StateMachine('))
+
+    def misplaced_generic(column, line):
+        message = 'Generic schemas, including schemas inside a generic enclosing type, are unsupported.'
+        moved = dict(generic_control, located=[(p, m, name, line if m == message else n)
+                                              for p, m, name, n in generic_control['located']],
+                     columns=[((m, name, line if m == message else n), column if m == message else col)
+                              for (m, name, n), col in generic_control['columns']])
+        return generic_plant_verdict(generic_plant, moved)
+
+    check('generic-enclosure refusal at a different attribute', 'enclosing type diagnostic',
+          misplaced_generic(generic_lines[initial_line - 1].index('@Initial') + 1, initial_line),
+          generic_plant_verdict(generic_plant, generic_control))
+    check('generic-enclosure refusal inside the attribute name', 'enclosing type diagnostic',
+          misplaced_generic(3, schema_line), generic_plant_verdict(generic_plant, generic_control))
+
+    qualified = base_text.replace('func stop(_ source: Idle)', 'func stop(_ source: Plant.Idle)')
+    shadowed = mutation('schema-named-type', qualified, 'struct Plant inside Plant')
+    captured = shadowed.replace('func stop(_ source: Self.Idle)', 'func stop(_ source: Plant.Idle)')
+    shadow_refusal = next(e['pattern'] for e in LIMITS if e['id'] == 'reserved-names')
+
+    def shadow_verdict(source, name):
+        return 'pass' if refusal_matches(shadow_refusal, self_case(source), compiled(source, name), exact=True) else 'fail'
+
+    check('new schema-name shadow captures a phase type', 'rewrite composition',
+          shadow_verdict(captured, 'shadow-captured-reference'),
+          shadow_verdict(shadowed, 'shadow-preserved-reference'))
+
+    bound = all_seeds()['doc-Lookup'].replace('import StateMachine', 'import StateMachine\n'
+                                           'typealias FuzzEdgeScalar = Swift::String\n'
+                                           'typealias FuzzUnrelated = Swift::Int\n'
+                                           'typealias FuzzRequestScalar = Swift::String')
+    bound = bound.replace('_ query: String', '_ query: FuzzEdgeScalar').replace(
+        'typealias Input = String', 'typealias Input = FuzzRequestScalar')
+    rebinds = {info['site']: new for new, info in REWRITE_BY_NAME['rebind-alias'].function(bound, random.Random(0))}
+    blocked = {'FuzzEdgeScalar = Swift::Substring', 'FuzzRequestScalar = Swift::Substring'}
+    mismatched = bound.replace('FuzzEdgeScalar = Swift::String', 'FuzzEdgeScalar = Swift::Substring').replace(
+        'FuzzRequestScalar = Swift::String', 'FuzzRequestScalar = Swift::Substring')
+    check('rebinding changes an edge or operation contract', 'rewrite composition',
+          'fail' if compiled(mismatched, 'rebind-edge-and-operation').get('status') != 'ok' else 'pass',
+          'pass' if blocked.isdisjoint(rebinds)
+          and compiled(rebinds.get('FuzzUnrelated = Swift::Int64'), 'rebind-unrelated').get('status') == 'ok' else 'fail')
+
+    event = all_seeds()['own-report-local'].replace('    @Event\n    enum Logged { typealias Payload = String }',
+                                                    '    typealias LogText = Swift::String\n'
+                                                    '    @Event()\n    enum Logged { typealias Payload = LogText }')
+    event_rebinding = 'LogText = Swift::Substring'
+    typed_event = event.replace('LogText = Swift::String', event_rebinding)
+    literal_event = event.replace('source.log.joined(separator: ",")', '"done"').replace(
+        '                switch command {', '                if case .logged(let line) = command { _ = line }\n'
+        '                switch command {')
+    check('rebinding an event payload breaks a typed producer', 'rewrite composition',
+          'fail' if compiled(typed_event, 'rebind-typed-event').get('status') != 'ok' else 'pass',
+          'pass' if not mutation('rebind-alias', event, event_rebinding)
+          and compiled(mutation('rebind-alias', literal_event, event_rebinding), 'rebind-literal-event').get('status') == 'ok' else 'fail')
+
+    # (18c) Separate-client failure-split limits require matching generated signature changes.
+    pinned = all_seeds()['own-value-generic-failure'].replace(
+        'import StateMachine\n', 'import StateMachine\ntypealias FuzzUnrelated = Swift::Int\n', 1)
+    pinned += '\nfunc checkUnrelatedType() { let _: FuzzUnrelated = 0 }\n'
+    SEED_TEXTS['selftest-client-split'] = pinned
+    split_failure = mutation('alias-file', pinned, 'throws:Problem<10>')
+    pinned_base = compiled(pinned, 'pinned-failure-base')
+    split_outcome = compiled(split_failure, 'pinned-failure-split')
+    split_candidate = self_case(split_failure, rewrites=['alias-file'], seed='selftest-client-split')
+    split_verdict = judge(split_candidate, pinned_base, None, split_outcome)[0]
+    changed_type = split_failure.replace('FuzzUnrelated = Swift::Int', 'FuzzUnrelated = Swift::String')
+    extra_error = compiled(changed_type, 'pinned-failure-with-unrelated-error')
+    extra_candidate = dict(split_candidate, text=changed_type)
+    unsplit = dict(split_outcome, fingerprint=pinned_base.get('fingerprint', []))
+    check('typed-throws client error beside an unrelated error', 'documented client limit',
+          judge(extra_candidate, pinned_base, None, extra_error)[0],
+          split_verdict if sum(place == 'client' for place, _ in extra_error['errors']) == 2 else 'fail')
+    check('typed-throws client error without the documented signature split', 'documented client limit',
+          judge(split_candidate, pinned_base, None, unsplit)[0], split_verdict)
+    changed_parameter = dict(split_outcome, fingerprint=[
+        line.replace('(Swift.Int) throws(', '(Swift.String) throws(')
+        if '.Observed.read<' in line else line for line in split_outcome['fingerprint']])
+    check("typed-throws signature split changes a method's parameter type", 'documented client limit',
+          judge(split_candidate, pinned_base, None, changed_parameter)[0], split_verdict)
+    old_owned = ('-Fz.Picker.Owned.choose< where A == Fz.Picker.Idle>(Swift.Bool) -> StateMachine.Advance<'
+                 'Fz.Picker.Owned<Fz.Picker.Idle>, Fz.Picker.Owned<Fz.Picker.Chosen>, Swift.Never, Fz.Picker.Problem>')
+    routed_owned = '+Fz.Picker.Owned.choose< where A == Fz.Picker.Idle>(Swift.Bool) -> Fz.Picker.Route.Idle.ChooseResult'
+    check("owned signature split returns another phase's route result", 'documented client limit',
+          'fail' if not failure_split_signatures([old_owned, routed_owned.replace('.Route.Idle.', '.Route.Chosen.')]) else 'pass',
+          'pass' if failure_split_signatures([old_owned, routed_owned]) else 'fail')
+
     # (19) Deprecation fix-its: read from the compiler's notes, applied, and the fixed client compiled.
     noted = ("Client.swift:4:42: warning: 'old' is deprecated: replaced by 'Flow.next(_:_:)' [#DeprecatedDeclaration]\n"
              "    _ = owned.old(7)\n                                         ^\n"
@@ -6853,6 +7579,26 @@ func fuzzReport() -> String { "stub" }
     def reaches(function, text, needle):
         return any(needle in (text_ + info.get('site', '')) for text_, info in function(text, random.Random(0)))
     never = lambda text, rng: []
+    redirect = REWRITE_BY_NAME['redirect-entrance'].function
+    scoped_start = all_seeds()['fx-GMT-scope-active']
+    chain = chain_seed(2, 3)
+    eligible_scope = scoped_start.replace('@Active(in: [Searching.self])', '@Active(in: [Searching.self, Idle.self])')
+    required_scope = eligible_scope.replace('case query', 'case query\n        @Active(in: [Searching.self])\n        case session')
+    required_scope = required_scope.replace('scope: Scope.query)', 'scope: Scope.query, requires: [Scope.session])')
+    eligible_scope = eligible_scope.replace('\n}', '''
+    @Transition(onSuccess: Lookup.self)
+    fileprivate static func foundAtIdle(_ source: Idle, _ count: Lookup.Output) -> Idle { Idle() }
+}''')
+    empty_starts = chain.replace('onSuccess: Work.self)', 'onSuccess: Work.self, starts: [])')
+    check('redirect moves an operation start out of its scope', 'rewrite coverage',
+          'fail' if not redirect(scoped_start, None) and not redirect(scoped_start.replace('starts:', '`starts`:'), None)
+          and not redirect(required_scope, None) else 'pass',
+          'pass' if reaches(redirect, chain, 'step1 into C1 instead of C2') else 'fail')
+    check('rewrite drops a redirect whose operation remains eligible', 'rewrite coverage',
+          'fail' if not reaches(never, chain, 'go into C2 instead of C1') else 'pass',
+          'pass' if reaches(redirect, chain, 'go into C2 instead of C1')
+          and reaches(redirect, eligible_scope, 'begin into Idle instead of Searching')
+          and reaches(redirect, empty_starts, 'step1 into C1 instead of C2') else 'fail')
     message = all_seeds()['own-deprecated-message-edge']
     permute = REWRITE_BY_NAME['permute-availability'].function
     check('availability options never reordered', 'rewrite coverage',
@@ -6935,7 +7681,7 @@ def make_case(seed_name, names, choices, text, info, number):
                 run_mapping=info['run_mapping'], behaviour=info['behaviour'], choices=list(choices),
                 inside=info.get('inside', True), flags=info['flags'], added=info.get('added', []), verb=info.get('verb'),
                 expect=info.get('expect'), breaking=info.get('breaking'), signature=info.get('signature'),
-                graphs_only=info.get('graphs_only'), refusal=info.get('refusal'))
+                refusal=info.get('refusal'))
 
 
 
@@ -7131,7 +7877,7 @@ def compose(seed_name, text, names, choices):
             info_all['verb'] = info['verb']
         if info.get('expect'):
             info_all['expect'] = info['expect']
-        for key in ('breaking', 'signature', 'graphs_only', 'refusal', 'keep_client'):
+        for key in ('breaking', 'signature', 'refusal', 'keep_client'):
             if info.get(key):
                 info_all[key] = info[key]
         # The strongest role a step gives decides which limits apply: a phase payload, then a result shape.
