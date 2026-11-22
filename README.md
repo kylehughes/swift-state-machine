@@ -29,11 +29,10 @@ UIKit, and `StateMachineTesting` drives real owners from tests.
 
 ## Installation
 
-The package has no tagged release yet, so depend on its `main` branch in
-`Package.swift`.
+Add State Machine to your `Package.swift` dependencies.
 
 ```swift
-.package(url: "https://github.com/kylehughes/swift-state-machine.git", branch: "main")
+.package(url: "https://github.com/kylehughes/swift-state-machine.git", from: "1.0.0")
 ```
 
 Add the `StateMachine` product to any target that declares a graph. The macros
