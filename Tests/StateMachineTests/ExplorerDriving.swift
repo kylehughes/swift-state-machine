@@ -483,7 +483,10 @@ import StateMachineUI
             host.site = { [weak self] in self?.fire($0) }
             world.setDestroyHook { [weak self] in MainActor.assumeIsolated { self?.fire(.destroy) } }
         }
-        if let shot = subject.snapshot() { lastShown = (shot.id, shot.stamp) }
+        if let shot = subject.snapshot() {
+            lastShown = (shot.id, shot.stamp)
+            world.readDisplay(shot.id, at: .settled)
+        }
         shown.insert(lastShown.id)
         traces.tracksSnapshot = kind == .drivingObservation
         installed = subject.install({ [weak self] in self?.reported($0) }, { [weak self] in self?.changed($0) })
@@ -927,6 +930,9 @@ import StateMachineUI
     }
 
     private func reported(_ value: Bool) {
+        if let id = subject.snapshot()?.id {
+            world.readDisplay(id, at: kind == .drivingCombine ? .combineReport : .boundary)
+        }
         traces.report(value, world, observation: kind == .drivingObservation)
         reportsThisStep += 1
         boundary(topLevel: false)
@@ -974,6 +980,9 @@ import StateMachineUI
         }
     }
     private func changed(_ old: Int?) {
+        if let id = old ?? subject.snapshot()?.id {
+            world.readDisplay(id, at: .willChange)
+        }
         if let old { traces.snapshot.invalidated(old, world) }
         willChanges += 1
         changeDepth += 1
@@ -1069,6 +1078,7 @@ import StateMachineUI
         subject.snapshot()?.releaseCapture()
         if subject.held(), let shot = subject.snapshot() {
             let (id, revision) = (shot.id, shot.stamp)
+            world.readDisplay(id, at: topLevel ? .settled : .boundary)
             if id != lastShown.id {
                 if revision < lastShown.revision {
                     world.violate(.revisionRegressed, "r\(revision) shown after r\(lastShown.revision)")

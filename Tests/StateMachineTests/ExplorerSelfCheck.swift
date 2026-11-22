@@ -615,6 +615,31 @@ func explorerIngressMembershipProblem(id: Int, revision: UInt64, staged: Set<Int
         control: !unread(freeFirst: true)
     )
 
+    // The caller outlives the presentation with a reference to the old snapshot. Only the
+    // replacement belongs to teardown, even if both snapshots have the same revision.
+    func earlyDisplayRelease(freeFirst: Bool) -> Bool {
+        flagged(.shownBeforeSlotFree) { world in
+            guard let registration = world.admit(host: 0) else { return }
+            let old = world.makeValue(.initial, attempt: nil, revision: 10)
+            let current = world.makeValue(.hostRead(host: 0), attempt: 1, revision: 10)
+            world.readDisplay(old.id, at: .settled)
+            world.readDisplay(old.id, at: .willChange)
+            world.readDisplay(current.id, at: .willChange)
+            world.readDisplay(current.id, at: .combineReport)
+            world.state.withLock { $0.presentationGone = true }
+            _ = consume old
+            if freeFirst { world.freed(registration) }
+            _ = consume current
+            if !freeFirst { world.freed(registration) }
+        }
+    }
+    check(
+        .shownBeforeSlotFree,
+        "the snapshot still displayed at release destroyed before its slot is free",
+        planted: earlyDisplayRelease(freeFirst: false),
+        control: !earlyDisplayRelease(freeFirst: true)
+    )
+
     // An invented ingress delivery.
     check(
         .ingressDelivery,

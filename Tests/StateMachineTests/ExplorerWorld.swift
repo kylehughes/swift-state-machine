@@ -130,7 +130,30 @@ nonisolated final class ExplorerWorld: Sendable {
         var shownAt: Int?
         var destroyed = false
     }
+    /// The snapshot I3 can still attribute to the presentation at release.
+    ///
+    /// A change callback reads the outgoing snapshot. A later read of a different identity or a
+    /// settled read witnesses the assignment. Combine also announces liveness through
+    /// `objectWillChange`, so its report accounts for one announcement while leaving any other
+    /// in-flight change pending.
+    struct Display: Sendable {
+        enum Sample { case boundary, willChange, combineReport, settled }
+        private var identity: Int?
+        private var announcements = 0
+        var knownCurrent: Int? { announcements == 0 ? identity : nil }
+
+        mutating func read(_ id: Int, at sample: Sample) {
+            if id != identity || sample == .settled { announcements = 0 }
+            identity = id
+            switch sample {
+            case .willChange: announcements += 1
+            case .combineReport: announcements = max(0, announcements - 1)
+            case .boundary, .settled: break
+            }
+        }
+    }
     struct State: Sendable {
+        var display = Display()
         var registrations: [Int: Registration] = [:]
         var values: [Int: Value] = [:]
         var slots: [Int: Int] = [:]
@@ -288,6 +311,10 @@ nonisolated final class ExplorerWorld: Sendable {
     func revision(of id: Int) -> UInt64 { state.withLock { $0.values[id]?.revision ?? 0 } }
     func attempt(of id: Int) -> Int? { state.withLock { $0.values[id]?.attempt } }
 
+    func readDisplay(_ id: Int, at sample: Display.Sample) {
+        state.withLock { $0.display.read(id, at: sample) }
+    }
+
     /// A client value's destructor ran.
     func destroyed(_ id: Int, revision: UInt64) {
         let onMain = Thread.isMainThread
@@ -329,7 +356,7 @@ nonisolated final class ExplorerWorld: Sendable {
                     )
                 )
             }
-            if state.presentationGone, value.shownAt != nil, !occupied.isEmpty {
+            if state.presentationGone, state.display.knownCurrent == id, !occupied.isEmpty {
                 found.append(
                     .init(
                         invariant: .shownBeforeSlotFree,

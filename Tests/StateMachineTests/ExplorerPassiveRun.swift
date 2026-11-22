@@ -190,6 +190,7 @@ struct ExplorerOutcome: Sendable {
         let initial = world.initialValue()
         lastShown = (initial.id, 0)
         shown.insert(initial.id)
+        world.readDisplay(initial.id, at: .settled)
         let capture = ExplorerCapture(world)
         guard
             let subject = ExplorerPassiveSubject.make(
@@ -1189,6 +1190,9 @@ struct ExplorerOutcome: Sendable {
     // MARK: Callbacks
 
     private func reported(_ value: Bool) {
+        if let id = subject.snapshot()?.id {
+            world.readDisplay(id, at: kind == .combine ? .combineReport : .boundary)
+        }
         traces.report(value, world, observation: kind == .observation)
         boundary(topLevel: false)
         let (previous, count) = world.state.withLock { state -> (Bool?, Int) in
@@ -1275,6 +1279,9 @@ struct ExplorerOutcome: Sendable {
         }
     }
     private func changed(_ old: Int?) {
+        if let id = old ?? subject.snapshot()?.id {
+            world.readDisplay(id, at: .willChange)
+        }
         if let old { traces.snapshot.invalidated(old, world) }
         willChanges += 1
         changeDepth += 1
@@ -1373,6 +1380,7 @@ struct ExplorerOutcome: Sendable {
     private func boundary(topLevel: Bool) {
         if subject.held(), let shot = subject.snapshot() {
             let (id, revision) = (shot.id, shot.revision)
+            world.readDisplay(id, at: topLevel ? .settled : .boundary)
             // A publication already in progress can justify a refusal from its callback once it assigns
             // the announced value. A later observation or a value made after the refusal cannot.
             if !refusedApplies.isEmpty {
@@ -1424,7 +1432,6 @@ struct ExplorerOutcome: Sendable {
                 }
                 lastShown = (id, revision)
                 shown.insert(id)
-                world.state.withLock { $0.values[id]?.shownAt = 1 }
             }
             if topLevel {
                 let last = world.state.withLock { $0.reports.last } ?? false

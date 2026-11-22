@@ -562,8 +562,12 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   presentation takes such a snapshot and releases it on a later main-actor turn, once the slot is free
   (`stopObserving()` reference, `PresentingState.md` "Separate observation from running work"), so a destructor that
   registers again finds the slot free. The disposal turn of a released driving presentation does not keep it either.
-- **I3** A snapshot the presentation showed, destroyed after the presentation was deallocated, is destroyed only
-  once no registration of the presentation holds a slot. Source: class reference ("only once that removal has
+- **I3** The snapshot the presentation still holds at teardown, identified by object identity rather than revision
+  alone, is destroyed only once no registration of the presentation holds a slot. An already displaced earlier
+  snapshot may be released later by a client frame without violating this rule. Because a change callback reads the
+  outgoing snapshot, the held identity is uncertain during an unsampled assignment until a later read observes a
+  different identity or reaches a settled read (in Combine, a liveness report accounts for one `objectWillChange`
+  announcement without clearing another in-flight change). Source: class reference ("only once that removal has
   completed releases its snapshot").
 - **I4** The revision closure's capture is destroyed only once no registration holds a slot. Source: as I3 ("its
   closures").
@@ -1085,6 +1089,7 @@ check that is not trusted.
 |---|---|
 | I1 | A client value released on a worker thread. |
 | I2 | An unread element of a let-go registration released before its slot is free. |
+| I3 | The snapshot still displayed at release destroyed before its slot is free (the control releases a same-revision displaced snapshot early and frees the slot before destroying the current one). |
 | I5 | `false` reported while a let-go registration holds its slot. |
 | I10 | An unannounced seed of a stopped registration shown after the stop (the control is a receipt). |
 | I11 | A value of an older observation published after one of a newer observation, and a lower revision within one observation. |
@@ -1107,7 +1112,7 @@ check that is not trusted.
 | I54 | An unshown value of a stopped registration kept after its cancellation settled. |
 | I55 | Every completed payload kept behind a held handler for one pending registration. |
 
-Untested invariants with no planted defect of their own are I3, I4, I6–I9, I12–I16, I22, I24–I35, I38, I40–I43, I45,
+Untested invariants with no planted defect of their own are I4, I6–I9, I12–I16, I22, I24–I35, I38, I40–I43, I45,
 I46, and I49. Each of these has been shown to find a defect only by the planted or historical defect it entered the
 explorer with.
 
