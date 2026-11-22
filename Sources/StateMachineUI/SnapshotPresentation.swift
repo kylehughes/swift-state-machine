@@ -684,13 +684,6 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         // one was accepted gives its revision back.
         let accepted: UInt64
     }
-    /// The task that follows an observation, by the observation's generation and the record of that
-    /// task's cancellation, which its cancellation handler sets on whichever thread cancels it.
-    private struct Follower {
-        let generation: UInt64
-        let cancellation: WaitCancellation
-    }
-
     weak var surface: Surface?
     // Replaced by a closure that captures nothing when a released presentation is disposed of, so the
     // client's closure is released on the main actor.
@@ -729,8 +722,9 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         // What waits for it to return, as an asynchronous observation whose first snapshot it shows does.
         var ends: [@MainActor () -> Void] = []
     }
-    // The task that follows the current observation, if a task follows it.
-    private var follower: Follower?
+    // Cancellation record for the current observation's follower, attached at claim so cancellation
+    // while registering still withdraws earlier deferred applies.
+    private var followerCancellation: WaitCancellation?
     // The registration the current observation holds, whose gate is the one a destructor closes.
     private var held = HeldRegistration.none {
         didSet { gate.current = held.gate }
@@ -818,7 +812,7 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         publication?.deferred = nil
         registering.removeAll()
         publication?.abandoned = []
-        follower = nil
+        followerCancellation = nil
         revision = { _ in 0 }
         let ends = publication?.ends ?? []
         publication?.ends = []
@@ -1036,17 +1030,20 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         // cancels while the observation it replaces ends: the sequence is released without being shown,
         // before the end is reported. One that a callback of that report cancels releases it then.
         let consumer = snapshots.claim()
-        let observing = endObservation(handing: Self.registration(consumer), unless: { Task.isCancelled })
+        let observing = endObservation(
+            handing: Self.registration(consumer),
+            following: consumer == nil ? nil : cancellation,
+            unless: { Task.isCancelled }
+        )
+        defer { endFollowing(observing) }
         guard let consumer, generation == observing else { return }
         guard !Task.isCancelled else {
             _ = endObservation()
             return
         }
-        follower = Follower(generation: observing, cancellation: cancellation)
         let next = present(consumer, current: nil, observing: observing, following: true)
         await Self.follow({ [weak self] in self }, consumer, observing: observing, from: next)
         await awaitOwnPublication(observing)
-        endFollowing(observing)
     }
     func follow<Failure: Error>(
         snapshotsFrom register: @MainActor () async throws(Failure) -> SnapshotSequence<Snapshot>
@@ -1068,7 +1065,8 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         snapshotsFrom register: @MainActor () async throws(Failure) -> SnapshotSequence<Snapshot>,
         cancellation: WaitCancellation
     ) async throws(Failure) where Snapshot: Sendable {
-        let observing = endObservation()
+        let observing = endObservation(following: cancellation)
+        defer { endFollowing(observing) }
         guard generation == observing, !Task.isCancelled,
             await awaitEarlierRegistrations(observing, source: nil, cancellable: true), !Task.isCancelled
         else { return }
@@ -1082,17 +1080,16 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
             throw error
         }
         guard
-            let (consumer, next) = begin(snapshots, observing: observing, attempt: attempt, following: cancellation)
+            let (consumer, next) = begin(snapshots, observing: observing, attempt: attempt, following: true)
         else { return }
         await Self.follow({ [weak self] in self }, consumer, observing: observing, from: next)
         await awaitOwnPublication(observing)
-        endFollowing(observing)
     }
     func stopObserving() { _ = endObservation() }
     // Clears the record of the task that followed the observation `observing`, which has returned; a
     // newer observation's record stays.
     private func endFollowing(_ observing: UInt64) {
-        if follower?.generation == observing { follower = nil }
+        if generation == observing { followerCancellation = nil }
     }
 
     // MARK: Attempts
@@ -1402,18 +1399,12 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     // claimed the sequence, or a newer observation replaced this one while the closure ran, and the
     // sequence is then released before the attempts waiting for it go on. `following` reports that the
     // calling task follows the observation, so its cancellation ends it.
-    //
-    // `cancellation` is the record of the task that follows the observation, which becomes the
-    // presentation's only once the observation is known to be current and to hold its sequence, and
-    // before any client code runs, so an observation that lost its generation never overwrites the record
-    // of the one that replaced it.
     private func begin(
         _ snapshots: SnapshotSequence<Snapshot>,
         observing: UInt64,
         attempt: PresentationAttempt<Snapshot>,
-        following cancellation: WaitCancellation? = nil
+        following: Bool = false
     ) -> (SnapshotSequence<Snapshot>.Consumer, Continuation)? where Snapshot: Sendable {
-        let following = cancellation != nil
         let consumer = snapshots.claim()
         // A task cancelled while its owner registered follows nothing: the registration is released,
         // and the observation ends unless another one replaced it.
@@ -1422,7 +1413,6 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
         attempt.end()
         if cancelled, generation == observing { _ = endObservation() }
         guard adopted, let consumer else { return nil }
-        if let cancellation { follower = Follower(generation: observing, cancellation: cancellation) }
         return (consumer, present(consumer, current: nil, observing: observing, following: following))
     }
     /// How the observation of a sequence registration continues after a step on the main actor.
@@ -1899,13 +1889,12 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
             // A value accepted while the task that follows the observation runs belongs to that task's
             // observation, and its cancellation withdraws it; one accepted after that cancellation, as
             // an `apply` from the callback that cancelled the task makes, is shown.
-            let following = follower.flatMap { $0.generation == generation ? $0.cancellation : nil }
             let displaced = publication?.deferred
             publication?.deferred = Deferred(
                 value: next,
                 revision: revision,
                 generation: generation,
-                cancellation: following?.isCancelled == false ? following : nil,
+                cancellation: followerCancellation?.isCancelled == false ? followerCancellation : nil,
                 accepted: accepted
             )
             withExtendedLifetime(displaced) {}
@@ -1963,11 +1952,16 @@ extension SnapshotPresentation where Snapshot: StateMachineSnapshot {
     // as it lets any registration go, and so does `abandoned` when it holds once the old registration
     // is released: a report of that end waits until the sequence's slot is free, and an asynchronous
     // registration waits until the sequence has been released.
+    //
+    // `cancellation`, when given, associates the claiming follower with the new generation before
+    // any release or report callbacks run.
     private func endObservation(
         handing handed: HeldRegistration? = nil,
+        following cancellation: WaitCancellation? = nil,
         unless abandoned: () -> Bool = { false }
     ) -> UInt64 {
         generation &+= 1
+        followerCancellation = cancellation
         settleDeferred()
         acceptedAtClaim = accepted
         let claimed = generation

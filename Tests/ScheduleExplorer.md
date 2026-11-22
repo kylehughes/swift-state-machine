@@ -587,10 +587,11 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   a slot and no other closure of it is still registering. Source: `observe(snapshotsFrom:)` async reference.
 - **I10** A value is never first shown after the observation it belongs to was let go. That covers deliveries of a
   registration after its observation ended or its follower was cancelled, a host read for an attempt that ended, and
-  an applied value deferred in a generation that ended. A value whose publication a change, value, or projection
-  callback announced is still assigned after that callback, so the next newly shown value after such a hook is
-  exempt if it was made before the hook ran. On D, stopping discards an observation value whose publication has not
-  been announced, while a change admitted through the presentation still publishes its receipt. An unannounced value
+  an applied value deferred in a generation that ended or before its follower was cancelled, including while
+  `follow(snapshotsFrom:)` is still registering (an `apply` accepted after cancellation remains eligible). A value
+  whose publication a change, value, or projection callback announced is still assigned after that callback, so the
+  next newly shown value after such a hook is exempt if it was made before the hook ran. On D, stopping discards an
+  observation value whose publication has not been announced, while a change admitted through the presentation still publishes its receipt. An unannounced value
   of a registration the presentation ended by `stop`, `close`, or a release (its seed, a resumed registration's
   deferred seed included, or a delivery) is therefore never shown afterward, and neither is a delivery the host made
   on its own after it finished the registration. The receipt of `send` or `close`, and the host's delivery of that

@@ -116,6 +116,11 @@ private final class Feed<Element: Sendable>: Sendable {
         guard #available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) else { preconditionFailure() }
         await model.follow(snapshots)
     }
+    func follow(snapshotsFrom register: @MainActor () async throws -> SnapshotSequence<Shown>) async throws {
+        if let combine { return try await combine.follow(snapshotsFrom: register) }
+        guard #available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) else { preconditionFailure() }
+        try await model.follow(snapshotsFrom: register)
+    }
     func stopObserving() {
         if let combine { return combine.stopObserving() }
         guard #available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) else { preconditionFailure() }
@@ -206,6 +211,123 @@ private enum Role {
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct PresentationTaskOwnershipTests {
+    // While `follow(snapshotsFrom:)` is still registering, cancelling the follower inside a
+    // publication callback withdraws a deferred `apply` queued before the cancellation, while the
+    // already-announced value finishes and an `apply` accepted after cancellation remains eligible.
+    @Test(arguments: PresentationClass.allCases, [false, true])
+    func cancellingDuringRegistrationWithdrawsOnlyEarlierDeferredApplies(
+        _ kind: PresentationClass,
+        applyAfterCancellation: Bool
+    ) async throws {
+        try await with(kind, 0, revision: { UInt64($0) }) { presentation in
+            let registering = Signal()
+            let resume = Signal()
+            let feed = Feed<Int>()
+            let follower = Task { @MainActor in
+                try await presentation.follow(snapshotsFrom: {
+                    registering.raise()
+                    await resume.wait()
+                    return try feed.sequence(first: 30)
+                })
+            }
+            await registering.wait()
+            var publications = 0
+            let hook = presentation.onShow {
+                publications += 1
+                guard publications == 1 else { return }
+                #expect(presentation.apply(20))
+                follower.cancel()
+                if applyAfterCancellation { #expect(presentation.apply(15)) }
+            }
+            #expect(presentation.apply(10))
+            #expect(presentation.snapshot == (applyAfterCancellation ? 15 : 10))
+            #expect(publications == (applyAfterCancellation ? 2 : 1))
+            resume.raise()
+            try await follower.value
+            #expect(feed.cancelled == 1)
+            #expect(!presentation.isObserving)
+            #expect(presentation.apply(16))
+            withExtendedLifetime(hook) {}
+        }
+    }
+
+    // When a newer `follow(snapshotsFrom:)` replaces an earlier one that is still registering, the
+    // replaced follower's exit does not clear the replacement follower's cancellation record.
+    @Test(arguments: PresentationClass.allCases)
+    func aReplacedFollowReturningKeepsTheNewFollowersCancellation(_ kind: PresentationClass) async throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) else { return }
+        try await with(kind, 0, revision: { UInt64($0) }) { presentation in
+            let oldFeed = Feed<Int>()
+            let newFeed = Feed<Int>()
+            let oldRegistering = Signal()
+            let newRegistering = Signal()
+            let finishOld = Signal()
+            let finishNew = Signal()
+            let old = Task { @MainActor in
+                try await presentation.follow(snapshotsFrom: {
+                    oldRegistering.raise()
+                    await finishOld.wait()
+                    return try oldFeed.sequence(first: 30)
+                })
+            }
+            await oldRegistering.wait()
+            let replacement = Task.immediate { @MainActor in
+                try await presentation.follow(snapshotsFrom: {
+                    newRegistering.raise()
+                    await finishNew.wait()
+                    return try newFeed.sequence(first: 40)
+                })
+            }
+            finishOld.raise()
+            try await old.value
+            #expect(oldFeed.cancelled == 1)
+            await newRegistering.wait()
+            var first = true
+            let hook = presentation.onShow {
+                guard first else { return }
+                first = false
+                #expect(presentation.apply(20))
+                replacement.cancel()
+            }
+            #expect(presentation.apply(10))
+            #expect(presentation.snapshot == 10)
+            finishNew.raise()
+            try await replacement.value
+            #expect(newFeed.cancelled == 1)
+            withExtendedLifetime(hook) {}
+        }
+    }
+
+    // When `follow(snapshotsFrom:)` throws during registration, its exit clears its cancellation
+    // record so cancelling that caller later does not withdraw subsequent deferred applies.
+    @Test(arguments: PresentationClass.allCases)
+    func aRefusedFollowReleasesItsClaimOnSubsequentApplies(_ kind: PresentationClass) async {
+        await with(kind, 0, revision: { UInt64($0) }) { presentation in
+            let refused = Signal()
+            let resume = Signal()
+            let caller = Task { @MainActor in
+                await #expect(throws: SubscriptionFailure.capacityExceeded) {
+                    try await presentation.follow(snapshotsFrom: { throw SubscriptionFailure.capacityExceeded })
+                }
+                refused.raise()
+                await resume.wait()
+            }
+            await refused.wait()
+            var first = true
+            let hook = presentation.onShow {
+                guard first else { return }
+                first = false
+                #expect(presentation.apply(20))
+                caller.cancel()
+            }
+            #expect(presentation.apply(10))
+            #expect(presentation.snapshot == 20)
+            resume.raise()
+            await caller.value
+            withExtendedLifetime(hook) {}
+        }
+    }
+
     // A snapshot callback starts `follow(_:)` on a task that runs at once, inside the publication.
     // The followed sequence's first snapshot is published only after that callback returns, so the
     // observation decides liveness then; `follow` keeps running on the calling task until the task is
