@@ -94,7 +94,7 @@ actor ExplorerSelectableDrivers {
 /// a selected work's next report.
 nonisolated final class ExplorerReportsLog: Sendable {
     struct State: Sendable {
-        var works: [(ticket: RuntimeTicket, work: Int)] = []
+        var tickets: [RuntimeTicket] = []
         var firstSerial: [Int: Int] = [:]
         /// Each preparation's result, in order: `true` for a candidate.
         var preparations: [Int: [Bool]] = [:]
@@ -115,13 +115,18 @@ nonisolated final class ExplorerReportsLog: Sendable {
         var owedBefore: [Int: (after: UInt64, owed: [(work: Int, attempt: UInt64)])] = [:]
         /// Preparations and report handlers running now.
         var inFlight = 0
+
+        // The staged works occupy slots 1 through 3. A committed completion can launch
+        // successors too, each with its own first outcome and attempt history.
+        mutating func work(of ticket: RuntimeTicket) -> Int {
+            if let index = tickets.firstIndex(of: ticket) { return index + 1 }
+            tickets.append(ticket)
+            return tickets.count
+        }
     }
     let state = OSAllocatedUnfairLock(initialState: State())
 
-    func work(of ticket: RuntimeTicket) -> Int { state.withLock { Self.work(ticket, $0) } }
-    private static func work(_ ticket: RuntimeTicket, _ state: State) -> Int {
-        state.works.first { $0.ticket == ticket }?.work ?? 0
-    }
+    private func work(of ticket: RuntimeTicket) -> Int { state.withLock { $0.work(of: ticket) } }
     func nextSerial() -> Int {
         state.withLock {
             $0.serial += 1
@@ -273,7 +278,7 @@ nonisolated final class ExplorerReportsLog: Sendable {
         state.withLock { state in
             let owed = pending.compactMap { entry -> (work: Int, attempt: UInt64)? in
                 guard entry.status == .reconciliationRequired else { return nil }
-                let owner = Self.work(entry.outcome.ticket, state)
+                let owner = state.work(of: entry.outcome.ticket)
                 return (state.reported[owner] ?? []).contains(entry.attempts) ? nil : (owner, entry.attempts)
             }
             state.owedBefore[work] = (UInt64(state.preparations[work]?.count ?? 0), owed)
@@ -294,7 +299,7 @@ nonisolated final class ExplorerReportsLog: Sendable {
                 }
                 && pending.allSatisfy { entry in
                     guard entry.status == .reconciliationRequired else { return true }
-                    let work = Self.work(entry.outcome.ticket, state)
+                    let work = state.work(of: entry.outcome.ticket)
                     return (state.reported[work] ?? []).contains(entry.attempts)
                 }
         }
@@ -319,7 +324,7 @@ nonisolated final class ExplorerReportsLog: Sendable {
                 }
             }
             for entry in pending where entry.status == .reconciliationRequired {
-                let work = Self.work(entry.outcome.ticket, state)
+                let work = state.work(of: entry.outcome.ticket)
                 if !(state.reported[work] ?? []).contains(entry.attempts) {
                     state.violations.append(
                         .init(
@@ -464,8 +469,8 @@ nonisolated final class ExplorerReportsLog: Sendable {
         }
         _ = owner.commit(candidate)
         while works.count < 3, let work = await starts.next() { works[work.descriptor] = work }
-        let named = works.map { (ticket: $0.value.ticket, work: $0.key) }
-        log.state.withLock { $0.works = named }
+        let tickets = works.values.sorted { $0.descriptor < $1.descriptor }.map(\.ticket)
+        log.state.withLock { $0.tickets = tickets }
     }
 
     /// Works an event may name: every work named so far, and the lowest of the alike unnamed ones.

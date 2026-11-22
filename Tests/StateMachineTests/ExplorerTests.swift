@@ -1,4 +1,5 @@
 import Foundation
+import StateMachine
 import Testing
 
 // The schedule explorer for the presentation layer. It enumerates every short sequence of events
@@ -229,6 +230,41 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         for _ in 0 ..< allowance { #expect(!budget.read(registration: 1, task: 7).exceeded) }
         for _ in 0 ..< allowance { #expect(!budget.read(registration: 1, task: 8).exceeded) }
         #expect(budget.read(registration: 1, task: 8).exceeded)
+    }
+
+    @Test func reportsDistinguishSuccessorTickets() throws {
+        let scope = RuntimeScopeID(kind: 1)
+        var engine = ExplorerRuntimeEngine(0, scopes: [scope], limits: try Limits())
+        let candidate = try ExplorerRuntimeEngine.prepare(
+            on: engine.snapshot,
+            next: 1,
+            plan: .init(starts: [
+                .init(.init(kind: 5, scope: scope), descriptor: 5),
+                .init(.init(kind: 6, scope: scope), descriptor: 6),
+            ])
+        )
+        _ = engine.commit(candidate)
+        let batch = try #require(engine.drain(limit: 1).first)
+        let log = ExplorerReportsLog()
+        var ledger = ExplorerReportsHost.Ledger()
+        for command in batch.commands {
+            guard case .start(let work) = command else { continue }
+            let outcome = ExplorerReportsOutcome(ticket: work.ticket, accepts: false, serial: work.descriptor)
+            log.offered(outcome)
+            guard case .pending(let id) = ledger.retain(outcome, for: work.ticket, in: &engine),
+                case .claimed(let attempt) = ledger.claim(id, in: &engine)
+            else {
+                Issue.record("Expected each successor outcome to be retained and claimed")
+                return
+            }
+            _ = log.prepare(attempt.outcome, model: attempt.snapshot.model)
+            log.left()
+            _ = ledger.finish(attempt, preparation: .failure(.preparation(ExplorerRefusal())), in: &engine)
+        }
+        #expect(ledger.pending.map(\.outcome.serial) == [5, 6])
+        for pending in ledger.pending.reversed() { log.report(pending) }
+        log.checkSettled(ledger.pending)
+        #expect(log.state.withLock { $0.violations }.isEmpty)
     }
 
     // Each invariant that guards a past defect class reports a planted defect and accepts its control
