@@ -288,6 +288,37 @@ func explorerIngressMembershipProblem(id: Int, revision: UInt64, staged: Set<Int
         control: explorerDistinctReadProblem("A", reads: ["A", "B"], history: ["A", "B", "A"], lastRead: 1).problem
             == nil
     )
+    var distinctHistory = ExplorerDistinctHistory()
+    distinctHistory.record(revision: 0, projection: "idle")
+    distinctHistory.record(revision: 1, projection: "loading")
+    distinctHistory.record(revision: 2, projection: "loading")
+    let distinctAfterIdle = distinctHistory.checkRead(
+        "loading",
+        reads: ["idle"],
+        since: 0,
+        lastReadRevision: 0
+    )
+    let distinctDuplicateAcrossAuth = distinctHistory.checkRead(
+        "loading",
+        reads: ["idle", "loading"],
+        since: 0,
+        lastReadRevision: distinctAfterIdle.nextAnchorRevision
+    )
+    distinctHistory.record(revision: 3, projection: "failed")
+    let distinctStaleAfterFailed = distinctHistory.checkRead(
+        "loading",
+        reads: ["idle", "failed"],
+        since: 0,
+        lastReadRevision: 3
+    )
+    check(
+        .distinctProjection,
+        "duplicate projection across same-phase revision or stale element after a later revision",
+        planted: distinctDuplicateAcrossAuth.duplicate
+            && distinctDuplicateAcrossAuth.problem != nil
+            && distinctStaleAfterFailed.problem != nil,
+        control: !distinctAfterIdle.duplicate && distinctAfterIdle.problem == nil
+    )
 
     // An invalidation of the wrong property: an extra one, or a change without one.
     let world = ExplorerWorld()

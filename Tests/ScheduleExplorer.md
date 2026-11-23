@@ -822,10 +822,13 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
 - **I52** Distinct projections: within one sequence, each element is the projection of a state the owner held
   after the state the previous element stands for, in order, anchored at the earliest such state, so two equal
   consecutive elements need a different projection between them, and an element seen only earlier in the history
-  fails. Equality is registration-local, so a later sequence's first element may equal another's last. A sequence
-  the harness did not cancel ends only when the owner has closed, and only after the closed phase, unless that equals
-  its last element. Once the owner has closed, every such sequence ends. For E14 (78), a proposal kept from before
-  the owner's reset is never committed.
+  fails. The harness builds each sequence's history in accepted revision order from actual synchronous commit and
+  close receipts before polling `snapshot()`, collapsing consecutive revisions with the same projection and never
+  seeding history from sequence elements, so a transient committed phase followed by an asynchronous transition is
+  retained while duplicate, stale, and out-of-order emissions still fail. Equality is registration-local, so a later
+  sequence's first element may equal another's last. A sequence the harness did not cancel ends only when the owner
+  has closed, and only after the closed phase, unless that equals its last element. Once the owner has closed, every
+  such sequence ends. For E14 (78), a proposal kept from before the owner's reset is never committed.
 - **I53** R, reconcile: `flush(through:)` of the receipt of the held drainer's batch does not return while that
   batch's emission handler is held, and returns `true` once the drainer is released and the batch processed. Source:
   `RuntimeSharedHost.flush(through:)` ("Waits until … emissions, through this receipt have been processed").
@@ -873,10 +876,12 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   whose descriptions ascend. The reduction is off after any `arm` or `onReport` in the prefix because an armed
   callback, such as the destructor of the value a delivery displaces, can act on the other host, so the two events
   share an effect while one may still be pending.
-- **Idle arms** (sound). `arm(h, e)` changes only harness state. If hook `h` does not run during the event that
-  follows it, that event is not itself an arm, and the presentation is still held, the sequence equals the one that
-  arms after that event, which is enumerated too. The arm-first sequence is then neither extended nor reported. Two
-  adjacent arms are both kept, because the swapped pair would be pruned the same way. Replays never prune.
+- **Idle arms** (sound). `arm(h, e)` and `onReport(k, e)` change only harness state. If an armed hook does not run
+  during the event that follows it, that event is not itself an arm, and (in passive slices) the presentation is
+  still held, the sequence equals the one that arms after that event, which is enumerated too. The arm-first sequence
+  is then neither extended nor reported. Two adjacent arms are both kept—both in passive `chains` and for the
+  `reconcile` family's independent `onReport` and `arm(emission, …)` hooks, whose two registration orders also differ
+  under work-naming symmetry—because pruning adjacent arms drops simultaneous arming altogether. Replays never prune.
 - No other partial-order reduction is used. Dependent events (anything that runs presentation code, enqueues ordered
   main-actor jobs, or creates values whose revisions follow creation order) run in both orders.
 

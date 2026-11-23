@@ -29,10 +29,11 @@ import os
     private var reads: [[String]] = [[], []]
     private var ended = [false, false]
     private var reading: [Bool] = [false, false]
-    // The position in each history of the projection the last read returned.
-    private var lastRead = [0, 0]
-    // Every projection the owner has held since each sequence's registration.
-    private var history: [[String]] = [[], []]
+    // Each sequence's baseline revision at registration, and the revision anchor of its last read.
+    private var startRevision: [UInt64] = [0, 0]
+    private var lastReadRevision: [UInt64?] = [nil, nil]
+    // Revision-ordered owner projections recorded from actual snapshots and commit/close receipts.
+    private let history = OSAllocatedUnfairLock(initialState: ExplorerDistinctHistory())
     private var closed = false
     // The projection of the closed phase, the last element every open sequence must reach.
     private var closedProjection: String?
@@ -63,11 +64,19 @@ import os
     }
     private var current: String { Self.phase(owner.snapshot()) }
 
+    private func record(_ snapshot: GeneratedProfile.Snapshot) {
+        let projection = Self.phase(snapshot)
+        history.withLock { $0.record(revision: snapshot.revision, projection: projection) }
+    }
+
     private func register(_ index: Int) {
-        history[index] = [current]
-        lastRead[index] = 0
+        let before = owner.snapshot()
+        record(before)
+        startRevision[index] = before.revision
+        lastReadRevision[index] = nil
         sequences[index] = try? owner.distinctSnapshots { ExplorerPhase(name: Self.phase($0)) }
         iterators[index] = sequences[index]?.makeAsyncIterator()
+        record(owner.snapshot())
     }
 
     func enabled() -> [ExplorerEvent] {
@@ -105,13 +114,17 @@ import os
 
     private func perform(_ event: ExplorerEvent) async {
         switch event {
-        case .apply: _ = try? owner.send(.load(request))
-        case .sendCancel: _ = try? owner.send(.cancel)
-        case .edit: _ = try? owner.send(.authenticationChanged)
+        case .apply:
+            if let receipt = try? owner.send(.load(request)) { record(receipt.snapshot) }
+        case .sendCancel:
+            if let receipt = try? owner.send(.cancel) { record(receipt.snapshot) }
+        case .edit:
+            if let receipt = try? owner.send(.authenticationChanged) { record(receipt.snapshot) }
         case .finish:
             closed = true
-            _ = owner.close()
-            closedProjection = current
+            let receipt = owner.close()
+            record(receipt.snapshot)
+            closedProjection = Self.phase(receipt.snapshot)
         case .observe: register(1)
         case .readSeq(let index): startRead(index)
         case .stop:
@@ -122,22 +135,29 @@ import os
             // change, from wherever the comparison runs. A comparison inside a lock would deadlock (I16).
             equalityArmed = true
             let owner = owner
+            let history = history
             explorerEqualityHook.withLock {
                 $0 = {
                     _ = owner.subscriberCount
-                    _ = try? owner.send(.authenticationChanged)
+                    if let receipt = try? owner.send(.authenticationChanged) {
+                        history.withLock {
+                            $0.record(revision: receipt.snapshot.revision, projection: Self.phase(receipt.snapshot))
+                        }
+                    }
                 }
             }
         case .turn: await Task { @MainActor in }.value
         default: break
         }
-        record()
+        _ = record()
     }
 
-    // The owner's projection now, appended to each live sequence's history when it changed.
-    private func record() {
-        let now = current
-        for index in 0 ..< 2 where sequences[index] != nil && history[index].last != now { history[index].append(now) }
+    // The owner's snapshot now, recorded in revision order.
+    @discardableResult
+    private func record() -> String {
+        let snapshot = owner.snapshot()
+        record(snapshot)
+        return Self.phase(snapshot)
     }
 
     private func startRead(_ index: Int) {
@@ -160,7 +180,7 @@ import os
         reading[index] = false
         iterators[index] = reader
         // The owner's own tasks move it on too (a failed load), so sample its state as the read returns.
-        record()
+        _ = record()
         guard let value else {
             ended[index] = true
             // Only the owner's closing ends a sequence the harness did not cancel, and only after the
@@ -180,32 +200,37 @@ import os
         if ended[index] { world.violate(.distinctProjection, "sequence \(index) read \(value) after its end") }
         // Equal consecutive elements need a different projection between them, which the latest-value
         // mailbox replaced before the read: the sequence omits a projection equal to the one before it.
-        if reads[index].last == value, !history[index][lastRead[index]...].contains(where: { $0 != value }) {
+        // The element may stand for an earlier state than the owner's now (the seed, read before later
+        // offers arrived): anchor it at its earliest position after the previous element's, in order.
+        let priorReads = reads[index]
+        let start = startRevision[index]
+        let anchor = lastReadRevision[index]
+        let check = history.withLock {
+            $0.checkRead(
+                value,
+                reads: priorReads,
+                since: start,
+                lastReadRevision: anchor
+            )
+        }
+        if check.duplicate {
             world.violate(
                 .distinctProjection,
                 "sequence \(index) read \(value) twice in a row: \(reads[index] + [value])"
             )
         }
-        // The element may stand for an earlier state than the owner's now (the seed, read before later
-        // offers arrived): anchor it at its earliest position after the previous element's, in order.
-        let read = explorerDistinctReadProblem(
-            value,
-            reads: reads[index],
-            history: history[index],
-            lastRead: lastRead[index]
-        )
-        lastRead[index] = read.anchor
-        if let problem = read.problem { world.violate(.distinctProjection, "sequence \(index) \(problem)") }
+        lastReadRevision[index] = check.nextAnchorRevision
+        if let problem = check.problem { world.violate(.distinctProjection, "sequence \(index) \(problem)") }
         reads[index].append(value)
     }
 
     // A waiting read has more to come while the owner's projection differs from its last element, or
     // the owner has closed and the sequence has not ended.
     private func waiting() -> Bool {
-        record()
+        let now = record()
         for index in 0 ..< 2 where reading[index] {
             if index == 0, cancelled { return true }
-            if closed || reads[index].last != current { return true }
+            if closed || reads[index].last != now { return true }
         }
         return false
     }
@@ -244,6 +269,64 @@ import os
         if owner.subscriberCount > 0 {
             world.violate(.leak, "the owner still counts \(owner.subscriberCount) registrations")
         }
+    }
+}
+
+/// Revision-ordered projection history built solely from actual owner snapshots and commit/close receipts.
+///
+/// Consecutive revisions with the same projection collapse to one run, so duplicate projections without an
+/// intervening distinct phase still violate I52.
+nonisolated struct ExplorerDistinctHistory: Sendable {
+    private var observations: [UInt64: String] = [:]
+
+    mutating func record(revision: UInt64, projection: String) {
+        observations[revision] = projection
+    }
+
+    /// Distinct projection runs at or after `startRevision`, in ascending revision order.
+    func runs(since startRevision: UInt64) -> [(revision: UInt64, projection: String)] {
+        var result: [(revision: UInt64, projection: String)] = []
+        for revision in observations.keys.sorted() where revision >= startRevision {
+            guard let projection = observations[revision] else { continue }
+            if result.last?.projection != projection {
+                result.append((revision, projection))
+            }
+        }
+        return result
+    }
+
+    /// Checks one sequence read against the revision-ordered history since `startRevision`.
+    ///
+    /// Never mutates the history; returns whether the read is an illegal consecutive duplicate, any I52
+    /// ordering problem, and the updated revision anchor.
+    func checkRead(
+        _ value: String,
+        reads: [String],
+        since startRevision: UInt64,
+        lastReadRevision: UInt64?
+    ) -> (duplicate: Bool, problem: String?, nextAnchorRevision: UInt64?) {
+        let runs = runs(since: startRevision)
+        let projections = runs.map(\.projection)
+        let lastIndex =
+            if let lastReadRevision {
+                runs.lastIndex { $0.revision <= lastReadRevision } ?? 0
+            } else {
+                0
+            }
+        let duplicate =
+            reads.last == value
+            && (lastIndex >= projections.count || !projections[lastIndex...].contains(where: { $0 != value }))
+        let read = explorerDistinctReadProblem(
+            value,
+            reads: reads,
+            history: projections,
+            lastRead: lastIndex
+        )
+        let nextAnchor =
+            read.problem == nil && read.anchor < runs.count
+            ? runs[read.anchor].revision
+            : lastReadRevision
+        return (duplicate, read.problem, nextAnchor)
     }
 }
 

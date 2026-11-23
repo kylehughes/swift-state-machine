@@ -558,12 +558,14 @@ nonisolated final class ExplorerReportsLog: Sendable {
             await settle()
             collect()
             let firedAfter = log.state.withLock { $0.fired } + emission.fires.withLock { $0 }
-            if index > 0, pruning, firedAfter == firedBefore {
-                switch sequence[index - 1] {
-                case .onReport, .arm:
-                    redundant = true
-                default: break
-                }
+            if explorerReportsIdleArmPruned(
+                previous: index > 0 ? sequence[index - 1] : nil,
+                current: event,
+                firedBefore: firedBefore,
+                firedAfter: firedAfter,
+                pruning: pruning
+            ) {
+                redundant = true
             }
             if redundant || !world.violations.isEmpty { break }
             if index == sequence.count - 1 { enabledAfter = enabled() }
@@ -812,4 +814,21 @@ nonisolated final class ExplorerReportsLog: Sendable {
         }
         box.withLock { $0 = nil }
     }
+}
+
+/// Whether an arm event in `ExplorerReportsRun` was left idle by a following non-arm event and should be
+/// pruned.
+///
+/// Two adjacent arms (`onReport` and `arm(emission, ...)`) are both kept: neither fires during the other,
+/// pruning both drops simultaneous report+emission arming altogether, and their two registration orders are
+/// not equivalent under work-naming symmetry (`nameable`).
+func explorerReportsIdleArmPruned(
+    previous: ExplorerEvent?,
+    current: ExplorerEvent,
+    firedBefore: Int,
+    firedAfter: Int,
+    pruning: Bool
+) -> Bool {
+    guard pruning, let previous, previous.arms, !current.arms, firedAfter == firedBefore else { return false }
+    return true
 }
