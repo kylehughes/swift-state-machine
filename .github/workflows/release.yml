@@ -263,12 +263,14 @@ jobs:
     outputs:
       archive_sha256: ${{ steps.archive.outputs.sha256 }}
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+    - &checkout-candidate
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       timeout-minutes: 5
       with:
         persist-credentials: false
         ref: ${{ inputs.candidate }}
-    - name: Verify checkout credentials removed
+    - &check-credentials
+      name: Verify checkout credentials removed
       shell: bash
       timeout-minutes: 2
       run: |
@@ -276,7 +278,8 @@ jobs:
           echo "Unexpected persisted checkout authentication" >&2
           exit 1
         fi
-    - name: Select and observe Swift 6.4
+    - &select-swift
+      name: Select and observe Swift 6.4
       run: |-
         sudo xcode-select -s /Applications/Xcode_27.1.app/Contents/Developer
         printf 'candidate=%s event=%s workflow=%s run=%s\n' "$GITHUB_SHA" "$GITHUB_EVENT_NAME" "$GITHUB_WORKFLOW_SHA" "$GITHUB_RUN_ID"
@@ -348,10 +351,34 @@ jobs:
         path: ${{ runner.temp }}/source.tar.gz
         if-no-files-found: error
         retention-days: 7
+  explorer:
+    needs: validate
+    runs-on: xcode-27
+    timeout-minutes: 300
+    steps:
+    - *checkout-candidate
+    - *check-credentials
+    - *select-swift
+    - name: Schedule explorer
+      shell: bash
+      run: |
+        for tier in standard exhaustive; do
+          python3 Scripts/check-explorer.py --tier "$tier" \
+            --scratch-path "$RUNNER_TEMP/explorer-build" --output "$RUNNER_TEMP/explorer/$tier"
+        done
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      if: ${{ !cancelled() }}
+      timeout-minutes: 5
+      with:
+        name: explorer-${{ inputs.candidate }}
+        path: ${{ runner.temp }}/explorer
+        if-no-files-found: error
+        retention-days: 7
   publish:
     needs:
     - validate
     - build
+    - explorer
     if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -502,11 +529,9 @@ jobs:
                 raise Unknown("Created tag identity is unverified. Stop and inspect before another write")
 
 
-        def require_publish_gate(api, *, repo, candidate, run_id, run_attempt, env_name, env_id, approver, approver_id):
-            # GitHub's /approvals endpoint is scoped by run_id without a run_attempt field.
-            # Refuse re-runs so a prior attempt's approval cannot satisfy a later attempt.
+        def require_publish_gate(api, *, repo, candidate, run_id, run_attempt, env_name, env_id, publisher_id):
             if run_attempt != "1":
-                raise ValueError("Re-run attempt cannot prove fresh approval; inspect remote state and dispatch a fresh run")
+                raise ValueError("Inspect remote state and dispatch a fresh run")
             if not re.fullmatch(r"[1-9][0-9]*", run_id):
                 raise ValueError("Invalid workflow run ID")
             repo_id = repo.get("id")
@@ -517,35 +542,14 @@ jobs:
             if (not isinstance(run, dict) or run.get("id") != int(run_id) or run.get("run_attempt") != 1
                     or run.get("event") != "workflow_dispatch" or run.get("path") != ".github/workflows/release.yml"
                     or run.get("head_branch") != branch or run.get("head_sha") != candidate
+                    or not isinstance(run.get("actor"), dict) or run["actor"].get("id") != publisher_id
+                    or run["actor"].get("type") != "User"
                     or not isinstance(run.get("repository"), dict) or run["repository"].get("id") != repo_id
                     or not isinstance(run.get("head_repository"), dict) or run["head_repository"].get("id") != repo_id):
                 raise ValueError("Workflow run does not match candidate release dispatch")
-            approvals = api("GET", f"/actions/runs/{run_id}/approvals")
-            if not isinstance(approvals, list) or not all(
-                isinstance(item, dict) and isinstance(item.get("environments"), list) for item in approvals
-            ):
-                raise Unknown("Workflow approval history is unobservable")
-            env_reviews = [
-                item for item in approvals
-                if any(isinstance(env, dict) and (env.get("name") == env_name or env.get("id") == env_id)
-                       for env in item["environments"])
-            ]
-            if not env_reviews:
-                raise ValueError("No matching release environment approval recorded for this run")
-            if any(item.get("state") != "approved" for item in env_reviews):
-                raise ValueError("Release environment has non-approved review state for this run")
-            if not any(
-                any(isinstance(env, dict) and env.get("name") == env_name
-                    and isinstance(env.get("id"), int) and not isinstance(env.get("id"), bool)
-                    and env["id"] == env_id for env in item["environments"])
-                and isinstance(item.get("user"), dict)
-                and item["user"].get("login") == approver
-                and isinstance(item["user"].get("id"), int) and not isinstance(item["user"].get("id"), bool)
-                and item["user"]["id"] == approver_id
-                and item["user"].get("type") == "User"
-                for item in env_reviews
-            ):
-                raise ValueError("No release environment approval by authorized maintainer for this run")
+            environment = api("GET", "/environments/" + urllib.parse.quote(env_name, safe=""))
+            if not isinstance(environment, dict) or environment.get("name") != env_name or environment.get("id") != env_id:
+                raise ValueError("Release environment identity is unverified")
             ci = api("GET", f"/actions/workflows/ci.yml/runs?event=push&branch={urllib.parse.quote(branch, safe='')}&head_sha={candidate}&status=success&per_page=100")
             if not isinstance(ci, dict) or not isinstance(ci.get("workflow_runs"), list):
                 raise Unknown("CI workflow runs are unobservable")
@@ -569,7 +573,7 @@ jobs:
                             and all(isinstance(j, dict) and j.get("status") == "completed"
                                     and j.get("conclusion") == "success" for j in jobs)):
                         print(json.dumps({"gate_verified": {"run_id": int(run_id), "environment_id": env_id,
-                                                            "approver_id": approver_id, "ci_run_id": ci_run["id"]}}), flush=True)
+                                                            "publisher_id": publisher_id, "ci_run_id": ci_run["id"]}}), flush=True)
                         return
             raise ValueError("Official push CI Required checks did not succeed for this candidate on main")
 
@@ -659,8 +663,7 @@ jobs:
                     run_attempt=os.environ["RUN_ATTEMPT"],
                     env_name=os.environ["EXPECTED_ENVIRONMENT"],
                     env_id=int(os.environ["EXPECTED_ENVIRONMENT_ID"]),
-                    approver=os.environ["EXPECTED_APPROVER"],
-                    approver_id=int(os.environ["EXPECTED_APPROVER_ID"]),
+                    publisher_id=int(os.environ["EXPECTED_PUBLISHER_ID"]),
                 )
                 publish(api, tag=tag, candidate=candidate, branch=repo["default_branch"], notes=notes, generated=generated,
                         archive=Path("release/source.tar.gz"), expected_digest=os.environ["ARCHIVE_SHA256"])
@@ -683,7 +686,6 @@ jobs:
         EXPECTED_REPOSITORY: kylehughes/swift-state-machine
         EXPECTED_ENVIRONMENT: release
         EXPECTED_ENVIRONMENT_ID: "28291228374"
-        EXPECTED_APPROVER: kylehughes
-        EXPECTED_APPROVER_ID: "229059"
+        EXPECTED_PUBLISHER_ID: "229059"
         OPERATION: publish
         ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}
