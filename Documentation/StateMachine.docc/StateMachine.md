@@ -46,12 +46,15 @@ appears in the advanced topics at the end.
 
 ### Declaring transitions
 
+- ``PhaseSet(_:)``
 - ``Transition(on:invalidates:starts:cancels:emits:)``
-- ``Transition(from:on:invalidates:starts:cancels:emits:)``
+- ``Transition(from:on:invalidates:starts:cancels:emits:)-([~.Type],_,_,_,_,_)``
+- ``Transition(from:on:invalidates:starts:cancels:emits:)-(~.Type,_,_,_,_,_)``
 - ``Transition(onSuccess:invalidates:starts:cancels:emits:)``
 - ``Transition(onFailure:invalidates:starts:cancels:emits:)``
 - ``Transition(invalidates:starts:cancels:emits:)``
-- ``Transition(from:invalidates:starts:cancels:emits:)``
+- ``Transition(from:invalidates:starts:cancels:emits:)-([~.Type],_,_,_,_)``
+- ``Transition(from:invalidates:starts:cancels:emits:)-(~.Type,_,_,_,_)``
 - ``Route(on:)``
 - ``Route(on:failure:)``
 - ``Route(onSuccess:)``

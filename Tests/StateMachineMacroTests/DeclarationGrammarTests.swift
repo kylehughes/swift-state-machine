@@ -1,3 +1,4 @@
+import Foundation
 import StateMachine
 import StateMachineExamples
 import Testing
@@ -451,5 +452,229 @@ nonisolated private enum Confined {
         // A confined graph's choices are plain values too.
         #expect(Confined.Route.Pick.allCases == [.stay, .move])
         requireSendable(Confined.Route.Idle.Pick.self)
+    }
+
+    // MARK: Phase sets
+
+    @Test func sharedPhaseSetMatchesInlineGraphAndBehavior() throws {
+        // Identical graph metadata, JSON, Mermaid, and Graphviz DOT between inline and named `@PhaseSet`.
+        let inlineGraph = PhaseSetInline.Workflow.graph
+        let namedGraph = PhaseSetNamed.Workflow.graph
+        #expect(namedGraph == inlineGraph)
+        #expect(namedGraph.mermaid() == inlineGraph.mermaid())
+        #expect(namedGraph.dot() == inlineGraph.dot())
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        #expect(try encoder.encode(namedGraph) == encoder.encode(inlineGraph))
+
+        // Edge order preserves the `@PhaseSet` element order (`reviewing`, `draft`) rather than phase order.
+        let resetEdges = namedGraph.edges.filter { $0.name == "reset" }
+        #expect(resetEdges.map(\.id) == ["reviewing.reset", "draft.reset"])
+        // Reachable `exporting` phase is intentionally omitted from `reset`.
+        #expect(!resetEdges.contains { $0.source == "exporting" })
+
+        // Effect namespace aliases match across every source in the set.
+        func same<Value>(_: Value.Type, _: Value.Type) {}
+        same(PhaseSetNamed.Workflow.Effect.Reset.self, PhaseSetNamed.Workflow.Effect.Reviewing.Reset.self)
+        same(PhaseSetNamed.Workflow.Effect.Reset.self, PhaseSetNamed.Workflow.Effect.Draft.Reset.self)
+
+        // Owned methods exist on every listed phase, and `@Route` can choose a `@PhaseSet`-sourced edge.
+        let fromDraft = PhaseSetNamed.Workflow.owned().reset(true)
+        #expect(fromDraft.effects == [.logged("reset")])
+        let reviewing = fromDraft.next.submit()
+        guard case .reset(let resetFromRoute) = reviewing.chooseReset(true) else { throw Unexpected() }
+        #expect(resetFromRoute.effects == [.logged("reset")])
+        let reviewingAgain = resetFromRoute.next.submit()
+        guard case .keepReviewing(let kept) = reviewingAgain.chooseReset(false) else { throw Unexpected() }
+        #expect(kept.takeValue() == PhaseSetNamed.Workflow.Reviewing(version: 1))
+
+        // Local runtime: listed phases succeed via `Observed` and `send`; omitted reachable phase throws `.invalidPhase`.
+        var local = PhaseSetNamed.Workflow.Local()
+        guard case .draft(let observedDraft) = local.snapshot() else { throw Unexpected() }
+        guard case .committed = local.commit(observedDraft.reset(true)) else { throw Unexpected() }
+        try local.send(.submit)
+        try local.send(.beginExport)
+        guard case .exporting(let observedExporting) = local.snapshot() else { throw Unexpected() }
+        do {
+            try local.send(.reset(true))
+            Issue.record("reset from omitted reachable exporting phase was admitted")
+        } catch {
+            guard case .preparation(.invalidPhase) = error else { throw Unexpected() }
+        }
+        guard case .committed = local.commit(observedExporting.finishExport()), case .draft = local.snapshot() else {
+            throw Unexpected()
+        }
+    }
+
+    @Test func isolatedPhaseSetDrivesLocalAndOmitsUnlistedPhase() throws {
+        var local = PhaseSetNamed.Pipeline.Local()
+        try local.send(.detect(1))
+        guard case .detecting(let detecting) = local.snapshot() else { throw Unexpected() }
+        guard case .committed = local.commit(detecting.replace()) else { throw Unexpected() }
+        guard case .resting = local.snapshot() else { throw Unexpected() }
+
+        // Reachable `exporting` phase is omitted from `ActiveEditor` and rejects `.replace`.
+        try local.send(.detect(2))
+        guard case .detect(let detect)? = local.drainCommands().last?.commands.first else { throw Unexpected() }
+        guard case .committed = local.deliver(detect.succeeded()) else { throw Unexpected() }
+        #expect(local.acknowledgeExecution(detect.execution) == .recorded)
+        try local.send(.export)
+        do {
+            try local.send(.replace)
+            Issue.record("replace from omitted exporting phase was admitted")
+        } catch {
+            guard case .preparation(.invalidPhase) = error else { throw Unexpected() }
+        }
+        try local.send(.finishExport)
+        guard case .resting = local.snapshot() else { throw Unexpected() }
+    }
+
+    @Test func ownedOnlyPhaseSetSupportsDirectNoncopyableEdge() {
+        #expect(
+            PhaseSetNamed.DirectToken.graph.edges.filter { $0.name == "discard" }.map(\.id) == [
+                "fresh.discard", "active.discard",
+            ]
+        )
+        _ = PhaseSetNamed.DirectToken.owned(PhaseSetNamed.DirectToken.Fresh(id: 3)).discard().takeValue()
+        let active = PhaseSetNamed.DirectToken.owned(PhaseSetNamed.DirectToken.Fresh(id: 4)).activate()
+        let unlocked = active.lock().unlock()
+        #expect(unlocked.withValue { $0.id } == 4)
+        _ = unlocked.discard().takeValue()
+    }
+}
+
+/// Inline-literal baseline for `@PhaseSet` graph/JSON/Mermaid/DOT equality.
+private enum PhaseSetInline {
+    @StateMachine(mode: .shared)
+    nonisolated enum Workflow: Sendable, Equatable {
+        struct Draft: Sendable, Equatable {}
+        struct Reviewing: Sendable, Equatable { let version: Int }
+        struct Exporting: Sendable, Equatable {}
+        struct PhaseSet: Sendable {}
+        @Initial case draft(Draft = Draft())
+        case reviewing(Reviewing)
+        case exporting(Exporting)
+        enum Input: Sendable {
+            case submit
+            case beginExport
+            case finishExport
+            case reset(Bool)
+        }
+        @Event
+        enum Logged { typealias Payload = String }
+        @Transition(on: Input.submit)
+        fileprivate static func submit(_ source: Draft) -> Reviewing { Reviewing(version: 1) }
+        @Transition(on: Input.beginExport)
+        fileprivate static func beginExport(_ source: Reviewing) -> Exporting { Exporting() }
+        @Transition(on: Input.finishExport)
+        fileprivate static func finishExport(_ source: Exporting) -> Draft { Draft() }
+        @Transition(on: Input.reset)
+        fileprivate static func keepReviewing(_ source: Reviewing, _ shouldReset: Bool) -> Reviewing { source }
+        @Transition(from: [Reviewing.self, Draft.self], on: Input.reset, emits: [Logged.self])
+        fileprivate static func reset(_ shouldReset: Bool) -> Change<Draft, Effect.Reset> {
+            Change(Draft(), effects: [.logged("reset")])
+        }
+        @Route(on: Input.reset)
+        fileprivate static func chooseReset(_ source: Reviewing, _ shouldReset: Bool) -> Route.ChooseReset {
+            shouldReset ? .reset : .keepReviewing
+        }
+    }
+}
+
+/// Named `@PhaseSet` runtime schemas across `.shared`, `.isolated`, and `.ownedOnly` (direct `~Copyable` edge).
+private enum PhaseSetNamed {
+    @StateMachine(mode: .shared)
+    nonisolated enum Workflow: Sendable, Equatable {
+        struct Draft: Sendable, Equatable {}
+        struct Reviewing: Sendable, Equatable { let version: Int }
+        struct Exporting: Sendable, Equatable {}
+        struct PhaseSet: Sendable {}
+        @Initial case draft(Draft = Draft())
+        case reviewing(Reviewing)
+        case exporting(Exporting)
+        enum Input: Sendable {
+            case submit
+            case beginExport
+            case finishExport
+            case reset(Bool)
+        }
+        @Event
+        enum Logged { typealias Payload = String }
+        @Transition(on: Input.submit)
+        fileprivate static func submit(_ source: Draft) -> Reviewing { Reviewing(version: 1) }
+        @Transition(on: Input.beginExport)
+        fileprivate static func beginExport(_ source: Reviewing) -> Exporting { Exporting() }
+        @Transition(on: Input.finishExport)
+        fileprivate static func finishExport(_ source: Exporting) -> Draft { Draft() }
+        @Transition(on: Input.reset)
+        fileprivate static func keepReviewing(_ source: Reviewing, _ shouldReset: Bool) -> Reviewing { source }
+        @Transition(from: `Resettable`.self, on: Input.reset, emits: [Logged.self])
+        fileprivate static func reset(_ shouldReset: Bool) -> Change<Draft, Effect.Reset> {
+            Change(Draft(), effects: [.logged("reset")])
+        }
+        @Route(on: Input.reset)
+        fileprivate static func chooseReset(_ source: Reviewing, _ shouldReset: Bool) -> Route.ChooseReset {
+            shouldReset ? .reset : .keepReviewing
+        }
+        // Declared after transitions, qualified to bypass the shadowing `struct PhaseSet`, with non-declaration order.
+        @StateMachine.PhaseSet([`Reviewing`.self, `Draft`.self])
+        private enum `Resettable` {}
+    }
+
+    @StateMachine(mode: .isolated, owners: [.local])
+    nonisolated enum Pipeline {
+        final class Scratch {}
+        struct Resting {}
+        struct Detecting { let scratch: Scratch }
+        struct Ready {}
+        struct Exporting {}
+        @Initial case resting(Resting = Resting())
+        case detecting(Detecting)
+        case ready(Ready)
+        case exporting(Exporting)
+        enum Input {
+            case detect(Int)
+            case replace
+            case export
+            case finishExport
+        }
+        @Operation(activeIn: [Detecting.self])
+        enum Detect { typealias Input = Int }
+        @PhaseSet([Resting.self, Detecting.self, Ready.self])
+        fileprivate enum ActiveEditor {}
+        @Transition(from: ActiveEditor.self, on: Input.detect, starts: [Detect.self])
+        fileprivate static func detect(_ pass: Int) -> Change<Detecting, Effect.Detect> {
+            Change(Detecting(scratch: Scratch()), effects: [.detect(pass)])
+        }
+        @Transition(onSuccess: Detect.self)
+        fileprivate static func detected(_ source: Detecting) -> Ready { Ready() }
+        @Transition(from: ActiveEditor.self, on: Input.replace)
+        fileprivate static func replace() -> Resting { Resting() }
+        @Transition(on: Input.export)
+        fileprivate static func export(_ source: Ready) -> Exporting { Exporting() }
+        @Transition(on: Input.finishExport)
+        fileprivate static func finishExport(_ source: Exporting) -> Resting { Resting() }
+    }
+
+    @StateMachine(mode: .ownedOnly)
+    nonisolated enum DirectToken: ~Copyable {
+        struct Fresh: ~Copyable { let id: Int }
+        struct Active: ~Copyable { let id: Int }
+        struct Locked: ~Copyable { let id: Int }
+        struct Spent: ~Copyable {}
+        @Initial case fresh(Fresh)
+        case active(Active)
+        case locked(Locked)
+        @Terminal case spent(Spent)
+        @PhaseSet([Fresh.self, Active.self])
+        fileprivate enum Discardable {}
+        @Transition
+        fileprivate static func activate(_ source: consuming Fresh) -> Active { Active(id: source.id) }
+        @Transition
+        fileprivate static func lock(_ source: consuming Active) -> Locked { Locked(id: source.id) }
+        @Transition
+        fileprivate static func unlock(_ source: consuming Locked) -> Active { Active(id: source.id) }
+        @Transition(from: Discardable.self)
+        fileprivate static func discard() -> Spent { Spent() }
     }
 }

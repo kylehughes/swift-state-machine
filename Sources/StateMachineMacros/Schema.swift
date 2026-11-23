@@ -824,11 +824,94 @@ private struct SchemaParser {
 
     /// Reads `<Type>.self`, the only accepted spelling of a declared phase payload or operation reference.
     private func typeReference(_ expression: ExprSyntax) throws -> String {
+        guard let name = bareTypeReference(expression) else {
+            try reject(expression, "Reference a type declared directly inside the schema as <Type>.self.")
+        }
+        return name
+    }
+
+    /// Reads `<Type>.self` without rejecting, returning the unescaped identifier or `nil`.
+    private func bareTypeReference(_ expression: ExprSyntax) -> String? {
         guard let member = expression.as(MemberAccessExprSyntax.self),
             let base = member.base?.as(DeclReferenceExprSyntax.self), base.argumentNames == nil,
+            member.declName.argumentNames == nil,
             member.declName.baseName.tokenKind == .keyword(.self), identifier(base.baseName.unescaped)
-        else { try reject(expression, "Reference a type declared directly inside the schema as <Type>.self.") }
+        else { return nil }
         return base.baseName.unescaped
+    }
+
+    /// Reads the single unlabeled argument expression of `@PhaseSet([...])`.
+    private func phaseSetArgument(_ attribute: AttributeSyntax) throws -> ExprSyntax {
+        guard case .argumentList(let arguments) = attribute.arguments, let first = arguments.first else {
+            try reject(
+                attribute,
+                "Provide an unlabeled array literal of <Phase>.self references in @PhaseSet([...])."
+            )
+        }
+        if let label = first.label {
+            try reject(
+                label,
+                "Omit the argument label '\(label.lookupName):' in @PhaseSet([...]); pass an unlabeled array literal of <Phase>.self references."
+            )
+        }
+        if let extra = arguments.dropFirst().first {
+            try reject(
+                extra,
+                "Pass a single unlabeled array literal of <Phase>.self references to @PhaseSet([...])."
+            )
+        }
+        return first.expression
+    }
+
+    /// Reads and validates the ordered phase list of `@PhaseSet([...])`, anchoring each defect at its element.
+    private func phaseSetMembers(
+        _ expression: ExprSyntax,
+        setName: String,
+        phaseCases: [String: String],
+        phaseSetNames: Set<String>,
+        operationNames: Set<String>,
+        eventNames: Set<String>
+    ) throws -> [String] {
+        guard let array = expression.as(ArrayExprSyntax.self) else {
+            try reject(expression, "Use an array literal of <Phase>.self references in @PhaseSet([...]).")
+        }
+        guard !array.elements.isEmpty else {
+            try reject(expression, "List at least one phase in @PhaseSet([...]).")
+        }
+        var phases: [String] = []
+        phases.reserveCapacity(array.elements.count)
+        var seen: Set<String> = []
+        seen.reserveCapacity(array.elements.count)
+        for element in array.elements {
+            let node = element.expression
+            let typeName = try typeReference(node)
+            if phaseSetNames.contains(typeName) {
+                try reject(
+                    node,
+                    "'\(typeName)' is a @PhaseSet; nested phase sets are unsupported. List phase payload types directly as <Phase>.self."
+                )
+            }
+            if operationNames.contains(typeName) {
+                try reject(
+                    node,
+                    "'\(typeName)' is an @Operation, not a phase payload type declared in this schema."
+                )
+            }
+            if eventNames.contains(typeName) {
+                try reject(
+                    node,
+                    "'\(typeName)' is an @Event, not a phase payload type declared in this schema."
+                )
+            }
+            guard let phase = phaseCases[typeName] else {
+                try reject(node, "'\(typeName)' is not a phase payload type declared in this schema.")
+            }
+            guard seen.insert(typeName).inserted else {
+                try reject(node, "List each phase once in @PhaseSet '\(setName)'; '\(typeName)' appears twice.")
+            }
+            phases.append(phase)
+        }
+        return phases
     }
 
     /// Reads a phase payload spelling from a signature, allowing `Self.` or schema-name qualification, in
@@ -1505,13 +1588,16 @@ private struct SchemaParser {
         }
         // A macro cannot tell which clause of `#if` the build takes, so it would read no member inside one, and a
         // phase, input, operation, or edge declared there would be missing from the graph. The macro reads the
-        // schema's members and those of `Input`, `Scope`, and each operation and event namespace.
+        // schema's members and those of `Input`, `Scope`, and each operation, event, and phase set namespace.
         let enums = declaration.memberBlock.members.compactMap { $0.decl.as(EnumDeclSyntax.self) }
             .filter { namespace in
                 ["Input", "Scope"].contains(namespace.name.unescaped)
                     || namespace.attributes.contains {
                         $0.as(AttributeSyntax.self)
-                            .map { Schema.namesMacro($0, "Operation") || Schema.namesMacro($0, "Event") }
+                            .map {
+                                Schema.namesMacro($0, "Operation") || Schema.namesMacro($0, "Event")
+                                    || Schema.namesMacro($0, "PhaseSet")
+                            }
                             ?? false
                     }
             }
@@ -1550,12 +1636,17 @@ private struct SchemaParser {
         var terminalCases: Set<String> = []
         for member in members {
             guard let attributed = member.decl.asProtocol(WithAttributesSyntax.self) else { continue }
-            for name in ["Transition", "Route", "Operation", "Event", "Initial", "Terminal", "Restoration"] {
+            for name in ["Transition", "Route", "Operation", "Event", "PhaseSet", "Initial", "Terminal", "Restoration"]
+            {
                 guard let attribute = try marker(attributed.attributes, named: name) else { continue }
                 switch name {
                 case "Operation", "Event":
                     guard member.decl.is(EnumDeclSyntax.self) else {
                         try reject(attribute, "@\(name) must mark a nested enum namespace.")
+                    }
+                case "PhaseSet":
+                    guard member.decl.is(EnumDeclSyntax.self) else {
+                        try reject(attribute, "@PhaseSet must mark an empty nested enum.")
                     }
                 case "Initial", "Terminal":
                     guard let phase = member.decl.as(EnumCaseDeclSyntax.self), phase.elements.count == 1,
@@ -1690,6 +1781,111 @@ private struct SchemaParser {
                 try reject(reference.node, "'\(reference.name)' is not a phase payload type declared in this schema.")
             }
             return phase
+        }
+        // Collect and validate all `@PhaseSet` enum declarations before validating their member lists, so
+        // declaration conflicts are always diagnosed on the offending enum regardless of declaration order.
+        var phaseSetDeclarations: [(enumDecl: EnumDeclSyntax, attribute: AttributeSyntax)] = []
+        var operationEnumNames: Set<String> = []
+        var eventEnumNames: Set<String> = []
+        for namespace in nestedEnums {
+            var phaseSet: AttributeSyntax?
+            var operation: AttributeSyntax?
+            var event: AttributeSyntax?
+            for element in namespace.attributes {
+                guard let attr = element.as(AttributeSyntax.self) else { continue }
+                if Schema.namesMacro(attr, "PhaseSet") {
+                    phaseSet = attr
+                } else if Schema.namesMacro(attr, "Operation") {
+                    operation = attr
+                } else if Schema.namesMacro(attr, "Event") {
+                    event = attr
+                }
+            }
+            if let phaseSet {
+                if let operation {
+                    try reject(
+                        phaseSet.position < operation.position ? operation : phaseSet,
+                        "A nested enum cannot be both a @PhaseSet and an @Operation."
+                    )
+                }
+                if let event {
+                    try reject(
+                        phaseSet.position < event.position ? event : phaseSet,
+                        "A nested enum cannot be both a @PhaseSet and an @Event."
+                    )
+                }
+                phaseSetDeclarations.append((namespace, phaseSet))
+            }
+            if operation != nil { operationEnumNames.insert(namespace.name.unescaped) }
+            if event != nil { eventEnumNames.insert(namespace.name.unescaped) }
+        }
+        var validatedPhaseSets: [(name: String, attribute: AttributeSyntax)] = []
+        validatedPhaseSets.reserveCapacity(phaseSetDeclarations.count)
+        var phaseSetNames: Set<String> = []
+        phaseSetNames.reserveCapacity(phaseSetDeclarations.count)
+        for (namespace, attribute) in phaseSetDeclarations {
+            let setName = namespace.name.unescaped
+            guard identifier(setName) else {
+                try reject(
+                    namespace.name,
+                    "Name the phase set with a Swift identifier that needs no backticks, such as one that is not a keyword."
+                )
+            }
+            if let generic = namespace.genericParameterClause.map(Syntax.init)
+                ?? namespace.genericWhereClause.map(Syntax.init)
+            {
+                try reject(generic, "Phase set enums must be nongeneric.")
+            }
+            if ["Input", "Scope", "Effect"].contains(setName) {
+                try reject(
+                    namespace.name,
+                    "@PhaseSet cannot mark '\(setName)'; declare a distinct empty nested enum."
+                )
+            }
+            if phaseCases[setName] != nil {
+                try reject(
+                    namespace.name,
+                    "'\(setName)' is a phase payload type and cannot also be marked @PhaseSet."
+                )
+            }
+            if operationEnumNames.contains(setName) {
+                try reject(
+                    namespace.name,
+                    "'\(setName)' is an @Operation namespace and cannot also be marked @PhaseSet."
+                )
+            }
+            if eventEnumNames.contains(setName) {
+                try reject(
+                    namespace.name,
+                    "'\(setName)' is an @Event namespace and cannot also be marked @PhaseSet."
+                )
+            }
+            guard phaseSetNames.insert(setName).inserted else {
+                try reject(
+                    namespace.name,
+                    "Phase set '\(setName)' is declared more than once; give each @PhaseSet a distinct name."
+                )
+            }
+            if let firstMember = namespace.memberBlock.members.first {
+                try reject(
+                    firstMember.decl,
+                    "@PhaseSet enum '\(setName)' must be empty; remove its members."
+                )
+            }
+            validatedPhaseSets.append((name: setName, attribute: attribute))
+        }
+        var phaseSetsByName: [String: [String]] = [:]
+        phaseSetsByName.reserveCapacity(validatedPhaseSets.count)
+        for (setName, attribute) in validatedPhaseSets {
+            let list = try phaseSetArgument(attribute)
+            phaseSetsByName[setName] = try phaseSetMembers(
+                list,
+                setName: setName,
+                phaseCases: phaseCases,
+                phaseSetNames: phaseSetNames,
+                operationNames: operationEnumNames,
+                eventNames: eventEnumNames
+            )
         }
         if let authored = nestedEnums.first(where: { $0.name.unescaped == "Effect" }) {
             try reject(
@@ -2243,8 +2439,10 @@ private struct SchemaParser {
             let values = parameters.filter { !Self.takesRequest($0) }
             // A transition that lists its sources in `from:` takes no source parameter and has an edge per source.
             let sources: [String]
-            /// The `from:` elements that name the sources, when the transition lists them.
+            /// The `from:` elements that name the sources, when the transition lists them inline.
             var sourceReferences: [(name: String, node: ExprSyntax)] = []
+            /// The `@PhaseSet` name referenced by `from:`, when the transition names a set.
+            var fromPhaseSetName: String?
             let base: TypeSyntax?
             if let list = metadata["from"] {
                 guard on.kind == .input || on.kind == .direct else {
@@ -2253,9 +2451,39 @@ private struct SchemaParser {
                         "Only an input transition lists its source phases in from:; a completion edge names its source in its first parameter."
                     )
                 }
-                sourceReferences = try typeReferences(list)
-                sources = try sourceReferences.map(phase)
-                guard !sources.isEmpty else { try reject(list, "List at least one source phase in from:.") }
+                if list.is(ArrayExprSyntax.self) {
+                    sourceReferences = try typeReferences(list)
+                    sources = try sourceReferences.map { reference in
+                        if phaseSetsByName[reference.name] != nil {
+                            try reject(
+                                reference.node,
+                                "'\(reference.name)' is a @PhaseSet and cannot be listed inside a from: array literal; pass from: \(reference.name).self directly or list its phase payload types inline."
+                            )
+                        }
+                        return try phase(reference)
+                    }
+                    guard !sources.isEmpty else { try reject(list, "List at least one source phase in from:.") }
+                } else if let name = bareTypeReference(list) {
+                    if let phaseSet = phaseSetsByName[name] {
+                        fromPhaseSetName = name
+                        sources = phaseSet
+                    } else if phaseCases[name] != nil {
+                        try reject(
+                            list,
+                            "'\(name)' is a phase payload type, not a @PhaseSet; write from: [\(name).self], or reference a declared @PhaseSet enum as <Set>.self."
+                        )
+                    } else {
+                        try reject(
+                            list,
+                            "'\(name)' is not a @PhaseSet declared directly inside this schema."
+                        )
+                    }
+                } else {
+                    try reject(
+                        list,
+                        "Use an array literal of <Phase>.self references or a @PhaseSet reference as <Set>.self."
+                    )
+                }
                 guard parameters.count == (needsPayload ? 1 : 0) else {
                     try reject(
                         function.signature.parameterClause,
@@ -2365,6 +2593,12 @@ private struct SchemaParser {
             }
             if let index = sources.firstIndex(where: terminalCases.contains) {
                 let terminal = sources[index]
+                if let fromPhaseSetName, let fromExpression = metadata["from"] {
+                    try reject(
+                        fromExpression,
+                        "Terminal phase '\(terminal)' in @PhaseSet '\(fromPhaseSetName)' cannot have an outgoing transition '\(function.name.unescaped)'; remove '@Terminal', remove '\(phaseType(terminal, in: phases)).self' from '\(fromPhaseSetName)', or remove the transition."
+                    )
+                }
                 // The `from:` element that names the terminal phase, or the source parameter.
                 try reject(
                     index < sourceReferences.count ? Syntax(sourceReferences[index].node) : Syntax(parameters[0]),

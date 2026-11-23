@@ -528,4 +528,251 @@ struct DeclarationGrammarTests {
             ]
         )
     }
+
+    // MARK: Phase sets
+
+    private static func assertExpansionMatches(
+        inline: String,
+        named: String,
+        hiddenSetNames: [String],
+        sourceLocation: Testing.SourceLocation = #_sourceLocation
+    ) throws {
+        let inlineMembers = try Generator(schema: Self.parse(inline)).members().map(\.description)
+        let namedMembers = try Generator(schema: Self.parse(named)).members().map(\.description)
+        #expect(namedMembers == inlineMembers, sourceLocation: sourceLocation)
+        let joined = namedMembers.joined(separator: "\n")
+        for setName in hiddenSetNames {
+            #expect(
+                !joined.contains(setName),
+                "Generated code must not mention @PhaseSet '\(setName)'",
+                sourceLocation: sourceLocation
+            )
+        }
+    }
+
+    @Test func aPhaseSetExpandsIdenticallyAcrossAllModes() throws {
+        // .shared: multi-phase input, payload, invalidates/emits, @Route participation, and omitted reachable phase.
+        let sharedInline = #"""
+            @StateMachine(mode: .shared)
+            enum Flow {
+                struct Idle {}
+                struct Loading {}
+                struct Loaded {}
+                struct Exporting {}
+                @Initial case idle(Idle)
+                case loading(Loading)
+                case loaded(Loaded)
+                case exporting(Exporting)
+                enum Scope { @Active(in: [Loading.self]) case work }
+                enum Input { case load, reset, note(String), export, done }
+                @Operation(scope: Scope.work)
+                enum Fetch { typealias Output = Int }
+                @Event
+                enum Logged { typealias Payload = String }
+                @Transition(on: Input.load, starts: [Fetch.self])
+                static func load(_ source: Idle) -> Change<Loading, Effect.Load> { fatalError() }
+                @Transition(onSuccess: Fetch.self)
+                static func loaded(_ source: Loading, _ value: Int) -> Loaded { fatalError() }
+                @Transition(on: Input.export)
+                static func export(_ source: Loaded) -> Exporting { fatalError() }
+                @Transition(on: Input.done)
+                static func finish(_ source: Exporting) -> Idle { fatalError() }
+                @Transition(on: Input.reset)
+                static func keep(_ source: Loaded) -> Loaded { fatalError() }
+                @Transition(from: [Loading.self, Loaded.self], on: Input.reset, invalidates: [Scope.work], emits: [Logged.self])
+                static func reset() -> Change<Idle, Effect.Reset> { fatalError() }
+                @Route(on: Input.reset)
+                static func chooseReset(_ source: Loaded) -> Route.ChooseReset { fatalError() }
+                @Transition(from: [Idle.self, Loaded.self], on: Input.note)
+                static func note(_ text: String) -> Loading { fatalError() }
+            }
+            """#
+        let sharedNamed =
+            sharedInline
+            .replacingOccurrences(
+                of: "@Initial case idle(Idle)",
+                with: """
+                    @Initial case idle(Idle)
+                        @PhaseSet([Loading.self, Loaded.self])
+                        fileprivate enum Resettable {}
+                        @PhaseSet([Idle.self, Loaded.self])
+                        private enum Notable {}
+                    """
+            )
+            .replacingOccurrences(of: "from: [Loading.self, Loaded.self]", with: "from: Resettable.self")
+            .replacingOccurrences(of: "from: [Idle.self, Loaded.self]", with: "from: Notable.self")
+        try Self.assertExpansionMatches(
+            inline: sharedInline,
+            named: sharedNamed,
+            hiddenSetNames: ["Resettable", "Notable"]
+        )
+        #expect(
+            try Self.parse(sharedNamed).transitions.filter { $0.name == "reset" }.map(\.from) == ["loading", "loaded"]
+        )
+
+        // .isolated with local-only owner.
+        let isolatedInline = #"""
+            @StateMachine(mode: .isolated, owners: [.local])
+            enum Pipeline {
+                struct Resting {}
+                struct Detecting {}
+                struct Ready {}
+                @Initial case resting(Resting)
+                case detecting(Detecting)
+                case ready(Ready)
+                enum Input { case detect, replace }
+                @Operation(activeIn: [Detecting.self])
+                enum Detect {}
+                @Transition(from: [Resting.self, Detecting.self, Ready.self], on: Input.detect, starts: [Detect.self])
+                static func detect() -> Change<Detecting, Effect.Detect> { fatalError() }
+                @Transition(onSuccess: Detect.self)
+                static func detected(_ source: Detecting) -> Ready { fatalError() }
+                @Transition(from: [Resting.self, Detecting.self, Ready.self], on: Input.replace)
+                static func replace() -> Resting { fatalError() }
+            }
+            """#
+        let isolatedNamed =
+            isolatedInline
+            .replacingOccurrences(
+                of: "case ready(Ready)",
+                with:
+                    "case ready(Ready)\n    @PhaseSet([Resting.self, Detecting.self, Ready.self])\n    fileprivate enum ActiveEditor {}"
+            )
+            .replacingOccurrences(
+                of: "from: [Resting.self, Detecting.self, Ready.self]",
+                with: "from: ActiveEditor.self"
+            )
+        try Self.assertExpansionMatches(inline: isolatedInline, named: isolatedNamed, hiddenSetNames: ["ActiveEditor"])
+
+        // .ownedOnly with ~Copyable phases: input edge and direct edge (no Input enum).
+        let ownedInputInline = #"""
+            @StateMachine(mode: .ownedOnly)
+            enum Token: ~Copyable {
+                struct Fresh: ~Copyable {}
+                struct Used: ~Copyable {}
+                struct Spent: ~Copyable {}
+                @Initial case fresh(Fresh)
+                case used(Used)
+                @Terminal case spent(Spent)
+                enum Input { case use, discard }
+                @Transition(on: Input.use)
+                static func use(_ source: consuming Fresh) -> Used { fatalError() }
+                @Transition(from: [Fresh.self, Used.self], on: Input.discard)
+                static func discard() -> Spent { fatalError() }
+            }
+            """#
+        let ownedInputNamed =
+            ownedInputInline
+            .replacingOccurrences(
+                of: "@Terminal case spent(Spent)",
+                with:
+                    "@Terminal case spent(Spent)\n    @PhaseSet([Fresh.self, Used.self])\n    fileprivate enum Live {}"
+            )
+            .replacingOccurrences(of: "from: [Fresh.self, Used.self]", with: "from: Live.self")
+        try Self.assertExpansionMatches(inline: ownedInputInline, named: ownedInputNamed, hiddenSetNames: ["Live"])
+
+        let ownedDirectInline = #"""
+            @StateMachine(mode: .ownedOnly)
+            enum DirectToken: ~Copyable {
+                struct Fresh: ~Copyable {}
+                struct Active: ~Copyable {}
+                struct Locked: ~Copyable {}
+                struct Spent: ~Copyable {}
+                @Initial case fresh(Fresh)
+                case active(Active)
+                case locked(Locked)
+                @Terminal case spent(Spent)
+                @Transition
+                static func activate(_ source: consuming Fresh) -> Active { fatalError() }
+                @Transition
+                static func lock(_ source: consuming Active) -> Locked { fatalError() }
+                @Transition
+                static func unlock(_ source: consuming Locked) -> Active { fatalError() }
+                @Transition(from: [Fresh.self, Active.self])
+                static func discard() -> Spent { fatalError() }
+            }
+            """#
+        let ownedDirectNamed =
+            ownedDirectInline
+            .replacingOccurrences(
+                of: "@Terminal case spent(Spent)",
+                with:
+                    "@Terminal case spent(Spent)\n    @PhaseSet([Fresh.self, Active.self])\n    fileprivate enum Discardable {}"
+            )
+            .replacingOccurrences(of: "from: [Fresh.self, Active.self]", with: "from: Discardable.self")
+        try Self.assertExpansionMatches(
+            inline: ownedDirectInline,
+            named: ownedDirectNamed,
+            hiddenSetNames: ["Discardable"]
+        )
+    }
+
+    @Test func phaseSetOrderingMarkersBackticksAndAccessMatchInline() throws {
+        // Non-declaration element order (`Loaded`, `Loading`) is preserved verbatim; set before, after, or unused.
+        let inline = Self.signOut.replacingOccurrences(
+            of: "from: [Loading.self, Loaded.self]",
+            with: "from: [Loaded.self, Loading.self]"
+        )
+        let before =
+            inline
+            .replacingOccurrences(
+                of: "case loaded(Loaded)",
+                with: "case loaded(Loaded)\n    @PhaseSet([Loaded.self, Loading.self])\n    fileprivate enum Active {}"
+            )
+            .replacingOccurrences(of: "from: [Loaded.self, Loading.self]", with: "from: Active.self")
+        let after =
+            inline
+            .replacingOccurrences(of: "from: [Loaded.self, Loading.self]", with: "from: Active.self")
+            .replacingOccurrences(
+                of: "static func logged(_ source: Idle) -> Idle { fatalError() }",
+                with:
+                    "static func logged(_ source: Idle) -> Idle { fatalError() }\n    @PhaseSet([Loaded.self, Loading.self])\n    fileprivate enum Active {}"
+            )
+        let withUnused = before.replacingOccurrences(
+            of: "fileprivate enum Active {}",
+            with: "fileprivate enum Active {}\n    @PhaseSet([Idle.self])\n    private enum Unused {}"
+        )
+        let backticked =
+            inline
+            .replacingOccurrences(
+                of: "case loaded(Loaded)",
+                with:
+                    "case loaded(Loaded)\n    @PhaseSet([`Loaded`.self, `Loading`.self])\n    fileprivate enum `Active` {}"
+            )
+            .replacingOccurrences(of: "from: [Loaded.self, Loading.self]", with: "from: `Active`.self")
+
+        for candidate in [before, after, withUnused, backticked] {
+            try Self.assertExpansionMatches(inline: inline, named: candidate, hiddenSetNames: ["Active", "Unused"])
+            let signOut = try Self.parse(candidate).transitions.filter { $0.name == "signOut" }
+            #expect(signOut.map(\.from) == ["loaded", "loading"])
+        }
+
+        // Qualified markers (`@StateMachine.PhaseSet` / `@StateMachine::PhaseSet`) bypass a shadowing `PhaseSet` type.
+        for attribute in ["@StateMachine.PhaseSet", "@StateMachine::PhaseSet"] {
+            let shadowed =
+                inline
+                .replacingOccurrences(
+                    of: "case loaded(Loaded)",
+                    with:
+                        "case loaded(Loaded)\n    struct PhaseSet {}\n    \(attribute)([Loaded.self, Loading.self])\n    fileprivate enum Active {}"
+                )
+                .replacingOccurrences(of: "from: [Loaded.self, Loading.self]", with: "from: Active.self")
+            #expect(
+                try Self.parse(shadowed).transitions.filter { $0.name == "signOut" }.map(\.from) == [
+                    "loaded", "loading",
+                ]
+            )
+        }
+
+        // Any valid access modifier (or none / `nonisolated`) expands identically.
+        for modifier in [
+            "", "private ", "fileprivate ", "internal ", "package ", "public ", "nonisolated fileprivate ",
+        ] {
+            let modified = before.replacingOccurrences(
+                of: "    fileprivate enum Active {}",
+                with: "    \(modifier)enum Active {}"
+            )
+            try Self.assertExpansionMatches(inline: inline, named: modified, hiddenSetNames: ["Active"])
+        }
+    }
 }

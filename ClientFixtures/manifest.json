@@ -1299,5 +1299,33 @@
     "id": "GMT-escaped-attributes",
     "pattern": "Take this payload without '@autoclosure'",
     "scope": "a built-in attribute's name and a member read in an attribute's arguments mean the same with redundant backticks, so an escaped attribute is accepted or refused as its bare spelling is"
+  },
+  {
+    "id": "GCT-phase-set-interface",
+    "libraryModule": "PhaseSetFixtureLibrary",
+    "librarySource": "ClientFixtures/GCT-phase-set-interface/library.swift",
+    "forbiddenInterfaceTokens": [
+      "PrivateEditable",
+      "FileprivateResettable",
+      "PrivatePackageGroup",
+      "FileprivatePackageGroup"
+    ],
+    "pattern": "no exact matches in call to instance method 'reset'|requires the types|no member 'reset'",
+    "scope": "public and package schemas with private and fileprivate @PhaseSet enums compile across binary and .swiftinterface lanes under nonisolated and MainActor isolation without exposing the sets, offer the transition on listed phases, and omit it on an unlisted reachable phase"
+  },
+  {
+    "id": "GMT-phase-set-placement",
+    "pattern": "directly inside",
+    "scope": "@PhaseSet is rejected outside a @StateMachine enum by MetadataMacro expansion"
+  },
+  {
+    "id": "GMT-phase-set-bare-phase",
+    "pattern": "'Idle' is a phase payload type, not a @PhaseSet; write from: \\[Idle\\.self\\]",
+    "scope": "passing a bare phase payload to from: selects the single-metatype overload and reaches a targeted macro diagnostic"
+  },
+  {
+    "id": "GMT-phase-set-owned-direct",
+    "pattern": "no exact matches in call to instance method 'discard'|requires the types|no member 'discard'",
+    "scope": "a direct ~Copyable .ownedOnly edge using @PhaseSet generates consuming methods only on listed phases and omits unlisted reachable phases"
   }
 ]

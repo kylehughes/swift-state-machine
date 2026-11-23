@@ -74,8 +74,10 @@ Start from the code that reads and changes the state.
 - State that several isolation domains change synchronously, such as a cache
   read from a background queue and from the UI, uses `Shared`. Its `send` makes
   one attempt and reports a conflict when another commit wins.
-- A test, a deterministic simulation, or a runner of your own uses `Local`, and
-  logic that holds a unique resource uses `Owned`.
+- A test, a deterministic simulation, or a custom runner—such as serializing
+  synchronous work that outlives cancellation in
+  [Serialize uncooperative work on Local](<doc:RunningEffectsYourself#Serialize-uncooperative-work-on-Local>)—uses
+  `Local`, and logic that holds a unique resource uses `Owned`.
 
 An `isolated` schema's values need not be `Sendable`, so it generates only the
 owners that keep them on one actor: `MainActorHost`, `IsolatedHost`, `Local`,
@@ -597,8 +599,13 @@ func stop(_ lookup: Lookup.Shared) async {
 }
 ```
 
-Cancellation is cooperative, so a driver that ignores it keeps a shutdown
-waiting. `runningCount` counts the workers whose termination has not been
+Cancellation is cooperative, so a driver that ignores it keeps running until it
+returns and keeps a shutdown waiting. Managed hosts also launch a replacement
+task as soon as prior authority is revoked; to admit new inputs immediately
+while keeping at most one uncooperative synchronous call in flight, follow
+[Serialize uncooperative work on Local](<doc:RunningEffectsYourself#Serialize-uncooperative-work-on-Local>)
+and the tested `SerializedPipeline.swift` example listed in <doc:Examples>.
+`runningCount` counts the workers whose termination has not been
 processed, `subscriberCount` counts the live registrations, and `isQuiescent`
 reports whether closure and every obligation have settled. All three are `async`
 on `ActorHost`, and on `IsolatedHost` they are methods that take the owning

@@ -169,12 +169,16 @@ Four guarantees follow directly from the schema.
 In `Lookup`, `@Initial case idle(Idle = Idle())` gives hosts a default initial
 payload while still requiring drivers such as `fetchDriver:`, and
 `from: [Idle.self, Found.self]` declares the same edge from both phases without
-a source parameter. Omitted `Input` or `Output` aliases default to `Void`, and
-omitting `Failure` marks the operation infallible so its driver returns `Output`
-directly instead of `Result<Output, Failure>`. Read the
+a source parameter. When several edges share the same source phases, name the
+list once with
+[`@PhaseSet`](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/phaseset(_:))
+on an empty nested enum and pass `from: <Set>.self`; omitted phases stay
+unavailable until listed. Omitted `Input` or `Output` aliases default to `Void`,
+and omitting `Failure` marks the operation infallible so its driver returns
+`Output` directly instead of `Result<Output, Failure>`. Read the
 [declaring guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/declaringagraph)
-for `@Terminal`, failure edges, routers (`@Route`), named scopes, and the full
-macro grammar.
+for `@Terminal`, `@PhaseSet`, failure edges, routers (`@Route`), named scopes,
+and the full macro grammar.
 
 ## Choose an owner
 
@@ -254,8 +258,14 @@ operation's effect case and `Driver` (such as `fetchDriver:`), or a single
 `IsolatedHost` receive their owning actor isolated as their first argument so
 they can access actor state without capturing `self` in a retain cycle.
 Cancellation is cooperative. When an edge revokes an operation's authority, the
-host cancels the driver's task, and any driver that ignores cancellation runs to
-completion before the host discards its stale result.
+host cancels the driver's task and launches any replacement right away, so a
+driver that ignores cancellation runs to completion before the host discards its
+stale result. When synchronous work such as Core Graphics rendering or Vision
+detection must not overlap in memory while new inputs still commit immediately,
+drive a `Local` owner using
+[Serialize uncooperative work on Local](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/runningeffectsyourself#Serialize-uncooperative-work-on-Local)
+and its tested example in
+[`Sources/StateMachineExamples/SerializedPipeline.swift`](Sources/StateMachineExamples/SerializedPipeline.swift).
 
 Operations, scopes, keys, and events control concurrency, cancellation
 boundaries, and side-effect announcements.
@@ -333,7 +343,8 @@ returns the original owner alongside a typed failure on rejection. Use
 `withValue` to borrow the payload or `takeValue()` to consume the owner and
 extract it. Read the
 [guide to running effects yourself](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/runningeffectsyourself)
-for complete `Owned` and `Local` walkthroughs.
+for complete `Owned` and `Local` walkthroughs, including
+[serializing uncooperative work on `Local`](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/runningeffectsyourself#Serialize-uncooperative-work-on-Local).
 
 ## Rely on graph checks
 

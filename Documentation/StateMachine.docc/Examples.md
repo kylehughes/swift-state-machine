@@ -33,6 +33,12 @@ self-contained workflow.
 
 - `ProfileEditor.swift` wraps a presentation over a `MainActor` host for one
   screen, with named load, refresh, retry, cancel, and account-change actions.
+- [`SerializedPipeline.swift`](https://github.com/kylehughes/swift-state-machine/blob/main/Sources/StateMachineExamples/SerializedPipeline.swift)
+  declares an isolated `Local`-only two-stage pipeline (`Detect` into `Render`,
+  emitting `Notice` milestones ahead of starts) and a `@MainActor` runner that
+  serializes uncooperative off-main-actor work into one running task and one
+  latest-pending closure, preserving exact-handle acknowledgment and FIFO
+  reentrant callbacks.
 - `IsolatedNote.swift` is a handwritten editor with non-`Sendable` value data,
   built directly on the raw runtime, with owned, local, and `MainActor` forms.
 - `ReferenceProfile.swift` is the handwritten form of the profile graph, built

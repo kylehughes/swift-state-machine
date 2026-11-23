@@ -65,6 +65,7 @@ The plain `Draft` and `Approved` values remain ordinary data. Constructing an
 | An edge that starts nothing | `@Transition(on: Input.approve)` on a function returning the destination payload |
 | An edge that starts operations | `@Transition(on: Input.begin, starts: [Fetch.self])` on a function returning `Change<Destination, Effect.Begin>` |
 | One edge from several phases | `@Transition(from: [Draft.self, Failed.self], on: Input.close)` on a function without a source parameter |
+| A reusable source-phase list | `@PhaseSet([Draft.self, Failed.self])` on an empty nested enum, named by `@Transition(from: Active.self, on: Input.close)` |
 | An operation | `@Operation(activeIn: [Searching.self])` on an enum, with optional `Input`, `Output`, `Failure`, and `Key` aliases |
 | A completion edge | `@Transition(onSuccess: Fetch.self)` or `@Transition(onFailure: Fetch.self)` |
 | Several edges for one source and trigger | `@Route(on:)`, `@Route(onSuccess:)`, or `@Route(onFailure:)` on a selector function |
@@ -816,9 +817,10 @@ read the owner or send it another input.
 
 A managed owner's initializers take one driver per operation, in the order the
 operations are declared, and then one handler per event, in the order the
-events are declared. `Local` takes its handlers in the same order. Moving an
-operation's or event's declaration therefore moves its argument, and calls
-that pass them in the old order no longer compile.
+events are declared. `Local` takes no handlers and delivers each event through
+`drainCommands(limit:)`. Moving an operation's or event's declaration therefore
+moves its argument on managed initializers, and calls that pass them in the old
+order no longer compile.
 
 ## Choose among edges with a router
 
@@ -1027,6 +1029,64 @@ there is one, and each listed phase gains the edge exactly as if it were
 declared once per phase. When such an edge starts operations, its one effect
 type is the one that every listed phase's `Effect.<Payload>.<Edge>` names. A
 completion edge always names its source, so it cannot list `from:`.
+
+### Reuse a source-phase list
+
+When several edges share the same source phases, declare an empty, nongeneric
+nested `enum` directly inside the schema and attach `@PhaseSet([…])` with the
+phase payload types in order. Reference the set from `@Transition(from:)` as
+`<Set>.self` on an input edge or an `.ownedOnly` direct edge.
+
+```swift
+@StateMachine(mode: .shared)
+nonisolated enum Document: Sendable {
+    struct Draft: Sendable { let title: String }
+    struct Review: Sendable { let title: String }
+    struct Archived: Sendable { let title: String }
+
+    @Initial case draft(Draft)
+    case review(Review)
+    @Terminal case archived(Archived)
+
+    enum Input: Sendable { case submit, revise(String), archive }
+
+    @PhaseSet([Draft.self, Review.self])
+    fileprivate enum Active {}
+
+    @Transition(on: Input.submit)
+    fileprivate static func submit(_ source: Draft) -> Review {
+        Review(title: source.title)
+    }
+
+    @Transition(from: Active.self, on: Input.revise)
+    fileprivate static func revise(_ title: String) -> Draft {
+        Draft(title: title)
+    }
+
+    @Transition(from: Active.self, on: Input.archive)
+    fileprivate static func archive() -> Archived {
+        Archived(title: "Archived")
+    }
+}
+```
+
+A `@PhaseSet` expands to the exact ordered list of phases it names, producing
+the same generated methods, `Effect` types, routing, and `StateMachineGraph` as
+writing that list inline, with no runtime type or storage overhead. Any phase
+omitted from the set, such as `Archived` above or a phase added later, stays
+excluded unless listed. A set may be declared before or after the transitions
+that name it, and an unused set is still checked. Because generated code never
+spells a `@PhaseSet` enum's name, a `private` or `fileprivate` set works inside
+a `public` or `package` schema without appearing in its module interface.
+
+A `@PhaseSet` must be an empty nested enum directly inside the schema, named
+with an ordinary Swift identifier in Unicode Normalization Form C, and may not
+contain `#if` clauses or conditional attributes. Its list accepts only distinct
+`<Phase payload>.self` references declared in the same schema: nested sets,
+expressions, qualified names, mixed arrays such as `from: [Draft.self, Active.self]`,
+cross-file sets, and completion edges with `from:` are unsupported. Write
+`@StateMachine.PhaseSet` or `@StateMachine::PhaseSet` when the schema declares
+its own type named `PhaseSet`.
 
 When edges of one name throw different failure types, their
 `PreparationRejection` cases are prefixed with the source phase, as in
@@ -1299,7 +1359,8 @@ that runs it has read all of it, so a schema with a syntax error, or one nested
 deeper than that parser reads, is refused as a whole rather than read in part.
 It also cannot tell which clause of `#if` a build takes, so it refuses `#if`
 among the members of the schema, `Input`, `Scope`, and each operation and event
-namespace, and in the attributes of any of those members. A payload's own
+namespace, and in the attributes of any of those members. It refuses `#if` inside
+a `@PhaseSet` enum and its attributes for the same reason. A payload's own
 members, the bodies of functions, and extensions of the schema may still use
 `#if`. A helper that exists on one platform belongs in an extension, which the
 macro does not read.

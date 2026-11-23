@@ -791,4 +791,433 @@ struct DiagnosticAnchorTests {
             #expect(location.line == 2 && location.column == 8)
         }
     }
+
+    // MARK: Phase sets
+
+    /// A single table checking both refusal and exact token anchor for every `@PhaseSet` and `from:` error.
+    @Test func phaseSetRefusalsStandAtTheOffendingToken() throws {
+        let base = #"""
+            @StateMachine(mode: .shared)
+            enum Flow {
+                struct Idle {}
+                struct Busy {}
+                struct Done {}
+                @Initial case idle(Idle)
+                case busy(Busy)
+                @Terminal case done(Done)
+                enum Input { case go, stop }
+                @Operation(activeIn: [Busy.self])
+                enum Load { typealias Output = Swift::Int }
+                @Event
+                enum Logged {}
+                @PhaseSet([Idle.self, Busy.self])
+                fileprivate enum Active {}
+                @Transition(on: Input.go, starts: [Load.self], emits: [Logged.self])
+                static func go(_ source: Idle) -> Change<Busy, Effect.Go> { Change(Busy(), effects: [.load, .logged]) }
+                @Transition(onSuccess: Load.self)
+                static func loaded(_ source: Busy, _ value: Int) -> Done { Done() }
+                @Transition(from: Active.self, on: Input.stop)
+                static func stop() -> Idle { Idle() }
+            }
+            """#
+        #expect(Self.refusals(base) == [])
+
+        let decomposed = "Cafe\u{0301}"
+        let cases: [Case] = [
+            // `@PhaseSet` member anchors.
+            Case(
+                name: "unknown phase in @PhaseSet",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([Idle.self, Missing.self])"),
+                message: "'Missing' is not a phase payload type",
+                needle: "Missing.self"
+            ),
+            Case(
+                name: "@Operation in @PhaseSet",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([Idle.self, Load.self])"),
+                message: "'Load' is an @Operation",
+                needle: "Load.self"
+            ),
+            Case(
+                name: "@Event in @PhaseSet",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([Idle.self, Logged.self])"),
+                message: "'Logged' is an @Event",
+                needle: "Logged.self"
+            ),
+            Case(
+                name: "nested @PhaseSet inside @PhaseSet",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])\n    fileprivate enum Active {}",
+                    "@PhaseSet([Idle.self])\n    fileprivate enum Inner {}\n    @PhaseSet([Inner.self, Busy.self])\n    fileprivate enum Active {}"
+                ),
+                message: "'Inner' is a @PhaseSet; nested phase sets are unsupported",
+                needle: "Inner.self"
+            ),
+            Case(
+                name: "unused @PhaseSet with foreign member",
+                source: Self.variant(
+                    base,
+                    "fileprivate enum Active {}",
+                    "fileprivate enum Active {}\n    @PhaseSet([Missing.self])\n    private enum Unused {}"
+                ),
+                message: "'Missing' is not a phase payload type",
+                needle: "Missing.self"
+            ),
+            Case(
+                name: "invalid element syntax in @PhaseSet",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([Idle, Busy.self])"),
+                message: "Reference a type declared directly inside the schema as <Type>.self.",
+                needle: "Idle,"
+            ),
+            Case(
+                name: "qualified phase element in @PhaseSet",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])",
+                    "@PhaseSet([Flow.Idle.self, Busy.self])"
+                ),
+                message: "Reference a type declared directly inside the schema as <Type>.self.",
+                needle: "Flow.Idle.self"
+            ),
+            Case(
+                name: "duplicate phase in @PhaseSet",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([Idle.self, Idle.self])"),
+                message: "List each phase once in @PhaseSet 'Active'",
+                needle: "Idle.self",
+                occurrence: 2
+            ),
+            // `@PhaseSet` declaration & attribute anchors.
+            Case(
+                name: "empty @PhaseSet",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([])"),
+                message: "List at least one phase in @PhaseSet",
+                needle: "[]"
+            ),
+            Case(
+                name: "missing @PhaseSet argument",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet"),
+                message: "Provide an unlabeled array literal",
+                needle: "@PhaseSet"
+            ),
+            Case(
+                name: "labeled @PhaseSet argument",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])",
+                    "@PhaseSet(phases: [Idle.self, Busy.self])"
+                ),
+                message: "Omit the argument label 'phases:'",
+                needle: "phases:"
+            ),
+            Case(
+                name: "labeled first argument before extra @PhaseSet argument",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])",
+                    "@PhaseSet(of: [Idle.self], extra: [Busy.self])"
+                ),
+                message: "Omit the argument label 'of:'",
+                needle: "of:"
+            ),
+            Case(
+                name: "extra @PhaseSet argument",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([Idle.self], [Busy.self])"),
+                message: "Pass a single unlabeled array literal",
+                needle: "[Busy.self]",
+                occurrence: 2
+            ),
+            Case(
+                name: "non-array @PhaseSet argument",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet(Idle.self)"),
+                message: "Use an array literal of <Phase>.self references",
+                needle: "Idle.self"
+            ),
+            Case(
+                name: "duplicate @PhaseSet attribute",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])",
+                    "@PhaseSet([Idle.self]) @PhaseSet([Idle.self, Busy.self])"
+                ),
+                message: "Apply @PhaseSet only once",
+                needle: "@PhaseSet([Idle.self, Busy.self])"
+            ),
+            Case(
+                name: "non-enum @PhaseSet",
+                source: Self.variant(base, "fileprivate enum Active {}", "fileprivate struct Active {}"),
+                message: "@PhaseSet must mark an empty nested enum.",
+                needle: "@PhaseSet([Idle.self, Busy.self])"
+            ),
+            Case(
+                name: "generic @PhaseSet enum",
+                source: Self.variant(base, "fileprivate enum Active {}", "fileprivate enum Active<T> {}"),
+                message: "Phase set enums must be nongeneric.",
+                needle: "<T>"
+            ),
+            Case(
+                name: "non-empty @PhaseSet enum body",
+                source: Self.variant(base, "fileprivate enum Active {}", "fileprivate enum Active { case extra }"),
+                message: "@PhaseSet enum 'Active' must be empty",
+                needle: "case extra"
+            ),
+            Case(
+                name: "@PhaseSet combined with @Operation",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])",
+                    "@PhaseSet([Idle.self, Busy.self]) @Operation(activeIn: [Busy.self])"
+                ),
+                message: "A nested enum cannot be both a @PhaseSet and an @Operation.",
+                needle: "@Operation(activeIn: [Busy.self])",
+                occurrence: 2
+            ),
+            Case(
+                name: "@PhaseSet combined with @Event",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])",
+                    "@PhaseSet([Idle.self, Busy.self]) @Event"
+                ),
+                message: "A nested enum cannot be both a @PhaseSet and an @Event.",
+                needle: "@Event",
+                occurrence: 2
+            ),
+            Case(
+                name: "duplicate @PhaseSet enum name",
+                source: Self.variant(
+                    base,
+                    "fileprivate enum Active {}",
+                    "fileprivate enum Active {}\n    @PhaseSet([Idle.self])\n    fileprivate enum Active {}"
+                ),
+                message: "Phase set 'Active' is declared more than once",
+                needle: "Active {}",
+                occurrence: 2
+            ),
+            Case(
+                name: "reserved @PhaseSet name",
+                source: Self.variant(
+                    Self.variant(base, "fileprivate enum Active {}", "fileprivate enum Phase {}"),
+                    "from: Active.self",
+                    "from: Phase.self"
+                ),
+                message: "'Phase' is reserved for generated members",
+                needle: "Phase {}"
+            ),
+            Case(
+                name: "@PhaseSet named like schema",
+                source: Self.variant(
+                    Self.variant(base, "fileprivate enum Active {}", "fileprivate enum Flow {}"),
+                    "from: Active.self",
+                    "from: Flow.self"
+                ),
+                message: "The schema name is reserved or shadowed",
+                needle: "Flow {}"
+            ),
+            Case(
+                name: "@PhaseSet named Input",
+                source: Self.variant(
+                    base,
+                    "enum Input { case go, stop }",
+                    "@PhaseSet([Idle.self])\n    enum Input { case go, stop }"
+                ),
+                message: "@PhaseSet cannot mark 'Input'",
+                needle: "Input { case go"
+            ),
+            Case(
+                name: "@PhaseSet named Input preceded by another set referencing it",
+                source: Self.variant(
+                    base,
+                    "enum Input { case go, stop }",
+                    "@PhaseSet([Input.self])\n    fileprivate enum BeforeInput {}\n    @PhaseSet([Idle.self])\n    enum Input { case go, stop }"
+                ),
+                message: "@PhaseSet cannot mark 'Input'",
+                needle: "Input { case go"
+            ),
+            Case(
+                name: "phase payload marked @PhaseSet after a valid set referencing it",
+                source: #"""
+                    @StateMachine(mode: .shared)
+                    enum Flow {
+                        @PhaseSet([Draft.self])
+                        fileprivate enum First {}
+                        @PhaseSet([Done.self])
+                        enum Draft {}
+                        struct Done {}
+                        @Initial case draft(Draft)
+                        @Terminal case done(Done)
+                        enum Input { case go }
+                        @Transition(from: First.self, on: Input.go)
+                        static func go() -> Done { Done() }
+                    }
+                    """#,
+                message: "'Draft' is a phase payload type and cannot also be marked @PhaseSet.",
+                needle: "Draft {}"
+            ),
+            Case(
+                name: "phase payload marked @PhaseSet before a valid set referencing it",
+                source: #"""
+                    @StateMachine(mode: .shared)
+                    enum Flow {
+                        @PhaseSet([Done.self])
+                        enum Draft {}
+                        struct Done {}
+                        @PhaseSet([Draft.self])
+                        fileprivate enum First {}
+                        @Initial case draft(Draft)
+                        @Terminal case done(Done)
+                        enum Input { case go }
+                        @Transition(from: First.self, on: Input.go)
+                        static func go() -> Done { Done() }
+                    }
+                    """#,
+                message: "'Draft' is a phase payload type and cannot also be marked @PhaseSet.",
+                needle: "Draft {}"
+            ),
+            Case(
+                name: "uncomposed Unicode @PhaseSet name",
+                source: Self.variant(
+                    Self.variant(base, "fileprivate enum Active {}", "fileprivate enum \(decomposed) {}"),
+                    "from: Active.self",
+                    "from: \(decomposed).self"
+                ),
+                message: "The name '\(decomposed)' is not in Unicode Normalization Form C",
+                needle: "\(decomposed) {}"
+            ),
+            Case(
+                name: "#if inside @PhaseSet enum",
+                source: Self.variant(
+                    base,
+                    "fileprivate enum Active {}",
+                    "fileprivate enum Active {\n    #if DEBUG\n    case x\n    #endif\n    }"
+                ),
+                message: "Move this '#if' outside the schema",
+                needle: "#if DEBUG"
+            ),
+            Case(
+                name: "conditional @PhaseSet attribute",
+                source: Self.variant(
+                    base,
+                    "@PhaseSet([Idle.self, Busy.self])",
+                    "#if DEBUG\n    @PhaseSet([Idle.self, Busy.self])\n    #endif"
+                ),
+                message: "Move this '#if' out of the declaration's attributes",
+                needle: "#if DEBUG"
+            ),
+            // `@Transition(from:)` use-site anchors.
+            Case(
+                name: "unknown set in from:",
+                source: Self.variant(base, "from: Active.self", "from: Missing.self"),
+                message: "'Missing' is not a @PhaseSet",
+                needle: "Missing.self"
+            ),
+            Case(
+                name: "bare phase payload in from:",
+                source: Self.variant(base, "from: Active.self", "from: Idle.self"),
+                message: "'Idle' is a phase payload type, not a @PhaseSet; write from: [Idle.self]",
+                needle: "Idle.self",
+                occurrence: 2
+            ),
+            Case(
+                name: "wrong role @Operation in from:",
+                source: Self.variant(base, "from: Active.self", "from: Load.self"),
+                message: "'Load' is not a @PhaseSet",
+                needle: "Load.self, on:"
+            ),
+            Case(
+                name: "@PhaseSet inside inline from: array",
+                source: Self.variant(base, "from: Active.self", "from: [Idle.self, Active.self]"),
+                message: "'Active' is a @PhaseSet and cannot be listed inside a from: array literal",
+                needle: "Active.self"
+            ),
+            Case(
+                name: "qualified set in from:",
+                source: Self.variant(base, "from: Active.self", "from: Flow.Active.self"),
+                message: "Use an array literal of <Phase>.self references or a @PhaseSet reference",
+                needle: "Flow.Active.self"
+            ),
+            Case(
+                name: "set missing .self in from:",
+                source: Self.variant(base, "from: Active.self", "from: Active"),
+                message: "Use an array literal of <Phase>.self references or a @PhaseSet reference",
+                needle: "Active, on:"
+            ),
+            Case(
+                name: "set on completion edge",
+                source: Self.variant(
+                    base,
+                    "@Transition(onSuccess: Load.self)",
+                    "@Transition(from: Active.self, onSuccess: Load.self)"
+                ),
+                message: "Only an input transition lists its source phases in from:",
+                needle: "Active.self"
+            ),
+            Case(
+                name: "terminal phase reached through @PhaseSet anchors at from: use site",
+                source: Self.variant(base, "@PhaseSet([Idle.self, Busy.self])", "@PhaseSet([Idle.self, Done.self])"),
+                message: "Terminal phase 'done' in @PhaseSet 'Active' cannot have an outgoing transition 'stop'",
+                needle: "Active.self"
+            ),
+            // Function signature & graph anchors through `@PhaseSet`.
+            Case(
+                name: "from: phase set transition taking source parameter",
+                source: Self.variant(base, "static func stop()", "static func stop(_ source: Idle)"),
+                message: "A transition that lists its source phases in from: takes no parameters.",
+                needle: "(_ source: Idle)",
+                occurrence: 2
+            ),
+            Case(
+                name: "duplicate edge name through @PhaseSet",
+                source: Self.variant(
+                    base,
+                    "static func stop() -> Idle { Idle() }",
+                    "static func stop() -> Idle { Idle() }\n    @Transition(on: Input.go)\n    static func stop(_ source: Busy) -> Idle { Idle() }"
+                ),
+                message: "'Busy' already has an edge or router named 'stop'",
+                needle: "stop(_ source: Busy)"
+            ),
+            Case(
+                name: "ambiguous routing through @PhaseSet",
+                source: Self.variant(
+                    base,
+                    "static func stop() -> Idle { Idle() }",
+                    "static func stop() -> Idle { Idle() }\n    @Transition(on: Input.stop)\n    static func altStop(_ source: Idle) -> Idle { Idle() }"
+                ),
+                message: "Ambiguous routing from 'Idle' for on: Input.stop",
+                needle: "altStop("
+            ),
+            Case(
+                name: "owned-only Advance return through @PhaseSet",
+                source: #"""
+                    @StateMachine(mode: .ownedOnly)
+                    enum Token: ~Copyable {
+                        struct Idle: ~Copyable {}
+                        struct Done: ~Copyable {}
+                        @Initial case idle(Idle)
+                        case done(Done)
+                        enum Input { case finish }
+                        enum Problem: Error { case declined }
+                        @PhaseSet([Idle.self, Done.self])
+                        fileprivate enum Both {}
+                        @Transition(from: Both.self, on: Input.finish)
+                        static func finish() -> Advance<Idle, Done, Never, Problem> { fatalError() }
+                    }
+                    """#,
+                message: "A transition that lists its source phases in from: has no one source to give back",
+                needle: "Advance<Idle, Done, Never, Problem>"
+            ),
+        ]
+        for refusal in cases { Self.expect(refusal) }
+
+        // Placement outside `@StateMachine` is refused by `MetadataMacro`.
+        let standalone = Parser.parse(source: "@PhaseSet([Idle.self])\nenum Standalone {}")
+        let standaloneEnum = try #require(standalone.statements.first?.item.as(EnumDeclSyntax.self))
+        let standaloneAttr = try #require(standaloneEnum.attributes.first?.as(AttributeSyntax.self))
+        #expect(throws: Error.self) {
+            _ = try MetadataMacro.expansion(
+                of: standaloneAttr,
+                providingPeersOf: standaloneEnum,
+                in: BasicMacroExpansionContext()
+            )
+        }
+    }
 }

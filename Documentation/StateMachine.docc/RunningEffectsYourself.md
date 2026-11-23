@@ -228,3 +228,96 @@ schema declares a `@Restoration` function. These protocols let a harness such as
 `ManualMachineTest` in `StateMachineTesting` drive any graph's `Local`, and
 conforming confers no authority. Besides the owner's own verbs, they read only
 graph metadata and the receipt a result already holds.
+
+## Serialize uncooperative work on Local
+
+Managed hosts start each admitted operation in its own task right away. When a
+new transition supersedes earlier work, the host cancels the old task and can
+launch the replacement while that superseded task is still running. That default
+fits cooperative async work. Synchronous work off `@MainActor`, such as Core
+Graphics rendering or Vision detection, often ignores Swift task cancellation
+until the call returns. Launching a replacement immediately would overlap two
+heavy calls in memory even though the older call's completion will be `.stale`.
+
+To reflect the newest input synchronously while running at most one heavy call
+at a time, drive a caller-owned `Schema.Local` with one `running` slot and one
+`pending` slot. Each generated schema exposes the types that runner stores.
+
+- `Schema.ExecutionHandle` is `Equatable` and `Sendable` and matches the handle
+  carried by `work.execution` and `.cancel(handle)`.
+- `Schema.<Operation>Work`, such as `SerializedPipeline.DetectWork` or
+  `SerializedPipeline.RenderWork`, holds the work attached to a start command
+  and can also sit in a separate out-of-band slot outside the lane.
+- `Schema.Completion` wraps `work.succeeded(_:)` or `work.failed(_:)`, so
+  heterogeneous operations can share one
+  `@MainActor () async -> Schema.Completion` pending closure.
+
+```swift
+struct Running: Sendable {
+    let handle: SerializedPipeline.ExecutionHandle
+    let task: Task<Void, Never>
+}
+
+struct Pending {
+    let handle: SerializedPipeline.ExecutionHandle
+    let work: @MainActor () async -> SerializedPipeline.Completion
+}
+
+func makePendingWork(
+    for command: SerializedPipeline.Command,
+    detect: @escaping @MainActor (SerializedPipeline.Item) async -> [String],
+    render: @escaping @MainActor (SerializedPipeline.RenderJob) async -> String
+) -> Pending? {
+    switch command {
+    case .detect(let work):
+        return Pending(handle: work.execution) {
+            .detect(work.succeeded(await detect(work.input)))
+        }
+    case .render(let work):
+        return Pending(handle: work.execution) {
+            .render(work.succeeded(await render(work.input)))
+        }
+    case .cancel, .notice:
+        return nil
+    }
+}
+```
+
+Apply five rules to that two-slot runner.
+
+- **Match `.cancel(handle)` by exact handle.** When `handle` matches `pending`,
+  clear `pending = nil` immediately to release captured inputs and call
+  `acknowledgeExecution(handle, disposition: .skippedBeforeStart)`. When it
+  matches `running`, call `task.cancel()`, keep `running` occupied, and wait
+  until the driver returns before acknowledging termination. Leave any unrelated
+  live handle untouched, such as an out-of-band operation stored outside the
+  lane.
+- **Guard the single pending slot.** Require `pending == nil` before installing
+  new work so a graph change that admits two concurrent lane operations cannot
+  silently overwrite an uncancelled ticket.
+- **Settle scheduling state before pumping outward callbacks.** A batch lists
+  cancellations first and then starts and events in authored order, so an
+  `@Event` can precede a start in the same batch. Process every cancellation and
+  start across all drained batches and start pending work before pumping outward
+  callbacks (`onEvent`, `onChange`, or test hooks) from a FIFO queue under a
+  reentrancy guard. A callback that synchronously calls `send` then sees
+  installed handles and preserves observer order.
+- **Separate pre-start cancellation from physical termination.** Inside the
+  launched task, check `Task.isCancelled` before calling the driver. If already
+  cancelled, clear `running`, acknowledge `.skippedBeforeStart`, start any
+  pending work, and pump queued notifications. Otherwise await the driver to
+  physical return while holding only a weak reference to the runner across the
+  suspension. Then clear `running`, acknowledge `.terminated`, call
+  `deliver(completion)` (draining and enqueueing any committed change), start
+  `pending` only if `running` is still `nil` because a committed delivery can
+  chain a successor into `running`, and pump notifications.
+- **Close and tear down cleanly.** On `close()`, drain the terminal batch,
+  acknowledge skipped pending work, and cancel the running task without early
+  acknowledgment. `isQuiescent` becomes `true` only after the running call
+  returns and is acknowledged. Cancel the running task in `deinit`.
+
+This pattern keeps at most one call physically in flight and one pending closure
+queued. Synchronous C or Core Graphics calls still run to completion, and total
+process memory and completion latency remain unbounded. Read
+[`SerializedPipeline.swift`](https://github.com/kylehughes/swift-state-machine/blob/main/Sources/StateMachineExamples/SerializedPipeline.swift)
+for a complete, tested implementation.

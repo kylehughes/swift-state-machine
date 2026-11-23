@@ -313,4 +313,38 @@ struct DeclarationRefusalTests {
             .replacingOccurrences(of: "_ value: Int)", with: "_ value: Check.Helper)")
         #expect(Self.diagnostics(inside) == [message("Helper")])
     }
+
+    // MARK: Phase sets
+
+    /// Generated signatures never spell a `@PhaseSet` enum's name, so `private` and `fileprivate` sets are
+    /// accepted inside both `public` and `package` schemas.
+    @Test func privateAndFileprivatePhaseSetsAreAllowedInPublicAndPackageSchemas() {
+        for access in ["public", "package"] {
+            let source = """
+                @StateMachine(mode: .shared)
+                \(access) enum Workflow {
+                    \(access) struct Draft {}
+                    \(access) struct Reviewing {}
+                    \(access) struct Exporting {}
+                    @Initial case draft(Draft)
+                    case reviewing(Reviewing)
+                    case exporting(Exporting)
+                    \(access) enum Input { case review, beginExport, finishExport, reset }
+                    @PhaseSet([Draft.self, Reviewing.self])
+                    private enum PrivateActive {}
+                    @StateMachine.PhaseSet([Draft.self, Reviewing.self])
+                    fileprivate enum FileprivateActive {}
+                    @Transition(on: Input.review)
+                    fileprivate static func review(_ source: Draft) -> Reviewing { fatalError() }
+                    @Transition(on: Input.beginExport)
+                    fileprivate static func beginExport(_ source: Reviewing) -> Exporting { fatalError() }
+                    @Transition(on: Input.finishExport)
+                    fileprivate static func finishExport(_ source: Exporting) -> Draft { fatalError() }
+                    @Transition(from: PrivateActive.self, on: Input.reset)
+                    fileprivate static func reset() -> Draft { fatalError() }
+                }
+                """
+            #expect(Self.diagnostics(source) == nil, "\(access)")
+        }
+    }
 }

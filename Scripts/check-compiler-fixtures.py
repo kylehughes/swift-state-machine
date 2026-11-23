@@ -47,7 +47,7 @@ def run(name, command, expected=0, pattern=None, source=None):
     return record['status'] == 'pass'
 
 
-def check_fixture(mode, directory, isolation, client, fixture):
+def check_fixture(mode, directory, isolation, client, fixture, lane='binary'):
     """Compile one fixture's control and, when it passes, its rejection. Returns their records."""
     identifier = fixture['id']
     positive = ROOT / 'ClientFixtures' / identifier / 'positive.swift'
@@ -62,11 +62,62 @@ def check_fixture(mode, directory, isolation, client, fixture):
                 positive = combined
             else:
                 negative = combined
-    stem = f'{mode}-{isolation}-{identifier}'
-    results = [compile_record(stem + '-positive', client + [positive, '-o', directory / f'{isolation}-{identifier}-positive.o'])]
+    prefix = f'{mode}-{isolation}-{identifier}' if lane == 'binary' else f'{mode}-{isolation}-{lane}-{identifier}'
+    object_prefix = f'{isolation}-{identifier}' if lane == 'binary' else f'{isolation}-{lane}-{identifier}'
+    results = [compile_record(prefix + '-positive', client + [positive, '-o', directory / f'{object_prefix}-positive.o'])]
     if results[0]['status'] == 'pass':
-        results.append(compile_record(stem + '-negative', client + [negative, '-o', directory / f'{isolation}-{identifier}-negative.o'], expected=1, pattern=fixture['pattern'], source=negative))
+        results.append(compile_record(prefix + '-negative', client + [negative, '-o', directory / f'{object_prefix}-negative.o'], expected=1, pattern=fixture['pattern'], source=negative))
     return results
+
+
+def build_fixture_library(mode, directory, isolation, build, fixture):
+    """Build a fixture-owned separate library module under `isolation` into isolated binary and interface dirs."""
+    module = fixture['libraryModule']
+    source = ROOT / fixture['librarySource']
+    stem = f'{mode}-{isolation}-{fixture["id"]}-library'
+    lib_dir = directory / f'fixture-libraries-{isolation}'
+    lib_interfaces = directory / f'fixture-interfaces-{isolation}'
+    lib_dir.mkdir(exist_ok=True)
+    lib_interfaces.mkdir(exist_ok=True)
+    library_build = build.copy()
+    library_build[library_build.index('-default-isolation') + 1] = isolation
+    emitted_interfaces = directory / f'fixture-interfaces-staging-{isolation}'
+    emitted_interfaces.mkdir(exist_ok=True)
+    command = library_build + [
+        '-package-name', 'StateMachine', '-enable-library-evolution', '-emit-library', '-emit-module',
+        '-module-name', module, '-I', directory, '-L', directory, '-lStateMachine',
+        '-o', lib_dir / f'lib{module}.dylib',
+        '-emit-module-path', lib_dir / f'{module}.swiftmodule',
+        '-emit-module-interface-path', emitted_interfaces / f'{module}.swiftinterface',
+        source,
+    ]
+    if not run(stem, command):
+        return None
+    emitted_files = [emitted_interfaces / f'{module}.swiftinterface', emitted_interfaces / f'{module}.private.swiftinterface']
+    package_interface = emitted_interfaces / f'{module}.package.swiftinterface'
+    if package_interface.is_file():
+        emitted_files.append(package_interface)
+    leaks = []
+    for emitted in emitted_files:
+        if not emitted.is_file():
+            leaks.append(f'Missing expected interface file: {emitted.name}')
+            continue
+        text = emitted.read_text()
+        for token in fixture.get('forbiddenInterfaceTokens', []):
+            if token in text:
+                leaks.append(f'Forbidden token {token!r} appeared in {emitted.name}')
+        if emitted.name.endswith(('.swiftinterface', '.private.swiftinterface')) and not emitted.name.endswith('.package.swiftinterface'):
+            (lib_interfaces / emitted.name).write_bytes(emitted.read_bytes())
+    hygiene_log = output / f'{stem}-interface-hygiene.log'
+    hygiene_log.write_text('\n'.join(leaks) + ('\n' if leaks else 'ok\n'))
+    records.append(dict(
+        name=f'{stem}-interface-hygiene',
+        command=['check-interface-hygiene', module, isolation],
+        exit=1 if leaks else 0,
+        status='fail' if leaks else 'pass',
+        log=str(hygiene_log),
+    ))
+    return (lib_dir, lib_interfaces) if not leaks else None
 
 
 swiftc = subprocess.check_output(['xcrun', '--find', 'swiftc'], text=True).strip()
@@ -96,27 +147,36 @@ for mode in ['debug', 'release']:
         modules_ready = run(f'{mode}-{module}', command + sources) and modules_ready
     if not modules_ready:
         continue
-    # Fixtures are independent of each other, so they compile concurrently. Records keep manifest order.
-    pending = []
-    for isolation in ['nonisolated', 'MainActor']:
-        client = build.copy()
-        client[client.index('-default-isolation') + 1] = isolation
-        client += ['-I', directory, '-c']
-        for fixture in manifest:
-            if fixture.get('status') != 'not-run':
-                pending.append(pool.submit(check_fixture, mode, directory, isolation, client, fixture))
-    try:
-        for future in pending:
-            records.extend(future.result())
-    except BaseException:
-        pool.shutdown(cancel_futures=True)
-        raise
     # Interface-only import is distinct from the normal binary-module lane.
     interfaces = directory / 'interfaces'
     interfaces.mkdir(exist_ok=True)
     for module in ['StateMachine', 'StateMachineUI', 'StateMachineExamples']:
         (interfaces / f'{module}.swiftinterface').write_bytes((directory / f'{module}.swiftinterface').read_bytes())
         (interfaces / f'{module}.private.swiftinterface').write_bytes((directory / f'{module}.private.swiftinterface').read_bytes())
+    # Fixtures are independent of each other, so they compile concurrently. Records keep manifest order.
+    pending = []
+    for isolation in ['nonisolated', 'MainActor']:
+        client = build.copy()
+        client[client.index('-default-isolation') + 1] = isolation
+        binary_client = client + ['-I', directory, '-c']
+        for fixture in manifest:
+            if fixture.get('status') == 'not-run':
+                continue
+            if fixture.get('libraryModule'):
+                dirs = build_fixture_library(mode, directory, isolation, build, fixture)
+                if not dirs:
+                    continue
+                lib_dir, lib_interfaces = dirs
+                pending.append(pool.submit(check_fixture, mode, directory, isolation, client + ['-I', lib_dir, '-I', directory, '-c'], fixture, 'binary'))
+                pending.append(pool.submit(check_fixture, mode, directory, isolation, client + ['-I', lib_interfaces, '-I', interfaces, '-c'], fixture, 'interface'))
+            else:
+                pending.append(pool.submit(check_fixture, mode, directory, isolation, binary_client, fixture, 'binary'))
+    try:
+        for future in pending:
+            records.extend(future.result())
+    except BaseException:
+        pool.shutdown(cancel_futures=True)
+        raise
     positive = ROOT / 'ClientFixtures/CT-019/positive.swift'
     run(f'{mode}-interface-import', build + ['-I', interfaces, '-c', positive, '-o', directory / 'interface-import.o'])
     owned = ROOT / 'ClientFixtures/CT-001/positive.swift'

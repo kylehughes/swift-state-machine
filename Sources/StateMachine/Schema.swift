@@ -117,6 +117,20 @@ public macro Initial() = #externalMacro(module: "StateMachineMacros", type: "Met
 @attached(peer)
 public macro Terminal() = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
 
+/// Names a reusable list of source phases for `@Transition(from:)`.
+///
+/// Apply it to an empty, nongeneric nested `enum` directly inside the schema, listing at least one
+/// distinct phase payload as `<Phase payload>.self`. A `@Transition(from:)` attribute can then
+/// reference the set as `<Set>.self`, expanding in the set's written order exactly as if those
+/// phases were written inline. Because generated code never spells the set's name, a `private` or
+/// `fileprivate` set works inside a `public` or `package` schema. Write `@StateMachine.PhaseSet`
+/// when the schema declares its own type named `PhaseSet`.
+///
+/// - Parameter phases: At least one distinct source phase, written `<Phase payload>.self`.
+@attached(peer)
+public macro PhaseSet(_ phases: [any (~Copyable).Type]) =
+    #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
+
 /// Declares the phases in which one named scope stays active.
 ///
 /// Apply it to a single-case declaration in the schema's `Scope` enum. An operation whose primary
@@ -268,6 +282,52 @@ public macro Transition(
 @attached(peer)
 public macro Transition(
     from: [any (~Copyable).Type],
+    invalidates: [Any] = [],
+    starts: [Any.Type] = [],
+    cancels: [Any.Type] = [],
+    emits: [Any.Type] = []
+) = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
+
+/// Describes one synchronous authored transition taken from each phase in a `@PhaseSet` when an
+/// input arrives.
+///
+/// The function takes no source parameter, taking only the input's payload unlabeled when the input
+/// carries one. Each phase listed in the `@PhaseSet` gains the edge in the set's written order,
+/// exactly as if the set's phase list were written inline in `from:`.
+///
+/// - Parameters:
+///   - from: A `@PhaseSet` enum declared directly inside the schema, written `<Set>.self`.
+///   - on: The triggering case, written `Input.<case>`.
+///   - invalidates: Scopes whose authority the edge revokes, written `Scope.<case>`.
+///   - starts: Operations the edge may start, written `<Operation>.self`.
+///   - cancels: Keyed operations whose work the edge may cancel, written `<Operation>.self`.
+///   - emits: Events the edge may emit, written `<Event>.self`.
+@attached(peer)
+public macro Transition(
+    from: any (~Copyable).Type,
+    on: Any,
+    invalidates: [Any] = [],
+    starts: [Any.Type] = [],
+    cancels: [Any.Type] = [],
+    emits: [Any.Type] = []
+) = #externalMacro(module: "StateMachineMacros", type: "MetadataMacro")
+
+/// Describes one synchronous authored transition that an `.ownedOnly` schema's caller takes directly
+/// from each phase in a `@PhaseSet`.
+///
+/// The function takes no parameters, and each owned phase listed in the `@PhaseSet` gains a method
+/// named after it in the set's written order, exactly as if the set's phase list were written inline
+/// in `from:`.
+///
+/// - Parameters:
+///   - from: A `@PhaseSet` enum declared directly inside the schema, written `<Set>.self`.
+///   - invalidates: Scopes whose authority the edge revokes, written `Scope.<case>`.
+///   - starts: Operations the edge may start, written `<Operation>.self`.
+///   - cancels: Keyed operations whose work the edge may cancel, written `<Operation>.self`.
+///   - emits: Events the edge may emit, written `<Event>.self`.
+@attached(peer)
+public macro Transition(
+    from: any (~Copyable).Type,
     invalidates: [Any] = [],
     starts: [Any.Type] = [],
     cancels: [Any.Type] = [],

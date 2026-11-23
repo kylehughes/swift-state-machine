@@ -134,7 +134,7 @@ LIMITS = [
          pattern=r'This schema declares \d+ (phases|input cases|operations|operations, cancellations, and events); the macro accepts at most \d+, .*',
          doc='The macro accepts at most 600 phases, 512 input cases, 256 operations, and 512 effect cases'),
     dict(id='raw-type-names', rewrites=r'^collide-raw$', observed='macro-diagnostic',
-         pattern=r'Name the (case|schema|operation|event|transition or router) with a Swift identifier that needs no backticks, .*|'
+         pattern=r'Name the (case|schema|operation|event|phase set|transition or router) with a Swift identifier that needs no backticks, .*|'
                  r"Phase '[^']*' needs a distinct nongeneric struct or enum declared directly inside the schema, named with a Swift identifier that needs no backticks; aliases are unsupported\.",
          doc='names are Swift identifiers that need no backticks'),
     # A failure the macro reads without confirming it (a name a nested namespace finds outside itself, a bare `Array` or
@@ -265,6 +265,9 @@ EXPECTED_REPORTS = {
     'own-report-local': 'idle.left@1; driver L1; delivery busy.worked; idle.right@3; driver R2; delivery busy.worked; '
                         'idle.finish@5; logged left 1,worked 21,right 2,worked 22; rejected left(3); done; idle.right@1; '
                         'driver R4; delivery busy.worked; 2; refused broken',
+    'own-phase-set': 'draft.edit@1; noted d; rejected edit; editing.revert@2; draft.submit@3; review.edit@4; noted r; '
+                     'editing.archive@5; archived; owned noted o; archived; edges 9',
+    'own-phase-set-owned': 'closed; open; edges 5',
 }
 
 
@@ -1415,6 +1418,122 @@ func fuzzReport() -> String {
     }
 }
 ''',
+    # A public schema with private and fileprivate `@PhaseSet` enums declared both before and after transitions,
+    # non-alphabetical member orders, an unused set containing a `@Terminal` phase, an inline `from:` list, and a
+    # cross-module client.
+    'phase-set': '''
+import StateMachine
+
+@StateMachine(mode: .shared, owners: [.owned, .local])
+public nonisolated enum Board: Swift::Sendable {
+    public struct Draft: Swift::Sendable {
+        public let note: Swift::String
+        public init(note: Swift::String = "init") { self.note = note }
+    }
+    public struct Review: Swift::Sendable { public let note: Swift::String }
+    public struct Editing: Swift::Sendable { public let note: Swift::String }
+    public struct Archived: Swift::Sendable { public let note: Swift::String }
+    @Initial case draft(Draft = Draft())
+    case review(Review)
+    case editing(Editing)
+    @Terminal case archived(Archived)
+    public enum Input: Swift::Sendable { case submit, edit(Swift::String), revert, archive }
+    @Operation(activeIn: [Review.self])
+    public enum Audit { public typealias Output = Swift::Int }
+    @Event
+    public enum Noted { public typealias Payload = Swift::String }
+    @PhaseSet([Review.self, Draft.self])
+    fileprivate enum Editable {}
+    @Transition(on: Input.submit, starts: [Audit.self])
+    fileprivate static func submit(_ source: Draft) -> Change<Review, Effect.Submit> {
+        Change(Review(note: source.note), effects: [.audit])
+    }
+    @Transition(onSuccess: Audit.self)
+    fileprivate static func audited(_ source: Review, _ score: Audit.Output) -> Draft {
+        Draft(note: "\\(source.note):\\(score)")
+    }
+    @Transition(from: Editable.self, on: Input.edit, emits: [Noted.self])
+    fileprivate static func edit(_ note: Swift::String) -> Change<Editing, Effect.Edit> {
+        Change(Editing(note: note), effects: [.noted(note)])
+    }
+    @Transition(from: [Editing.self, Review.self], on: Input.revert)
+    fileprivate static func revert() -> Draft { Draft(note: "reverted") }
+    @Transition(from: Closeable.self, on: Input.archive)
+    fileprivate static func archive() -> Archived { Archived(note: "archived") }
+    @PhaseSet([Editing.self, Review.self, Draft.self])
+    private enum Closeable {}
+    @PhaseSet([Archived.self, Draft.self])
+    fileprivate enum SnapshotPhases {}
+}
+
+func fuzzReport() -> String {
+    var out: [String] = []
+    var board = Board.Local()
+    func step(_ input: Board.Input, _ label: String) {
+        do {
+            let receipt = try board.send(input)
+            out.append("\\(receipt.edgeID ?? "-")@\\(receipt.snapshot.revision)")
+        } catch { out.append("rejected \\(label)") }
+        for batch in board.drainCommands() {
+            for command in batch.commands {
+                switch command {
+                case .audit(let work): _ = board.acknowledgeExecution(work.execution)
+                case .noted(let text): out.append("noted \\(text)")
+                case .cancel: break
+                }
+            }
+        }
+    }
+    step(.edit("d"), "edit")
+    step(.edit("e"), "edit")
+    step(.revert, "revert")
+    step(.submit, "submit")
+    step(.edit("r"), "edit")
+    step(.archive, "archive")
+    out.append("\\(Board.Local.phase(of: board.snapshot()))")
+    let change = Board.owned().edit("o")
+    let ownedNote = change.effects.compactMap { if case .noted(let text) = $0 { text } else { nil } }.joined(separator: ",")
+    out.append("owned noted \\(ownedNote)")
+    out.append(change.next.archive().withValue { $0.note })
+    out.append("edges \\(Board.graph.edges.count)")
+    return out.joined(separator: "; ")
+}
+// fuzz-client
+import Fz
+
+func fuzzClient() -> Swift::String {
+    let change = Board.owned().edit("c")
+    return change.next.archive().withValue { $0.note }
+}
+''',
+    # An `.ownedOnly` noncopyable schema with a `@PhaseSet` direct transition and an inline `from:` direct transition.
+    'phase-set-owned': '''
+import StateMachine
+
+@StateMachine(mode: .ownedOnly)
+nonisolated enum Handle: ~Copyable {
+    struct Open: ~Copyable { let label: Swift::String }
+    struct Busy: ~Copyable { let label: Swift::String }
+    struct Closed: ~Copyable { let label: Swift::String }
+    @Initial case open(Open)
+    case busy(Busy)
+    @Terminal case closed(Closed)
+    @PhaseSet([Busy.self, Open.self])
+    fileprivate enum Live {}
+    @Transition
+    fileprivate static func begin(_ source: consuming Open) -> Busy { Busy(label: source.label) }
+    @Transition(from: Live.self)
+    fileprivate static func close() -> Closed { Closed(label: "closed") }
+    @Transition(from: [Busy.self, Open.self])
+    fileprivate static func reset() -> Open { Open(label: "open") }
+}
+
+func fuzzReport() -> String {
+    let closed = Handle.owned(Handle.Open(label: "a")).begin().close().withValue { $0.label }
+    let reopened = Handle.owned(Handle.Open(label: "b")).begin().reset().withValue { $0.label }
+    return "\\(closed); \\(reopened); edges \\(Handle.graph.edges.count)"
+}
+''',
 }
 
 # A seed whose name is in this set has its own fuzzReport; every seed's graphs are printed.
@@ -1570,6 +1689,90 @@ def schema_phase_sites(text, mask=None):
 
 def phase_payloads(text):
     return {payload for _, _, sites in schema_phase_sites(text) for payload in sites.values()}
+
+
+IDENT_TOKEN = r'(?:`[^`\n]+`|[^\W\d]\w*)'
+PHASE_SET_ATTR = re.compile(r'@(?:`?StateMachine`?\s*(?:::|\.)\s*)?`?PhaseSet`?(?![\w`])\s*\(')
+DECL_STOP_KEYWORDS = {'struct', 'class', 'actor', 'protocol', 'typealias', 'case', 'func', 'var', 'let',
+                      'init', 'subscript', 'deinit', 'extension', 'import'}
+
+
+def parse_phase_set_members(argument_text):
+    """Return ordered payload type names from a `@PhaseSet([...])` argument, or None if not a bare `<Type>.self` list."""
+    bracketed = re.fullmatch(r'\s*\[\s*(.*?)\s*\]\s*', argument_text, re.S)
+    if not bracketed:
+        return None
+    inner = bracketed.group(1)
+    if not inner.strip():
+        return []
+    members = []
+    for item in split_top(inner):
+        stripped = item.strip()
+        if not stripped:
+            continue
+        match = re.fullmatch(r'(' + IDENT_TOKEN + r')\s*\.\s*`?self`?', stripped)
+        if not match:
+            return None
+        members.append(match.group(1).strip('`'))
+    return members
+
+
+def phase_sets(direct):
+    """Map each direct `@PhaseSet([...])` empty nested enum name in `direct` to its ordered payload type names."""
+    sets = {}
+    ident = re.compile(IDENT_TOKEN)
+    attr = re.compile(r'@' + IDENT_TOKEN + r'(?:\s*(?:::|\.)\s*' + IDENT_TOKEN + r')*')
+    for match in PHASE_SET_ATTR.finditer(direct):
+        arg_end = scan_type_end(direct, match.end(), '')
+        if arg_end >= len(direct) or direct[arg_end] != ')':
+            continue
+        members = parse_phase_set_members(direct[match.end():arg_end])
+        if not members:
+            continue
+        cursor = arg_end + 1
+        enum_name = None
+        while cursor < len(direct):
+            while cursor < len(direct) and direct[cursor].isspace():
+                cursor += 1
+            if cursor >= len(direct):
+                break
+            if direct[cursor] == '@':
+                found = attr.match(direct, cursor)
+                if not found:
+                    break
+                cursor = found.end()
+                while cursor < len(direct) and direct[cursor].isspace():
+                    cursor += 1
+                if cursor < len(direct) and direct[cursor] == '(':
+                    close = scan_type_end(direct, cursor + 1, '')
+                    cursor = close + 1
+                continue
+            word = ident.match(direct, cursor)
+            if not word:
+                break
+            token = word.group(0)
+            cursor = word.end()
+            if token == 'enum':
+                while cursor < len(direct) and direct[cursor].isspace():
+                    cursor += 1
+                name_match = ident.match(direct, cursor)
+                if name_match and direct[name_match.end():].lstrip()[:1] != '<':
+                    enum_name = name_match.group(0).strip('`')
+                break
+            if token in DECL_STOP_KEYWORDS:
+                break
+        if enum_name is not None:
+            sets[enum_name] = members
+    return sets
+
+
+def phase_set_names(text):
+    """All `@PhaseSet` enum names declared directly inside any schema in `text`."""
+    mask = code_mask(text)
+    names = set()
+    for declaration, end in schema_bounds(text, mask):
+        names.update(phase_sets(direct_member_text(text[declaration.end():end])))
+    return names
 
 
 def core_name(spelling):
@@ -2105,7 +2308,7 @@ def _(text, rng):
 @rewrite('attribute-trivia', 'eq', 'Write each reference in an attribute exactly as shown')
 def _(text, rng):
     results = []
-    for match in re.finditer(r'@(Transition|Route|Operation|Restoration|Active|StateMachine)\(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\)', text):
+    for match in re.finditer(r'@(Transition|Route|Operation|Restoration|Active|StateMachine|PhaseSet)\(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\)', text):
         arguments = match.group(2)
         spaced = re.sub(r':\s*', ': /* fuzz */ ', arguments).replace(', ', ' /* fuzz */ ,\n        ')
         new = text[:match.start(2)] + '\n        ' + spaced + '\n    ' + text[match.end(2):]
@@ -2116,7 +2319,7 @@ def _(text, rng):
 @rewrite('module-attribute', 'eq', 'An attribute may include its module name, as in `@StateMachine.Transition`')
 def _(text, rng):
     results = []
-    for match in re.finditer(r'@(Transition|Route|Operation|Restoration|Active|Initial|Terminal|Event)\b', text):
+    for match in re.finditer(r'@(Transition|Route|Operation|Restoration|Active|Initial|Terminal|Event|PhaseSet)\b', text):
         new = text[:match.start()] + '@StateMachine.' + match.group(1) + text[match.end():]
         results.append((new, dict(site=match.group(0), role='attribute')))
     return results
@@ -2144,9 +2347,9 @@ def member_blocks(text):
             # A schema nested in another declaration has no member at this indentation.
             if current is not None:
                 current.append(line)
-        elif top and (stripped.startswith('//') or re.fullmatch(r'@[\w.]+(\(.*\))?', stripped)):
+        elif top and (stripped.startswith('//') or re.fullmatch(r'@[\w.:`]+(\(.*\))?', stripped)):
             pending.append(line)
-        elif top and re.match(r'@[\w.]+\(', stripped) and stripped.count('(') > stripped.count(')'):
+        elif top and re.match(r'@[\w.:`]+\(', stripped) and stripped.count('(') > stripped.count(')'):
             pending.append(line)
             open_attribute = stripped.count('(') - stripped.count(')')
         elif top:
@@ -2202,14 +2405,25 @@ def _(text, rng):
 
 @rewrite('reorder-lists', 'eq', 'attribute lists name sets of declarations')
 def _(text, rng):
-    '''Reverses the list an attribute argument spells, as `starts: [A.self, B.self]`.'''
+    '''Reverses the list an attribute argument spells, as `starts: [A.self, B.self]` or `@PhaseSet([A.self, B.self])`.'''
     results = []
+    mask = code_mask(text)
     for match in re.finditer(r'\b(starts|emits|cancels|invalidates|requires|activeIn|allows|only|from|in):\s*\[([^\[\]]+)\]', text):
-        items = [i.strip() for i in match.group(2).split(',')]
+        if not mask[match.start()]:
+            continue
+        items = [i.strip() for i in match.group(2).split(',') if i.strip()]
         if len(items) < 2:
             continue
         new = text[:match.start(2)] + ', '.join(reversed(items)) + text[match.end(2):]
         results.append((new, dict(site=f'{match.group(1)} reversed', role='value')))
+    for match in re.finditer(r'@(?:`?StateMachine`?\s*(?:::|\.)\s*)?`?PhaseSet`?\s*\(\s*\[([^\[\]]+)\]\s*\)', text):
+        if not mask[match.start()]:
+            continue
+        items = [i.strip() for i in match.group(1).split(',') if i.strip()]
+        if len(items) < 2:
+            continue
+        new = text[:match.start(1)] + ', '.join(reversed(items)) + text[match.end(1):]
+        results.append((new, dict(site='PhaseSet reversed', role='value')))
     return results
 
 
@@ -2286,7 +2500,10 @@ def _(text, rng):
         schema = schema_of(text, match.start())
         bare = core_name(payload)
         callee = call.split('.')[-1]
-        for new_call in (f'Self.{callee}', f'{schema}.{callee}', callee):
+        # A static property named like the schema shadows the schema type in expression position (`Hold.Idle()`).
+        shadowed_value = schema and re.search(r'\bstatic\s+(?:let|var)\s+`?' + re.escape(schema) + r'`?(?![\w`])', text)
+        candidates = (f'Self.{callee}', callee) if shadowed_value else (f'Self.{callee}', f'{schema}.{callee}', callee)
+        for new_call in candidates:
             if new_call == call:
                 continue
             new = text[:match.start(2)] + new_call + text[match.end(2):]
@@ -2309,11 +2526,14 @@ def identifier_tokens(text):
 
 
 def rename(text, old, new):
-    """Renames the identifier `old` everywhere outside comments and string literals."""
+    """Renames the identifier `old` everywhere outside comments, string literals, module selectors, and built-in attributes."""
     mask = code_mask(text)
     pieces, last = [], 0
     for match in re.finditer(r'(?<![\w`])(`?)' + re.escape(old) + r'\1(?![\w`])', text):
         if not mask[match.start()]:
+            continue
+        before = text[:match.start()].rstrip()
+        if before.endswith('::') or (before.endswith('@') and old in STANDARD):
             continue
         pieces.append(text[last:match.start()])
         pieces.append(new if not match.group(1) or new.startswith('`') else f'`{new}`')
@@ -2336,7 +2556,7 @@ def renamable(text):
     """Declared names whose generated derivatives never appear in client code: types other than operations, events,
     Input, and Scope; aliases other than an operation's or event's; static functions no attribute marks."""
     names = []
-    operations = set(re.findall(r'@(?:Operation|Event)[^\n]*\n\s*enum\s+`?(\w+)', text))
+    operations = set(re.findall(r'@(?:StateMachine(?:::|\.))?(?:Operation|Event)\b[^\n]*\n\s*(?:\w+\s+)*enum\s+`?(\w+)', text))
     for match in re.finditer(r'\b(struct|enum|class|protocol)\s+`?(\w+)`?', text):
         name = match.group(2)
         if name in operations or name in ('Input', 'Scope', 'Route', 'Effect') or name in schema_names(text):
@@ -2350,7 +2570,7 @@ def renamable(text):
             names.append(('function', match.group(2)))
     seen, unique = set(), []
     for kind, name in names:
-        if name not in seen and not name.startswith('Fuzz') and not name.startswith('fuzz'):
+        if name not in seen and not name.startswith(('Fuzz', 'fuzz', '_')):
             seen.add(name)
             unique.append((kind, name))
     return unique
@@ -2440,8 +2660,9 @@ for _flavor, _doc in [('nfd', 'canonical equivalence: an accented letter as one 
 def _(text, rng):
     """Renames a type or alias to a raw identifier that contains a period, as `N.P` written in backticks."""
     results = []
+    excluded = phase_payloads(text) | phase_set_names(text)
     for kind, name in renamable(text):
-        if kind not in ('type', 'alias') or name in phase_payloads(text):
+        if kind not in ('type', 'alias') or name in excluded:
             continue
         raw = f'{name}.Raw'
         control = text
@@ -2571,7 +2792,9 @@ def _(text, rng):
         if '@Terminal' in text[match.start():text.find('\n', match.start())]:
             continue
         refusal = (rf"Terminal phase '{re.escape(match.group(1))}' cannot have an outgoing (transition|router) '[^']*'; "
-                   r"remove '@Terminal', or remove the (transition|router)\.")
+                   r"remove '@Terminal', or remove the (transition|router)\.|"
+                   rf"Terminal phase '{re.escape(match.group(1))}' in @PhaseSet '[^']*' cannot have an outgoing transition '[^']*'; "
+                   r"remove '@Terminal', remove '[^']*\.self' from '[^']*', or remove the transition\.")
         results.append((text[:match.start()] + '    @Initial @Terminal case' + text[match.end():],
                         dict(site='add @Terminal to initial', role='value', refusal=refusal)))
 
@@ -2675,7 +2898,7 @@ def _(text, rng):
     results = []
     tokens = identifier_tokens(text)
     # An edge named as an operation's or event's effect case shares that case's spelling; renaming one renames both.
-    effect_cases = {n[0].lower() + n[1:] for n in re.findall(r'@(?:Operation|Event)[^\n]*\n\s*enum\s+(\w+)', text)}
+    effect_cases = {n[0].lower() + n[1:] for n in re.findall(r'@(?:StateMachine(?:::|\.))?(?:Operation|Event)\b[^\n]*\n\s*(?:\w+\s+)*enum\s+`?(\w+)', text)}
     for function in authored_functions_at(text):
         old = function['name']
         if function['attribute'] == 'Restoration' or old in effect_cases or (old[0].upper() + old[1:]) in declared_types(text):
@@ -2687,6 +2910,8 @@ def _(text, rng):
             capital, new_capital = old[0].upper() + old[1:], verb[0].upper() + verb[1:]
             # `(Effect).Add`, which `paren-base` writes, names the same effect.
             variant = re.sub(r'(\(?\b(?:Effect|Route)\)?)\.((?:\w+\.)?)' + capital + r'(Result)?(?![\w.])', lambda m: f'{m.group(1)}.{m.group(2)}{new_capital}{m.group(3) or ""}', variant)
+            # A deprecation `renamed: "<old>"` names the replacement edge inside a string literal.
+            variant = re.sub(r'(\brenamed\s*:\s*")' + re.escape(old) + r'"', lambda m: f'{m.group(1)}{verb}"', variant)
             results.append((variant, dict(site=f'{function["attribute"]} {old} -> {verb}', role='value', control=text,
                                           mapping={old: verb, capital: new_capital, capital + 'Result': new_capital + 'Result'},
                                           behaviour=False, verb=verb)))
@@ -2779,7 +3004,8 @@ def _(text, rng):
 
 @rewrite('nest-generic', 'diag', 'generic schema or phase payload declarations')
 def _(text, rng):
-    nested = nest_schema(text, 'nonisolated enum FuzzOuter<FuzzT> {', '}', 'FuzzOuter<Int>')
+    param = fresh_identifier(text, 'FuzzOuterT')
+    nested = nest_schema(text, f'nonisolated enum FuzzOuter<{param}> {{', '}', 'FuzzOuter<Int>')
     return [(nested[0], dict(site='inside a generic type', role='value'))] if nested else []
 
 
@@ -3291,10 +3517,20 @@ def edge_destinations(text):
     return found
 
 
-def phase_of_type(text, payload):
-    for match in re.finditer(r'^    (?:@[\w.]+(?:\([^)\n]*\))?\s+)*case\s+`?(\w+)`?\((\w+)', text, re.M):
-        if match.group(2) == payload:
-            return match.group(1)
+def phase_of_type(text, payload, span=None):
+    """The phase case name whose payload's core type is `payload` (handling `Self.`, schema qualification,
+    parentheses, comments, backticks, and nested schemas)."""
+    mask = code_mask(text)
+    for declaration, end in schema_bounds(text, mask):
+        if span is not None:
+            start_line = text.count('\n', 0, declaration.start()) + 1
+            end_line = text.count('\n', 0, end) + 1
+            if (start_line, end_line) != span:
+                continue
+        body = text[declaration.end():end]
+        for case_name, _, spelled in direct_case_items(body):
+            if spelled is not None and core_name(spelled) == payload:
+                return case_name
     return None
 
 
@@ -3361,12 +3597,18 @@ def _(text, rng):
         return []
     results = []
     destinations = edge_destinations(text)
-    initial = re.search(r'@Initial\b[^\n]*case\s+\w+\((\w+)', text)
+    initial_payloads = set()
+    for declaration, end in schema_bounds(text):
+        body = text[declaration.end():end]
+        direct = direct_member_text(body)
+        for init_match in re.finditer(r'@(?:StateMachine(?:::|\.))?Initial\b[^\n]*?\bcase\s+`?\w+`?\s*\(', direct):
+            p_end = scan_type_end(body, init_match.end(), ',=')
+            initial_payloads.add(core_name(strip_comments(body[init_match.end():p_end])))
     lines = text.split('\n')
     spans = [(a, b) for a, b in schema_lines(text)]
     schema_at = lambda index: next((s for s in spans if s[0] <= text.count('\n', 0, index) + 1 <= s[1]), None)
     for function, destination, (start, end) in destinations:
-        if sum(1 for _, d, _ in destinations if d == destination) != 1 or (initial and initial.group(1) == destination):
+        if sum(1 for _, d, _ in destinations if d == destination) != 1 or destination in initial_payloads:
             continue
         span = schema_at(function['func_at'])
         schema = '\n'.join(lines[span[0] - 1:span[1]]) if span else ''
@@ -3379,7 +3621,7 @@ def _(text, rng):
         brace = text.find('{', function['after'])
         body = body_of(text, re.compile(r'\{').match(text, brace))
         new = text[:start] + other + text[end:brace] + '{ fatalError() }' + text[brace + len(body) + 2:]
-        lost = phase_of_type(text, destination)
+        lost = phase_of_type(text, destination, span)
         refusal = (rf"Phase '{re.escape(lost)}' is unreachable from the initial phase '[^']*'( or a phase @Restoration can restore)?; "
                    r"declare a transition into it, or remove it\." if lost else None)
         results.append((new, dict(site=f'{function["name"]} into {other} instead of {destination}', role='value', refusal=refusal)))
@@ -3389,7 +3631,7 @@ def _(text, rng):
 def route_blocks(text):
     """Each router: (start of its attribute line, end of its body, name)."""
     found = []
-    for match in re.finditer(r'^    @(?:StateMachine\.)?Route\([^\n]*\)\s*\n\s*(?:\w+\s+)*static func\s+(\w+)', text, re.M):
+    for match in re.finditer(r'^    @(?:StateMachine(?:::|\.))?Route\([^\n]*\)\s*\n\s*(?:\w+\s+)*static func\s+`?(\w+)`?', text, re.M):
         brace = text.find('{', match.end())
         body = body_of(text, re.compile(r'\{').match(text, brace))
         found.append((match.start(), brace + len(body) + 2, match.group(1)))
@@ -3420,8 +3662,14 @@ def _(text, rng):
     """A second router for the same phase and trigger."""
     results = []
     for start, end, name in route_blocks(text):
-        copy = re.sub(r'\bstatic func\s+' + name + r'\b', f'static func {name}Again', text[start:end], count=1)
-        copy = re.sub(r'\bRoute\.' + name[0].upper() + name[1:] + r'\b', f'Route.{name[0].upper() + name[1:]}Again', copy)
+        capital = name[0].upper() + name[1:]
+        copy = re.sub(r'(\bstatic func\s+)(`?)' + re.escape(name) + r'\2(?![\w`])',
+                      lambda m: f'{m.group(1)}{m.group(2)}{name}Again{m.group(2)}', text[start:end], count=1)
+        copy = re.sub(
+            r'((?:\(?\s*`?Route`?\s*\)?)\s*\.\s*(?:(?:\(?\s*`?\w+`?\s*\)?)\s*\.\s*)?)(`?)' + re.escape(capital) + r'\2(?![\w`])',
+            lambda m: f'{m.group(1)}{m.group(2)}{capital}Again{m.group(2)}',
+            copy,
+        )
         results.append((text[:end] + '\n' + copy + text[end:], dict(site=f'router {name} twice', role='value')))
     return results
 
@@ -3547,7 +3795,7 @@ def _(text, rng):
 
 # --- Boundaries the older families leave out ----------------------------------------------------------------------
 
-ATTRIBUTE_HEAD = re.compile(r'@(?:StateMachine(?:::|\.))?(StateMachine|Operation|Transition|Route|Active|Restoration|Event)\(')
+ATTRIBUTE_HEAD = re.compile(r'@(?:StateMachine(?:::|\.))?(StateMachine|Operation|Transition|Route|Active|Restoration|Event|PhaseSet)\(')
 
 
 @rewrite('label-backtick', 'eq', 'an argument label may be escaped with backticks, nested ones included')
@@ -3759,13 +4007,19 @@ def _(text, rng):
 
 @rewrite('schema-to-file', 'eq', 'a schema may be declared in any file of its module')
 def _(text, rng):
-    """The whole schema moved into another source file of its module."""
+    """The whole top-level schema moved into another source file of its module."""
     results = []
-    if FILE_MARKER.search(text) or 'func fuzzLocalSchema()' in text:
+    if FILE_MARKER.search(text) or 'func fuzzLocalSchema()' in text or '// fuzz-outer:' in text:
         return results
     module, client = (text.split(CLIENT_MARKER, 1) + [None])[:2] if CLIENT_MARKER in text else (text, None)
+    mask = code_mask(module)
     for match in re.finditer(r'^(?:@available\([^)]*\)\s*\n)?@StateMachine\(', module, re.M):
         start = match.start()
+        if not mask[start]:
+            continue
+        depth = sum((1 if ch == '{' else -1) for ch, code in zip(module[:start], mask[:start]) if code and ch in '{}')
+        if depth != 0:
+            continue
         opened = module.find('{', start)
         end = opened + len(body_of(module, re.compile(r'\{').match(module, opened))) + 2
         moved = module[start:end]
@@ -3871,6 +4125,383 @@ def _(text, rng):
         for value in ('0x0', '9223372036854775808'):
             results.append((text[:match.start(1)] + value + text[match.end(1):], dict(
                 site=f'limit {value}', role='value', refusal=r'Use \.parallel\(limit: N\).*|Admission must be .*')))
+    return results
+
+
+# --- `@PhaseSet` rewrites ---------------------------------------------------------------------------------------------
+
+def fresh_identifier(text, base):
+    taken = identifier_tokens(text)
+    if base not in taken:
+        return base
+    return next(f'{base}{n}' for n in range(2, 1000) if f'{base}{n}' not in taken)
+
+
+def line_indent(text, offset):
+    start = text.rfind('\n', 0, offset) + 1
+    end = start
+    while end < len(text) and text[end] in ' \t':
+        end += 1
+    return text[start:end]
+
+
+def find_phase_set_decls(text):
+    """Direct `@PhaseSet([...])` empty nested enum declarations inside each schema in `text`, with their spans,
+    members, enclosing schema bounds, and `from: <Set>.self` uses in that schema."""
+    mask = code_mask(text)
+    decls = []
+    ident = re.compile(IDENT_TOKEN)
+    attr = re.compile(r'@' + IDENT_TOKEN + r'(?:\s*(?:::|\.)\s*' + IDENT_TOKEN + r')*')
+    transition_attr = re.compile(r'@(?:`?StateMachine`?\s*(?:::|\.)\s*)?`?Transition`?(?![\w`])\s*\(')
+    for declaration, schema_end in schema_bounds(text, mask):
+        schema_start = declaration.end()
+        body = text[schema_start:schema_end]
+        direct = direct_member_text(body)
+        # Collect every `from: <Name>.self` use in this schema's direct transitions.
+        uses_by_name = collections.defaultdict(list)
+        for tr in transition_attr.finditer(direct):
+            tr_end = scan_type_end(direct, tr.end(), '')
+            if tr_end >= len(direct) or direct[tr_end] != ')':
+                continue
+            args = direct[tr.end():tr_end]
+            from_use = re.search(r'(?<![\w`])`?from`?\s*:\s*(' + IDENT_TOKEN + r')\s*\.\s*`?self`?(?![\w`])', args)
+            if from_use:
+                expr_start = schema_start + tr.end() + from_use.start(1)
+                expr_end = schema_start + tr.end() + from_use.end()
+                uses_by_name[from_use.group(1).strip('`')].append((expr_start, expr_end, schema_start + tr.start()))
+        for match in PHASE_SET_ATTR.finditer(direct):
+            arg_end = scan_type_end(direct, match.end(), '')
+            if arg_end >= len(direct) or direct[arg_end] != ')':
+                continue
+            arg_text = direct[match.end():arg_end]
+            members = parse_phase_set_members(arg_text)
+            if not members:
+                continue
+            bracket = re.search(r'\[.*\]', arg_text, re.S)
+            if not bracket:
+                continue
+            cursor = arg_end + 1
+            enum_name, name_span = None, None
+            while cursor < len(direct):
+                while cursor < len(direct) and direct[cursor].isspace():
+                    cursor += 1
+                if cursor >= len(direct):
+                    break
+                if direct[cursor] == '@':
+                    found = attr.match(direct, cursor)
+                    if not found:
+                        break
+                    cursor = found.end()
+                    while cursor < len(direct) and direct[cursor].isspace():
+                        cursor += 1
+                    if cursor < len(direct) and direct[cursor] == '(':
+                        cursor = scan_type_end(direct, cursor + 1, '') + 1
+                    continue
+                word = ident.match(direct, cursor)
+                if not word:
+                    break
+                token = word.group(0)
+                cursor = word.end()
+                if token == 'enum':
+                    while cursor < len(direct) and direct[cursor].isspace():
+                        cursor += 1
+                    name_match = ident.match(direct, cursor)
+                    if name_match and direct[name_match.end():].lstrip()[:1] != '<':
+                        enum_name = name_match.group(0).strip('`')
+                        name_span = (schema_start + name_match.start(), schema_start + name_match.end())
+                        cursor = name_match.end()
+                    break
+                if token in DECL_STOP_KEYWORDS:
+                    break
+            if enum_name is None:
+                continue
+            open_brace = direct.find('{', cursor)
+            if open_brace < 0:
+                continue
+            close_brace = direct.find('}', open_brace + 1)
+            if close_brace < 0:
+                continue
+            attr_start = schema_start + match.start()
+            line_start = text.rfind('\n', 0, attr_start) + 1
+            decl_start = line_start if not text[line_start:attr_start].strip() else attr_start
+            decl_end = schema_start + close_brace + 1
+            if decl_end < len(text) and text[decl_end] == '\n':
+                decl_end += 1
+            decls.append(dict(
+                schema_start=schema_start, schema_end=schema_end,
+                decl_start=decl_start, decl_end=decl_end,
+                attr_start=attr_start, attr_end=schema_start + arg_end + 1,
+                attr_head_end=schema_start + match.end() - 1,
+                list_start=schema_start + match.end() + bracket.start(),
+                list_end=schema_start + match.end() + bracket.end(),
+                name=enum_name, name_start=name_span[0], name_end=name_span[1],
+                body_open=schema_start + open_brace, body_close=schema_start + close_brace,
+                members=members, indent=line_indent(text, attr_start),
+                uses=uses_by_name.get(enum_name, []),
+            ))
+    return decls
+
+
+def insert_at_schema_bottom(text, schema_end, block):
+    """Insert a member block right before the schema's closing brace at `schema_end`."""
+    line_start = text.rfind('\n', 0, schema_end) + 1
+    prefix = '' if text[line_start:schema_end].strip() == '' else '\n'
+    return text[:line_start] + prefix + block.rstrip('\n') + '\n' + text[line_start:]
+
+
+@rewrite('phase-set-extract', 'eq', 'A @PhaseSet expands to the exact ordered list of phases it names')
+def _(text, rng):
+    """Extracts an inline `@Transition(from: [A.self, ...])` list into a `@PhaseSet` enum declared before or after
+    the transition."""
+    results = []
+    mask = code_mask(text)
+    transition_attr = re.compile(r'@(?:`?StateMachine`?\s*(?:::|\.)\s*)?`?Transition`?(?![\w`])\s*\(')
+    for declaration, schema_end in schema_bounds(text, mask):
+        schema_start = declaration.end()
+        body = text[schema_start:schema_end]
+        direct = direct_member_text(body)
+        for tr in transition_attr.finditer(direct):
+            tr_end = scan_type_end(direct, tr.end(), '')
+            if tr_end >= len(direct) or direct[tr_end] != ')':
+                continue
+            args = direct[tr.end():tr_end]
+            source_list = re.search(r'(?<![\w`])`?from`?\s*:\s*(\[[^\]]*\])', args)
+            if not source_list:
+                continue
+            members = parse_phase_set_members(source_list.group(1))
+            if not members:
+                continue
+            set_name = fresh_identifier(text, 'FuzzPhaseSet')
+            indent = line_indent(text, schema_start + tr.start())
+            raw_list = text[schema_start + tr.end() + source_list.start(1):schema_start + tr.end() + source_list.end(1)]
+            decl_block = f'{indent}@PhaseSet({raw_list})\n{indent}fileprivate enum {set_name} {{}}\n'
+            list_abs_start = schema_start + tr.end() + source_list.start(1)
+            list_abs_end = schema_start + tr.end() + source_list.end(1)
+            replaced = text[:list_abs_start] + f'{set_name}.self' + text[list_abs_end:]
+            delta = len(f'{set_name}.self') - (list_abs_end - list_abs_start)
+            # Insert near top of schema (before transition).
+            top_at = schema_start + (1 if text[schema_start:schema_start + 1] == '\n' else 0)
+            before = replaced[:top_at] + decl_block + replaced[top_at:]
+            results.append((before, dict(site=f'extract {raw_list} to @PhaseSet before', role='value')))
+            # Insert near bottom of schema (after transition).
+            after = insert_at_schema_bottom(replaced, schema_end + delta, decl_block)
+            results.append((after, dict(site=f'extract {raw_list} to @PhaseSet after', role='value')))
+    return results
+
+
+@rewrite('phase-set-inline', 'eq', 'A @PhaseSet expands to the exact ordered list of phases it names')
+def _(text, rng):
+    """Replaces `@Transition(from: SetName.self)` with the inline array literal, both keeping and removing the
+    `@PhaseSet` enum."""
+    results = []
+    for decl in find_phase_set_decls(text):
+        if not decl['uses']:
+            continue
+        inline = '[' + ', '.join(f'{member}.self' for member in decl['members']) + ']'
+        first_start, first_end, _ = decl['uses'][0]
+        kept = text[:first_start] + inline + text[first_end:]
+        results.append((kept, dict(site=f'inline {decl["name"]} keeping decl', role='value')))
+        edits = [(start, end, inline) for start, end, _ in decl['uses']]
+        edits.append((decl['decl_start'], decl['decl_end'], ''))
+        removed = text
+        for start, end, replacement in sorted(edits, key=lambda item: -item[0]):
+            removed = removed[:start] + replacement + removed[end:]
+        results.append((removed, dict(site=f'inline {decl["name"]} removing decl', role='value')))
+    return results
+
+
+@rewrite('phase-set-move', 'eq', 'A set may be declared before or after the transitions that name it')
+def _(text, rng):
+    """Moves a `@PhaseSet` enum declaration to the top or bottom of its schema body."""
+    results = []
+    for decl in find_phase_set_decls(text):
+        block = text[decl['decl_start']:decl['decl_end']]
+        stripped = text[:decl['decl_start']] + text[decl['decl_end']:]
+        removed_len = decl['decl_end'] - decl['decl_start']
+        top_at = decl['schema_start'] + (1 if text[decl['schema_start']:decl['schema_start'] + 1] == '\n' else 0)
+        if decl['decl_start'] > top_at:
+            moved_top = stripped[:top_at] + block + stripped[top_at:]
+            results.append((moved_top, dict(site=f'move @PhaseSet {decl["name"]} to top', role='value')))
+        bottom_target = decl['schema_end'] - removed_len
+        if text[decl['decl_end']:decl['schema_end']].strip():
+            moved_bottom = insert_at_schema_bottom(stripped, bottom_target, block)
+            results.append((moved_bottom, dict(site=f'move @PhaseSet {decl["name"]} to bottom', role='value')))
+    return results
+
+
+@rewrite('phase-set-spelling', 'eq', 'Write @StateMachine.PhaseSet or @StateMachine::PhaseSet when the schema declares its own type named PhaseSet')
+def _(text, rng):
+    """Qualification (`@StateMachine.PhaseSet`, `@StateMachine::PhaseSet`, including beside a schema-owned
+    `enum PhaseSet {}`), comments, and backticks on `@PhaseSet` declarations and uses."""
+    results = []
+    decls = find_phase_set_decls(text)
+    shadowed_schemas = set()
+    for decl in decls:
+        attr_head = text[decl['attr_start']:decl['attr_head_end']]
+        if 'StateMachine' not in attr_head:
+            for qualifier in ('@StateMachine.PhaseSet', '@StateMachine::PhaseSet'):
+                new = text[:decl['attr_start']] + qualifier + text[decl['attr_head_end']:]
+                results.append((new, dict(site=f'{qualifier} on {decl["name"]}', role='attribute')))
+            if decl['schema_start'] not in shadowed_schemas and 'PhaseSet' not in declared_types(text):
+                shadowed_schemas.add(decl['schema_start'])
+                same_schema = [d for d in decls if d['schema_start'] == decl['schema_start']]
+                qualified = text
+                for item in sorted(same_schema, key=lambda d: -d['attr_start']):
+                    qualified = qualified[:item['attr_start']] + '@StateMachine::PhaseSet' + qualified[item['attr_head_end']:]
+                top_at = decl['schema_start'] + (1 if text[decl['schema_start']:decl['schema_start'] + 1] == '\n' else 0)
+                shadowed = qualified[:top_at] + f"{decl['indent']}enum PhaseSet {{}}\n" + qualified[top_at:]
+                results.append((shadowed, dict(site=f'@StateMachine::PhaseSet beside enum PhaseSet', role='attribute')))
+        # Backticks and comments on the `@PhaseSet` member list, enum name, and `from:` uses.
+        commented_list = '/* fuzz */ [ ' + ', '.join(f'/* p */ `{member}`.self' for member in decl['members']) + ' /* end */ ]'
+        edits = [
+            (decl['list_start'], decl['list_end'], commented_list),
+            (decl['name_start'], decl['name_end'], f'`{decl["name"]}`'),
+        ]
+        for use_start, use_end, _ in decl['uses']:
+            edits.append((use_start, use_end, f'/* set */ `{decl["name"]}`.self'))
+        spelled = text
+        for start, end, replacement in sorted(edits, key=lambda item: -item[0]):
+            spelled = spelled[:start] + replacement + spelled[end:]
+        results.append((spelled, dict(site=f'backticks and comments on @PhaseSet {decl["name"]}', role='value')))
+    return results
+
+
+@rewrite('phase-set-decl-invalid', 'break', 'A @PhaseSet must be an empty nested enum directly inside the schema')
+def _(text, rng):
+    """Invalid `@PhaseSet` declarations: empty list, duplicate phase, nested `@PhaseSet`, non-empty enum body,
+    non-phase member, and non-enum declaration."""
+    results = []
+    decls = find_phase_set_decls(text)
+    by_schema = collections.defaultdict(list)
+    for decl in decls:
+        by_schema[decl['schema_start']].append(decl)
+    for schema_start, schema_decls in by_schema.items():
+        decl = schema_decls[0]
+        name = decl['name']
+        first = decl['members'][0]
+        indent = decl['indent']
+        schema_body_text = text[schema_start:decl['schema_end']]
+        top_at = schema_start + (1 if text[schema_start:schema_start + 1] == '\n' else 0)
+        # 1. Empty `@PhaseSet([])`.
+        empty = text[:decl['list_start']] + '[]' + text[decl['list_end']:]
+        results.append((empty, dict(
+            site=f'empty @PhaseSet {name}', role='value',
+            refusal=r'List at least one phase in @PhaseSet\(\[\.\.\.\]\)\.')))
+        # 2. Duplicate phase in `@PhaseSet([...])`.
+        dup = text[:decl['list_end'] - 1] + f', {first}.self]' + text[decl['list_end']:]
+        results.append((dup, dict(
+            site=f'duplicate {first} in @PhaseSet {name}', role='value',
+            refusal=rf"List each phase once in @PhaseSet '{re.escape(name)}'; '{re.escape(first)}' appears twice\.",
+            token=rf'`?{re.escape(first)}`?\.self')))
+        # 3. Nested `@PhaseSet` reference inside `@PhaseSet([...])`.
+        if len(schema_decls) > 1:
+            nested_name = schema_decls[1]['name']
+            nested = text[:decl['list_end'] - 1] + f', {nested_name}.self]' + text[decl['list_end']:]
+        else:
+            nested_name = fresh_identifier(text, 'FuzzInnerSet')
+            nested = text[:decl['list_end'] - 1] + f', {nested_name}.self]' + text[decl['list_end']:]
+            nested = nested[:top_at] + f'{indent}@PhaseSet([{first}.self])\n{indent}fileprivate enum {nested_name} {{}}\n' + nested[top_at:]
+        results.append((nested, dict(
+            site=f'nested @PhaseSet {nested_name} in {name}', role='value',
+            refusal=rf"'{re.escape(nested_name)}' is a @PhaseSet; nested phase sets are unsupported\. List phase payload types directly as <Phase>\.self\.",
+            token=rf'`?{re.escape(nested_name)}`?\.self')))
+        # 4. Non-empty `@PhaseSet` enum body.
+        extra_type = fresh_identifier(text, 'FuzzExtra')
+        non_empty = text[:decl['body_open'] + 1] + f' struct {extra_type} {{}} ' + text[decl['body_close']:]
+        results.append((non_empty, dict(
+            site=f'non-empty @PhaseSet {name}', role='value',
+            refusal=rf"@PhaseSet enum '{re.escape(name)}' must be empty; remove its members\.",
+            token=r'struct')))
+        # 5. Non-phase member (`@Operation`, `@Event`, or plain struct) inside `@PhaseSet`.
+        ops = re.findall(r'@(?:StateMachine(?:::|\.))?Operation\b[^\n]*\n\s*(?:\w+\s+)*enum\s+`?(\w+)`?', schema_body_text)
+        if ops:
+            op = ops[0]
+            wrong_role = text[:decl['list_end'] - 1] + f', {op}.self]' + text[decl['list_end']:]
+            results.append((wrong_role, dict(
+                site=f'@Operation {op} in @PhaseSet {name}', role='value',
+                refusal=rf"'{re.escape(op)}' is an @Operation, not a phase payload type declared in this schema\.",
+                token=rf'`?{re.escape(op)}`?\.self')))
+        else:
+            not_phase = fresh_identifier(text, 'FuzzNotPhase')
+            with_member = text[:decl['list_end'] - 1] + f', {not_phase}.self]' + text[decl['list_end']:]
+            with_member = with_member[:top_at] + f'{indent}fileprivate struct {not_phase} {{}}\n' + with_member[top_at:]
+            results.append((with_member, dict(
+                site=f'non-phase {not_phase} in @PhaseSet {name}', role='value',
+                refusal=rf"'{re.escape(not_phase)}' is not a phase payload type declared in this schema\.",
+                token=rf'{re.escape(not_phase)}\.self')))
+        # 6. `@PhaseSet` on a non-enum declaration inside the schema.
+        bad_struct = fresh_identifier(text, 'FuzzNonEnumSet')
+        non_enum = text[:top_at] + f'{indent}@PhaseSet([{first}.self]) fileprivate struct {bad_struct} {{}}\n' + text[top_at:]
+        results.append((non_enum, dict(
+            site=f'@PhaseSet on struct {bad_struct}', role='value',
+            refusal=r'@PhaseSet must mark an empty nested enum\.',
+            token=r'@(?:StateMachine(?:::|\.))?PhaseSet')))
+    return results
+
+
+@rewrite('phase-set-use-invalid', 'break', 'from: takes either an inline array literal or a bare <Set>.self')
+def _(text, rng):
+    """Invalid `@PhaseSet` uses: non-`@PhaseSet` enum in `from:`, bare phase payload in `from:`, `@PhaseSet` inside
+    inline `from: [...]`, qualified `from: Self.<Set>.self`, `@Terminal` phase reached through `@PhaseSet`, and
+    `@PhaseSet` placed outside `@StateMachine`."""
+    results = []
+    decls = find_phase_set_decls(text)
+    by_schema = collections.defaultdict(list)
+    for decl in decls:
+        if decl['uses']:
+            by_schema[decl['schema_start']].append(decl)
+    for schema_start, schema_decls in by_schema.items():
+        decl = schema_decls[0]
+        name = decl['name']
+        first = decl['members'][0]
+        indent = decl['indent']
+        use_start, use_end, _ = decl['uses'][0]
+        top_at = schema_start + (1 if text[schema_start:schema_start + 1] == '\n' else 0)
+        # 1. Unknown / non-`@PhaseSet` type in `from:`.
+        not_a_set = fresh_identifier(text, 'FuzzNotASet')
+        unknown = text[:use_start] + f'{not_a_set}.self' + text[use_end:]
+        unknown = unknown[:top_at] + f'{indent}fileprivate enum {not_a_set} {{}}\n' + unknown[top_at:]
+        results.append((unknown, dict(
+            site=f'from: non-set {not_a_set}.self', role='value',
+            refusal=rf"'{re.escape(not_a_set)}' is not a @PhaseSet declared directly inside this schema\.",
+            token=rf'{re.escape(not_a_set)}\.self')))
+        # 2. Bare phase payload in `from:`.
+        bare_phase = text[:use_start] + f'{first}.self' + text[use_end:]
+        results.append((bare_phase, dict(
+            site=f'from: bare phase {first}.self', role='value',
+            refusal=rf"'{re.escape(first)}' is a phase payload type, not a @PhaseSet; write from: \[{re.escape(first)}\.self\], or reference a declared @PhaseSet enum as <Set>\.self\.",
+            token=rf'`?{re.escape(first)}`?\.self')))
+        # 3. `@PhaseSet` listed inside inline `from: [...]`.
+        mixed = text[:use_start] + f'[{first}.self, {name}.self]' + text[use_end:]
+        results.append((mixed, dict(
+            site=f'from: mixed array with {name}.self', role='value',
+            refusal=rf"'{re.escape(name)}' is a @PhaseSet and cannot be listed inside a from: array literal; pass from: {re.escape(name)}\.self directly or list its phase payload types inline\.",
+            token=rf'`?{re.escape(name)}`?\.self')))
+        # 4. Qualified `from: Self.<Set>.self`.
+        qualified = text[:use_start] + f'Self.{name}.self' + text[use_end:]
+        results.append((qualified, dict(
+            site=f'from: qualified Self.{name}.self', role='value',
+            refusal=r'Use an array literal of <Phase>\.self references or a @PhaseSet reference as <Set>\.self\.',
+            token=rf'Self\.`?{re.escape(name)}`?\.self')))
+        # 5. `@Terminal` phase reached through `from: <Set>.self`.
+        body = text[schema_start:decl['schema_end']]
+        term_match = re.search(r'@(?:StateMachine(?:::|\.))?Terminal\b[^\n]*\bcase\s+`?(\w+)`?\(\s*(' + IDENT_TOKEN + r')', body)
+        if term_match:
+            term_case = term_match.group(1)
+            term_type = core_name(term_match.group(2))
+            if term_type not in decl['members']:
+                with_terminal = text[:decl['list_end'] - 1] + f', {term_type}.self]' + text[decl['list_end']:]
+                results.append((with_terminal, dict(
+                    site=f'@Terminal {term_case} in used @PhaseSet {name}', role='value',
+                    refusal=rf"Terminal phase '{re.escape(term_case)}' in @PhaseSet '{re.escape(name)}' cannot have an outgoing transition '[^']*'; remove '@Terminal', remove '{re.escape(term_type)}\.self' from '{re.escape(name)}', or remove the transition\.",
+                    token=rf'`?{re.escape(name)}`?\.self')))
+        # 6. `@PhaseSet` placed outside `@StateMachine`.
+        outside_name = fresh_identifier(text, 'FuzzOutsideSet')
+        outside = insert_at_file_scope(text, f'@PhaseSet([Swift::Int.self])\nfileprivate enum {outside_name} {{}}')
+        results.append((outside, dict(
+            site=f'@PhaseSet outside schema ({outside_name})', role='value',
+            refusal=r'Place @PhaseSet directly inside a @StateMachine enum\.',
+            token=r'@PhaseSet')))
     return results
 
 
@@ -4136,7 +4767,20 @@ CRASH = re.compile(r'Stack dump:|Please submit a bug report|Segmentation fault|c
                    r'could not be found in executable plugin')
 
 
-def demangled_fingerprint(objects, authored):
+def is_authored_static(line, authored, schemas=None):
+    """Whether a demangled symbol is an authored static function directly on a schema."""
+    if not authored:
+        return False
+    funcs = '|'.join(map(re.escape, authored))
+    if schemas:
+        paths = '|'.join(re.escape(path.replace('`', '')) for path in schemas)
+        return re.match(rf'static Fz\.(?:{paths})\.(?:{funcs})\(', line) is not None
+    generated = '|'.join(set(OWNER_TYPES.values()) | {'Observed', 'Route', 'Effect', 'Prepared', 'Snapshot', 'Receipt',
+                                                      'Completion', 'PendingCompletion', 'Restoration', 'Drivers', 'Command'})
+    return re.match(rf'static Fz\.(?:(?!({generated})\.)[^.(]+\.)+(?:{funcs})\(', line) is not None
+
+
+def demangled_fingerprint(objects, authored, schemas=None):
     names = subprocess.run(['nm', '-j'] + [str(o) for o in objects], text=True, capture_output=True).stdout.split()
     symbols = sorted({name[1:] for name in names if name.startswith('_$s')})
     if not symbols:
@@ -4172,8 +4816,8 @@ def demangled_fingerprint(objects, authored):
         # So is a member's own restatement of a suppressed requirement of its type's parameters (depth 0: `A`, `B`).
         line = re.sub(r'(?<=[ <])[A-Z]: ~Swift\.(?:Copyable|Escapable)(?:, )?', '', line)
         line = re.sub(r'(, )?\s*where\s*>', '>', line).replace('< where >', '').replace('<>', '').replace(', >', '>')
-        # The authored static functions themselves, on the schema (nested in FuzzOuter or not), are not generated.
-        if re.match(r'static Fz\.(?:FuzzOuter\.)?\w+\.(' + '|'.join(map(re.escape, authored)) + r')\(', line) if authored else False:
+        # The authored static functions themselves, on the schema (at any enclosing-type depth), are not generated.
+        if is_authored_static(line, authored, schemas):
             continue
         keep.add(line)
     return sorted(keep)
@@ -4283,7 +4927,7 @@ def compile_case(toolchain, directory, text, probe=True, flags=()):
                              else 'authored-error')
         return outcome
     outcome['status'] = 'ok'
-    outcome['fingerprint'] = demangled_fingerprint([output], authored_functions(text))
+    outcome['fingerprint'] = demangled_fingerprint([output], authored_functions(text), schema_path_list(module_text(text)))
     outcome['label_problems'] = label_order_problems(outcome['fingerprint'], text)
     if toolchain.run:
         # The harness and the client section form a module of their own that imports the schema's module, so the
@@ -5346,29 +5990,41 @@ def anchored_token(case, name, line, column, message, token=None):
         closing = source_line.find('"', column)
         if closing > 0 and any(column < a and b <= closing + 1 for a, b in ranges):
             return token is None
-    # A bracketed expression, or a declaration's name with its parameter or argument list, stands for the
-    # whole of it: the diagnostic is at the token when the rewrite changed something inside, or when the
-    # extent names what the message names.
+    # A bracketed expression, or a declaration's name with its parameter or argument list (spanning one or more
+    # lines), stands for the whole of it: the diagnostic is at the token when the rewrite changed something inside,
+    # or when the extent names what the message names.
     start = column - 1
     end = start + (TOKEN.match(source_line, start).end() - start if TOKEN.match(source_line, start) else 0)
     if source_line[end:end + 1] in ('(', '<', '[') or source_line[start:start + 1] in ('(', '['):
         opener = source_line[end] if source_line[end:end + 1] in ('(', '<', '[') else source_line[start]
         closer = {'(': ')', '<': '>', '[': ']'}[opener]
-        depth, cursor = 0, end if source_line[end:end + 1] == opener else start
-        while cursor < len(source_line):
-            depth += (source_line[cursor] == opener) - (source_line[cursor] == closer)
-            cursor += 1
+        depth, cursor, current_line = 0, end if source_line[end:end + 1] == opener else start, line
+        parts = []
+        while current_line <= len(lines):
+            text_line = lines[current_line - 1]
+            piece_start = start if current_line == line else 0
+            while cursor < len(text_line):
+                depth += (text_line[cursor] == opener) - (text_line[cursor] == closer)
+                cursor += 1
+                if depth == 0:
+                    break
+            parts.append((current_line, piece_start, cursor, text_line[piece_start:cursor]))
             if depth == 0:
                 break
-        extent = source_line[start:cursor]
-        if any(column <= a and b <= cursor + 1 for a, b in ranges):
-            return token is None
-        payloads = dict(re.findall(r'\bcase\s+`?(\w+)`?\s*\(\s*(\w+)', case['text']))
-        declared = set(re.findall(r'\b(?:struct|enum|class|actor|typealias|protocol|case|func)\s+`?(\w+)', case['text']))
-        named = set(quoted_names(message)) | {payloads[n] for n in quoted_names(message) if n in payloads}
-        named |= set(re.findall(r'\b[A-Z]\w*\b', message)) & declared
-        if token is None and any(re.search(r'(?<![\w])' + re.escape(n) + r'(?![\w])', extent) for n in named if n):
-            return True
+            current_line += 1
+            cursor = 0
+        if depth == 0:
+            extent = '\n'.join(part for _, _, _, part in parts)
+            for span_line, span_start, span_end, _ in parts:
+                line_ranges = columns.get(span_line, [])
+                if any(span_start + 1 <= a and b <= span_end + 1 for a, b in line_ranges):
+                    return token is None
+            payloads = dict(re.findall(r'\bcase\s+`?(\w+)`?\s*\(\s*(\w+)', case['text']))
+            declared = set(re.findall(r'\b(?:struct|enum|class|actor|typealias|protocol|case|func)\s+`?(\w+)', case['text']))
+            named = set(quoted_names(message)) | {payloads[n] for n in quoted_names(message) if n in payloads}
+            named |= set(re.findall(r'\b[A-Z]\w*\b', message)) & declared
+            if token is None and any(re.search(r'(?<![\w])' + re.escape(n) + r'(?![\w])', extent) for n in named if n):
+                return True
     found = TOKEN.match(source_line, column - 1)
     if not found:
         return False
@@ -5550,9 +6206,45 @@ def member_key(line):
     return head, labels
 
 
-def failure_split_signatures(difference):
+def split_owned_signature(signature):
+    """For an `Owned` method signature, return `(prefix_including_open_paren, [params], suffix_from_close_paren)`, else None."""
+    member = re.match(r'Fz\.[\w.]+\.Owned\.[^\s.<(]+', signature)
+    if member is None:
+        return None
+    opening = signature.find('(', member.end())
+    if opening < 0:
+        return None
+    close = scan_type_end(signature, opening + 1, '')
+    if close >= len(signature) or signature[close] != ')':
+        return None
+    raw = signature[opening + 1:close]
+    params = [p.strip() for p in split_top(raw)] if raw.strip() else []
+    return signature[:opening + 1], params, signature[close:]
+
+
+def shared_params_match(before_params, after_params, require_change=True):
+    """Whether every parameter in `after_params` equals `before_params`'s or strictly adds `__shared `."""
+    if len(before_params) != len(after_params):
+        return False
+    changed = False
+    for before_param, after_param in zip(before_params, after_params):
+        if after_param == before_param:
+            continue
+        label_before, sep_before, type_before = before_param.partition(': ')
+        label_after, sep_after, type_after = after_param.partition(': ')
+        if sep_before and sep_after and label_before == label_after and type_after == '__shared ' + type_before:
+            changed = True
+        elif not sep_before and not sep_after and after_param == '__shared ' + before_param:
+            changed = True
+        else:
+            return False
+    return changed or not require_change
+
+
+def failure_split_signatures(difference, allow_shared_owned=False):
     """Whether every signature in `difference` is an `Observed` or `Owned` failure-split pair with matching
-    declaration, constraints, and parameter types."""
+    declaration, constraints, and parameter types (optionally allowing strictly added `__shared ` on `Owned`
+    parameters when `shared-param` is also active)."""
     def signature_key(signature, split):
         member = re.match(r'(Fz\.[\w.]+)\.(Observed|Owned)\.([^\s.<(]+)', signature)
         if member is None:
@@ -5568,9 +6260,11 @@ def failure_split_signatures(difference):
             failure, result = suffix[len(' throws('):end], suffix[end + 1:]
             if result == f' -> {schema}.Prepared' and bool(failure) and (
                     failure == f'{schema}.PreparationRejection') == split:
-                return call
+                return ('Observed', call, ())
         if owner == 'Owned' and suffix.startswith(' -> '):
             result = suffix[len(' -> '):]
+            parts = split_owned_signature(signature)
+            owned_key = ('Owned', parts[0], tuple(parts[1])) if parts is not None else None
             if split:
                 companion = unicodedata.normalize('NFC', method[:1].upper() + method[1:])
                 phase = re.search(r'\bA == ' + re.escape(schema) + r'\.(\w+)(?=[,>])', call)
@@ -5578,16 +6272,28 @@ def failure_split_signatures(difference):
                 if phase:
                     allowed.add(f'{schema}.Route.{phase.group(1)}.{companion}Result')
                 if result in allowed:
-                    return call
+                    return owned_key
             elif result.startswith('StateMachine.Advance<') and result.endswith('>'):
                 arguments = [argument.strip() for argument in split_top(result[len('StateMachine.Advance<'):-1])]
                 if len(arguments) == 4 and all(arg.startswith(f'{schema}.Owned<') for arg in arguments[:2]):
-                    return call
+                    return owned_key
         return None
 
-    before = collections.Counter(signature_key(line[1:], False) for line in difference if line.startswith('-'))
-    after = collections.Counter(signature_key(line[1:], True) for line in difference if line.startswith('+'))
-    return bool(before) and None not in before and before == after
+    before = [signature_key(line[1:], False) for line in difference if line.startswith('-')]
+    after = [signature_key(line[1:], True) for line in difference if line.startswith('+')]
+    if not before or len(before) != len(after) or None in before or None in after:
+        return False
+    if not allow_shared_owned:
+        return collections.Counter(before) == collections.Counter(after)
+    remaining = list(after)
+    for owner, head, params in before:
+        match = next((i for i, (a_owner, a_head, a_params) in enumerate(remaining)
+                      if a_owner == owner and a_head == head and (
+                          a_params == params if owner == 'Observed' else shared_params_match(params, a_params, require_change=False))), None)
+        if match is None:
+            return False
+        remaining.pop(match)
+    return not remaining
 
 
 def apply_mapping(lines, mapping):
@@ -5667,8 +6373,8 @@ def judge(case, base, control, variant, prefix=None):
             # schema's generated signatures must independently show the same documented limit.
             reference = control if control is not None else base
             mapping = case.get('mapping', {})
-            difference = interface_difference(reference, variant, mapping, case.get('added', ()))
-            if failure_split_signatures(difference):
+            difference = interface_difference(reference, variant, mapping, case.get('added', ()), order_free(case), case['text'])
+            if failure_split_signatures(strip_repeated_ownership(difference, names), allow_shared_owned='shared-param' in names):
                 return f'limit:{client_limit}', 'only the documented failure-split signature changes and matching client diagnostic', describe(variant)
             return 'fail', 'only the documented failure-split signature changes matching the client diagnostic', describe(variant)
     # Swift rejecting client code where a rewrite changed it is the rewrite's error, not the macro's.
@@ -5710,7 +6416,7 @@ def judge(case, base, control, variant, prefix=None):
             if unexplained:
                 return 'fail', 'rejected through the expansion, alone', f'{describe(variant)}; beside it: {unexplained[0][:160]}'
             return 'pass', 'rejected through the expansion', describe(variant)
-        if not refusal_matches(pattern, case, variant, True, consequent=GRAPH_CONSEQUENCES):
+        if not refusal_matches(pattern, case, variant, True, token=case.get('token'), consequent=GRAPH_CONSEQUENCES):
             return 'fail', f'rejected with exactly the documented diagnostic at the token it names: {pattern}', describe(variant)
         return 'pass', 'rejected', describe(variant)
     if 'diag' in kinds:
@@ -5800,8 +6506,12 @@ def judge(case, base, control, variant, prefix=None):
     same, why = same_outcome(reference, variant, case.get('mapping', {}), case.get('behaviour', True), case.get('run_mapping'), order_free(case), case.get('added', ()), case['text'])
     if same:
         return 'pass', 'as the seed', 'same signatures, graph, and output'
-    difference = interface_difference(reference, variant, case.get('mapping', {}), case.get('added', ()))
+    difference = interface_difference(reference, variant, case.get('mapping', {}), case.get('added', ()), order_free(case), case['text'])
     entry = limit_for(case, 'interface', difference or [why], role)
+    if not entry and difference:
+        remaining = strip_repeated_ownership(difference, names)
+        if len(remaining) < len(difference):
+            entry = 'repeated-ownership' if not remaining else limit_for(case, 'interface', remaining, role)
     if entry and difference:
         # A documented interface difference excuses only the signatures: the graph and the output, the pinned report
         # included, must still be the seed's.
@@ -5814,11 +6524,41 @@ def judge(case, base, control, variant, prefix=None):
     return 'fail', 'as the seed: same generated signatures, graph, and output', why
 
 
-def interface_difference(reference, variant, mapping, added=()):
+def strip_repeated_ownership(difference, rewrites):
+    """Remove exact `(-before, +after)` `Owned` method pairs from `difference` where `shared-param` is active and
+    `after` differs from `before` solely by adding `__shared ` to one or more parameters."""
+    if 'shared-param' not in rewrites:
+        return difference
+    removed = [line[1:] for line in difference if line.startswith('-')]
+    added = [line[1:] for line in difference if line.startswith('+')]
+    kept_removed, kept_added = [], list(added)
+    for line in removed:
+        before_parts = split_owned_signature(line)
+        match = None
+        if before_parts is not None:
+            b_head, b_params, b_tail = before_parts
+            for i, candidate in enumerate(kept_added):
+                after_parts = split_owned_signature(candidate)
+                if after_parts is None:
+                    continue
+                a_head, a_params, a_tail = after_parts
+                if a_head == b_head and a_tail == b_tail and shared_params_match(b_params, a_params, require_change=True):
+                    match = i
+                    break
+        if match is not None:
+            kept_added.pop(match)
+        else:
+            kept_removed.append(line)
+    return [f'-{line}' for line in kept_removed] + [f'+{line}' for line in kept_added]
+
+
+def interface_difference(reference, variant, mapping, added=(), order_free=(), text=None):
     """Every generated signature one outcome has and the other lacks, each marked `-` or `+`."""
     keep = lambda line: not any(re.search(pattern, line) for pattern in added)
     a = {line for line in apply_mapping(reference.get('fingerprint', []), mapping) if keep(line)}
     b = {line for line in variant.get('fingerprint', []) if keep(line)}
+    if 'members' in order_free and text is not None:
+        a = {reorder_labels(line, text) for line in a}
     return [f'-{line}' for line in sorted(a - b)] + [f'+{line}' for line in sorted(b - a)]
 
 
@@ -5848,23 +6588,29 @@ def run_difference(a, b):
 
 def edge_positions(direct, phase_payloads):
     """Map authored transitions and routers to `(declaration_offset, source_index)` sort keys, using `from:` order
-    for multi-source edges."""
+    for multi-source edges (both inline lists and named `@PhaseSet` enums)."""
     phases = {core_name(payload): name for name, payload in phase_payloads.items()}
+    sets = phase_sets(direct)
     positions = {}
     functions = collections.defaultdict(list)
     attributes = None
-    tokens = r'@(?:StateMachine(?:::|\.))?(?:Transition|Route)\b(?:\s*\()?|\bfunc\s+`?(\w+)`?\s*\('
-    identifier = r'(?:\w+|`[^`]+`)'
+    identifier = IDENT_TOKEN
+    tokens = (r'@(?:`?StateMachine`?\s*(?:::|\.)\s*)?`?(?:Transition|Route)`?(?![\w`])(?:\s*\()?'
+              r'|\bfunc\s+(' + identifier + r')\s*\(')
     parameter_prefix = re.compile(r'\s*' + identifier + r'(?:\s+' + identifier + r')?\s*:\s*' + MODIFIERS)
     for token in re.finditer(tokens, direct):
         if token.group().startswith('@'):
             attributes = direct[token.end():scan_type_end(direct, token.end(), '')] if token.group().endswith('(') else ''
         elif attributes is not None:
-            name = token.group(1)
+            name = token.group(1).strip('`')
             functions[name].append(token.start())
             source_list = re.search(r'(?<![\w`])`?from`?\s*:\s*\[([^\]]*)\]', attributes)
+            source_set = (None if source_list else
+                          re.search(r'(?<![\w`])`?from`?\s*:\s*(' + identifier + r')\s*\.\s*`?self`?(?![\w`])', attributes))
             if source_list:
                 sources = [re.sub(r'\.\s*`?self`?\s*$', '', spelling) for spelling in split_top(source_list.group(1))]
+            elif source_set:
+                sources = sets.get(source_set.group(1).strip('`'), [])
             else:
                 parameter = parameter_prefix.match(direct, token.end())
                 sources = [direct[parameter.end():scan_type_end(direct, parameter.end(), ',=')]] if parameter else []
@@ -7279,6 +8025,63 @@ enum SCHEMA {
     check('multi-source edges kept in the old source-list order', 'order comparison',
           comparison(graph_run([plant_graph]), graph_run([plant_graph]), text=listed, order_free=['lists']),
           comparison(graph_run([plant_graph]), graph_run([reversed_plant]), text=listed, order_free=['lists']))
+    named_set = ('@PhaseSet([Busy.self, Idle.self])\n    fileprivate enum Active {}\n'
+                 '    @Transition(from: Active.self, on: Input.retry)\n    static func retry() -> Busy { Busy() }')
+    named_listed = schema.replace('SCHEMA', 'Plant').replace('EDGES', named_set)
+    check('named @PhaseSet list alphabetized by the generator', 'order comparison',
+          comparison(graph_run([plant_graph]), graph_run([plant_graph]), text=named_listed, order_free=['lists']),
+          comparison(graph_run([plant_graph]), graph_run([reversed_plant]), text=named_listed, order_free=['lists']))
+    nested_forward_set = (
+        'enum Outer {\n'
+        '    @StateMachine(mode: .shared)\n'
+        '    enum Plant {\n'
+        '        @Initial case idle(Idle)\n'
+        '        case busy(Busy)\n'
+        '        @StateMachine::Transition(`from`: /* set */ `Active`.`self`, on: Input.retry)\n'
+        '        static func `retry`() -> Busy { Busy() }\n'
+        '        @StateMachine::PhaseSet(/* order */ [`Busy`.`self`, `Idle`.`self`])\n'
+        '        private nonisolated enum `Active` {}\n'
+        '    }\n'
+        '}\n'
+        '@StateMachine(mode: .shared)\n'
+        'enum Other {\n'
+        '    @Initial case idle(Idle)\n'
+        '    case busy(Busy)\n'
+        '    @PhaseSet([Idle.self, Busy.self])\n'
+        '    fileprivate enum Active {}\n'
+        '    @Transition(from: Active.self, on: Input.retry)\n'
+        '    static func retry() -> Busy { Busy() }\n'
+        '}\n'
+    )
+    check('nested forward-declared qualified @PhaseSet alphabetized or confused with another schema', 'order comparison',
+          comparison(original_order, original_order, text=nested_forward_set, order_free=['lists']),
+          comparison(original_order, changed_order, text=nested_forward_set, order_free=['lists']))
+    phase_set_term_seed = (
+        'import StateMachine\n\n@StateMachine(mode: .shared)\nnonisolated enum Plant: Sendable {\n'
+        '    struct Idle: Sendable {}\n    struct Done: Sendable {}\n'
+        '    @Initial case idle(Idle)\n    @Terminal case done(Done)\n'
+        '    enum Input: Sendable { case finish }\n'
+        '    @PhaseSet([Idle.self])\n    fileprivate enum Live {}\n'
+        '    @Transition(from: Live.self, on: Input.finish)\n'
+        '    fileprivate static func finish() -> Done { Done() }\n}\n'
+    )
+    SEED_TEXTS['selftest-phase-set-anchor'] = phase_set_term_seed
+    term_broken = phase_set_term_seed.replace('@PhaseSet([Idle.self])', '@PhaseSet([Idle.self, Done.self])')
+    term_line = term_broken.split('\n').index('    @Transition(from: Live.self, on: Input.finish)') + 1
+    term_src = term_broken.split('\n')[term_line - 1]
+    term_msg = ("Terminal phase 'done' in @PhaseSet 'Live' cannot have an outgoing transition 'finish'; "
+                "remove '@Terminal', remove 'Done.self' from 'Live', or remove the transition.")
+    term_case = self_case(
+        term_broken, seed='selftest-phase-set-anchor', rewrites=['phase-set-use-invalid'], kinds=['break'],
+        refusal=re.escape(term_msg), token=r'`?Live`?\.self')
+    term_outcome = lambda col: dict(
+        status='macro-diagnostic', errors=[('macro', term_msg)],
+        located=[('macro', term_msg, 'Case.swift', term_line)],
+        columns=[((term_msg, 'Case.swift', term_line), col)])
+    check('@PhaseSet terminal refusal anchored at @Transition instead of Live.self', 'refusal token',
+          judge(term_case, base, None, term_outcome(term_src.index('@Transition') + 1))[0],
+          judge(term_case, base, None, term_outcome(term_src.index('Live.self') + 1))[0])
+    del SEED_TEXTS['selftest-phase-set-anchor']
 
     moved = graph_run([reversed_plant, plant_graph], ['Left.Plant', 'Right.Plant'])
     before_move = graph_run([plant_graph, reversed_plant], ['Right.Plant', 'Left.Plant'])
@@ -7371,6 +8174,12 @@ enum SCHEMA {
     check('lost overload excused by another overload of the same name', 'whole-difference allowance',
           judge(ownership, synthetic(fingerprint=[shared, overload, lost]), None, synthetic(fingerprint=[shared.replace('_: Swift.Int', '_: __shared Swift.Int'), lost]))[0],
           judge(ownership, synthetic(fingerprint=[shared, lost]), None, synthetic(fingerprint=[shared.replace('_: Swift.Int', '_: __shared Swift.Int'), lost]))[0])
+    reordered_ownership = self_case(swapped_text, rewrites=['shared-param', 'reorder-members'])
+    check('documented respelling beside reordered members with stale initializer labels', 'whole-difference allowance',
+          judge(reordered_ownership, synthetic(fingerprint=[shared, right_init]), None,
+                synthetic(swapped_events, fingerprint=[shared.replace('_: Swift.Int', '_: __shared Swift.Int'), right_init]))[0],
+          judge(reordered_ownership, synthetic(fingerprint=[shared, right_init]), None,
+                synthetic(swapped_events, fingerprint=[shared.replace('_: Swift.Int', '_: __shared Swift.Int'), wrong_init]))[0])
     check('allowance whose guide sentence is gone', 'guide quotation',
           'fail' if missing_quotations([dict(id='gone', doc='A sentence the guide never had.')], DOC.read_text()) else 'pass',
           'pass' if not missing_quotations(LIMITS, DOC.read_text()) else f"fail: {[e['id'] for e in missing_quotations(LIMITS, DOC.read_text())]}")
@@ -7618,6 +8427,115 @@ enum SCHEMA {
     check('leaf access lowered only through a bare alias', 'rewrite coverage',
           'fail' if not reaches(never, special, 'Box<Swift::Int>.Hidden internal') else 'pass',
           'pass' if reaches(leaf, special, 'Box<Swift::Int>.Hidden internal') and reaches(leaf, special, 'N.Hidden internal') else 'fail')
+    phase_set_seed = all_seeds()['own-phase-set']
+    check('@PhaseSet rewrites fail to reach their target shapes', 'rewrite coverage',
+          'fail' if not reaches(never, phase_set_seed, 'extract') else 'pass',
+          'pass' if (reaches(REWRITE_BY_NAME['phase-set-extract'].function, phase_set_seed, 'extract [Editing.self, Review.self]')
+                     and reaches(REWRITE_BY_NAME['phase-set-inline'].function, phase_set_seed, 'inline Editable removing decl')
+                     and reaches(REWRITE_BY_NAME['phase-set-move'].function, phase_set_seed, 'move @PhaseSet Editable to bottom')
+                     and reaches(REWRITE_BY_NAME['phase-set-spelling'].function, phase_set_seed, '@StateMachine::PhaseSet beside enum PhaseSet')
+                     and reaches(REWRITE_BY_NAME['phase-set-decl-invalid'].function, phase_set_seed, 'empty @PhaseSet Editable')
+                     and reaches(REWRITE_BY_NAME['phase-set-use-invalid'].function, phase_set_seed, 'from: bare phase Review.self'))
+          else 'fail')
+    backticked_route = ('@StateMachine(mode: .shared)\nenum R {\n'
+                        '    @Route(on: Input.go)\n'
+                        '    fileprivate static func choose(_ source: Idle) -> `Route`.Choose { .a }\n}\n')
+    dup_route = REWRITE_BY_NAME['router-duplicate'].function(backticked_route, random.Random(0))
+    broken_route = re.sub(r'\bRoute\.Choose\b', 'Route.ChooseAgain', backticked_route)
+    check('router-duplicate leaves backticked Route.Choose unchanged', 'rewrite composition',
+          'fail' if '`Route`.ChooseAgain' not in broken_route else 'pass',
+          'pass' if dup_route and '`Route`.ChooseAgain' in dup_route[0][0] and 'func chooseAgain' in dup_route[0][0] else 'fail')
+    # Planted regressions for composed-rewrite oracle and generator fixes.
+    multiline_seed = all_seeds()['doc-Library']
+    SEED_TEXTS['selftest-multiline-param'] = multiline_seed
+    multiline_broken = REWRITE_BY_NAME['drop-request-label'].function(multiline_seed, random.Random(0))[0][0]
+    ml_line = next(i for i, l in enumerate(multiline_broken.splitlines(), 1) if 'func downloaded(' in l)
+    ml_src = multiline_broken.splitlines()[ml_line - 1]
+    ml_msg = "This trigger requires source and trigger payload parameters, and optionally the operation's request, labeled request:."
+    ml_case = self_case(multiline_broken, seed='selftest-multiline-param', rewrites=['drop-request-label'], kinds=['break'])
+    ml_outcome = lambda col: dict(
+        status='macro-diagnostic', errors=[('macro', ml_msg)],
+        located=[('macro', ml_msg, 'Case.swift', ml_line)],
+        columns=[((ml_msg, 'Case.swift', ml_line), col)])
+    check('multiline parameter-clause refusal anchored outside parameter list', 'refusal token',
+          judge(ml_case, base, None, ml_outcome(ml_src.index('fileprivate') + 1))[0],
+          judge(ml_case, base, None, ml_outcome(ml_src.index('(') + 1))[0])
+    del SEED_TEXTS['selftest-multiline-param']
+    nested_editor = REWRITE_BY_NAME['nest-schema'].function(all_seeds()['doc-Editor'], random.Random(0))[0][0]
+    check('schema-to-file rips a nested schema out of its enclosing type', 'rewrite composition',
+          'fail' if not REWRITE_BY_NAME['schema-to-file'].function(nested_editor, random.Random(0)) else 'pass',
+          'pass' if REWRITE_BY_NAME['schema-to-file'].function(all_seeds()['doc-Editor'], random.Random(0)) else 'fail')
+    qualified_lookup = all_seeds()['doc-Lookup'].replace('case found(Found)', 'case found(Self.Found)')
+    redir_muts = REWRITE_BY_NAME['redirect-entrance'].function(qualified_lookup, random.Random(0))
+    check('redirect-entrance drops refusal when phase payload is Self-qualified', 'rewrite composition',
+          'fail' if not any(info.get('refusal') is None for _, info in redir_muts) and redir_muts else 'pass',
+          'pass' if redir_muts and all(info.get('refusal') for _, info in redir_muts) else 'fail')
+    dep_muts = REWRITE_BY_NAME['verb-edge-name'].function(all_seeds()['own-deprecated-edge'], random.Random(0))
+    finish_mut = next((t for t, info in dep_muts if info['site'] == 'Transition finish -> shutdown'), '')
+    check('verb-edge-name leaves deprecation renamed: pointing at old edge name', 'rewrite composition',
+          'fail' if 'renamed: "finish"' not in finish_mut and 'renamed: "shutdown"' in finish_mut else 'pass',
+          'pass' if finish_mut and 'renamed: "shutdown"' in finish_mut else 'fail')
+    with_underscored = all_seeds()['fx-GMT-routed-mixed-escaping'].replace(
+        'nonisolated enum Bench {', 'nonisolated enum Bench {\n    struct _StateMachineEngine: Sendable {}', 1)
+    check('renamable selects an underscored implementation-reserved member', 'rewrite composition',
+          'fail' if all(n != '_StateMachineEngine' for _, n in renamable(with_underscored)) else 'pass',
+          'pass' if any(n == 'Kept' for _, n in renamable(with_underscored)) else 'fail')
+    sendable_renamed = rename(all_seeds()['own-public-sendable-helper'], 'Sendable', 'SendableK')
+    check('rename corrupts Swift::Sendable or @Sendable when renaming a helper', 'rewrite composition',
+          'fail' if 'Swift::SendableK' not in sendable_renamed and '@SendableK' not in sendable_renamed else 'pass',
+          'pass' if 'enum SendableK {}' in sendable_renamed and 'Swift::Sendable' in sendable_renamed and '@Sendable' in sendable_renamed else 'fail')
+    aliased_scoped = REWRITE_BY_NAME['alias-generic'].function(all_seeds()['own-scoped-invalidation'], random.Random(0))[0][0]
+    nested_generic_scoped = REWRITE_BY_NAME['nest-generic'].function(aliased_scoped, random.Random(0))[0][0]
+    check('nest-generic shadows alias-generic type parameter FuzzT', 'rewrite composition',
+          'fail' if 'enum FuzzOuter<FuzzT>' not in nested_generic_scoped else 'pass',
+          'pass' if 'enum FuzzOuter<FuzzOuterT>' in nested_generic_scoped and 'FuzzIdentity<FuzzT:' in nested_generic_scoped else 'fail')
+    split_and_shared = [
+        '-Fz.Gauge.Observed.read< where A == Fz.Gauge.Start>(Swift.Int) throws(Fz.Gauge.Problem<10>) -> Fz.Gauge.Prepared',
+        '-Fz.Gauge.Owned.low< where A == Fz.Gauge.Start>(Swift.Int) -> StateMachine.Advance<Fz.Gauge.Owned<Fz.Gauge.Start>, Fz.Gauge.Owned<Fz.Gauge.Low>, Swift.Never, Fz.Gauge.Problem<10>>',
+        '+Fz.Gauge.Observed.read< where A == Fz.Gauge.Start>(Swift.Int) throws(Fz.Gauge.PreparationRejection) -> Fz.Gauge.Prepared',
+        '+Fz.Gauge.Owned.low< where A == Fz.Gauge.Start>(__shared Swift.Int) -> StateMachine.Advance<Fz.Gauge.Owned<Fz.Gauge.Start>, Fz.Gauge.Owned<Fz.Gauge.Low>, Swift.Never, Fz.Gauge.Problem<10>>',
+    ]
+    bad_shared = split_and_shared[:3] + [split_and_shared[3].replace('__shared Swift.Int', '__shared Swift.String')]
+    observed_shared = [
+        '-Fz.Gauge.Observed.low< where A == Fz.Gauge.Start>(Swift.Int) -> Fz.Gauge.Prepared',
+        '+Fz.Gauge.Observed.low< where A == Fz.Gauge.Start>(__shared Swift.Int) -> Fz.Gauge.Prepared',
+    ]
+    moved_shared = [
+        '-Fz.Gauge.Owned.low< where A == Fz.Gauge.Start>(__shared Swift.Int, Swift.Bool) -> Fz.Gauge.Owned<Fz.Gauge.Low>',
+        '+Fz.Gauge.Owned.low< where A == Fz.Gauge.Start>(Swift.Int, __shared Swift.Bool) -> Fz.Gauge.Owned<Fz.Gauge.Low>',
+    ]
+    check('combined failure-split and shared-param hides a changed parameter type', 'documented client limit',
+          'fail' if not failure_split_signatures(strip_repeated_ownership(bad_shared, ['alias-file', 'shared-param'])) else 'pass',
+          'pass' if failure_split_signatures(strip_repeated_ownership(split_and_shared, ['alias-file', 'shared-param']))
+          and not failure_split_signatures(strip_repeated_ownership(split_and_shared, ['alias-file']))
+          and strip_repeated_ownership(observed_shared, ['shared-param']) == observed_shared
+          and strip_repeated_ownership(moved_shared, ['shared-param']) == moved_shared else 'fail')
+    same_method_split = [
+        '-Fz.Picker.Owned.choose< where A == Fz.Picker.Idle>(Swift.Bool) -> StateMachine.Advance<Fz.Picker.Owned<Fz.Picker.Idle>, Fz.Picker.Owned<Fz.Picker.Chosen>, Swift.Never, Fz.Picker.Problem>',
+        '+Fz.Picker.Owned.choose< where A == Fz.Picker.Idle>(__shared Swift.Bool) -> Fz.Picker.Route.Idle.ChooseResult',
+    ]
+    bad_same_method = [same_method_split[0], same_method_split[1].replace('__shared Swift.Bool', '__shared Swift.Int')]
+    check('same-method Owned failure split with shared-param hides a parameter type change', 'documented client limit',
+          'fail' if not failure_split_signatures(bad_same_method, allow_shared_owned=True) else 'pass',
+          'pass' if failure_split_signatures(same_method_split, allow_shared_owned=True)
+          and not failure_split_signatures(same_method_split, allow_shared_owned=False) else 'fail')
+    nested_authored = 'static Fz.Left.Flow.go(__shared Fz.Left.Flow.Idle) -> Fz.Left.Flow.Done'
+    old_authored_filter = lambda line: re.match(r'static Fz\.(?:FuzzOuter\.)?\w+\.go\(', line) is not None
+    generated_statics = [
+        'static Fz.Left.Flow.Local.go(Fz.Left.Flow.Snapshot) -> Swift.String',
+        'static Fz.Left.Flow.Observed.go() -> Swift.String',
+        'static Fz.Left.Flow.Route.go() -> Swift.String',
+    ]
+    check('nested enclosing-type authored static function kept in generated fingerprint', 'fingerprint filter',
+          'fail' if not old_authored_filter(nested_authored) else 'pass',
+          'pass' if is_authored_static(nested_authored, ['go'], ['Left.Flow', 'Right.Flow'])
+          and not any(is_authored_static(s, ['go'], ['Left.Flow', 'Right.Flow']) for s in generated_statics) else 'fail')
+    shadowed_hold = REWRITE_BY_NAME['schema-named-value'].function(all_seeds()['own-testing-duplicate'], random.Random(0))[0][0]
+    default_shadowed = [info['site'] for _, info in REWRITE_BY_NAME['initial-default-spelling'].function(shadowed_hold, random.Random(0))]
+    default_plain = [info['site'] for _, info in REWRITE_BY_NAME['initial-default-spelling'].function(all_seeds()['own-testing-duplicate'], random.Random(0))]
+    check('initial-default-spelling emits shadowed Schema.Payload() in expression position', 'rewrite composition',
+          'fail' if 'default Hold.Idle()' not in default_shadowed else 'pass',
+          'pass' if 'default Self.Idle()' in default_shadowed and 'default Hold.Idle()' in default_plain else 'fail')
     OPERATORS.clear()
     OPERATORS['paren']['applicable'] = 3
     silent = operator_problems([REWRITE_BY_NAME['paren']])
@@ -7690,7 +8608,7 @@ def make_case(seed_name, names, choices, text, info, number):
                 run_mapping=info['run_mapping'], behaviour=info['behaviour'], choices=list(choices),
                 inside=info.get('inside', True), flags=info['flags'], added=info.get('added', []), verb=info.get('verb'),
                 expect=info.get('expect'), breaking=info.get('breaking'), signature=info.get('signature'),
-                refusal=info.get('refusal'))
+                refusal=info.get('refusal'), token=info.get('token'))
 
 
 
@@ -7746,6 +8664,10 @@ SMOKE_EVERY_SITE = {
     'own-alias-leaf-specialized': r'^leaf-access$',
     'own-deprecated-edge': r'^(permute-availability|qualify-renamed)$',
     'own-deprecated-message-edge': r'^(permute-availability|qualify-renamed)$',
+    'own-phase-set': r'^(phase-set-extract|phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists|reorder-members|module-attribute|attribute-trivia|terminal-flip)$',
+    'own-phase-set-owned': r'^(phase-set-extract|phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists|reorder-members)$',
+    'doc-Document': r'^(phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists)$',
+    'doc-Editor': r'^phase-set-extract$',
 }
 
 
@@ -7775,6 +8697,7 @@ SMOKE_ONLY = {
     'own-failure-router': r'^(paren|reorder-members|router-duplicate)$',
     'own-parallel-32-isolated': r'^(integer-spelling|paren)$',
     'own-parallel-33-isolated': r'^(integer-spelling|paren)$',
+    'own-phase-set-owned': r'^(phase-set-extract|phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists|reorder-members|module-attribute|attribute-trivia|paren|backtick-declaration|nest-schema)$',
 }
 
 # What each rewrite did in the last `smoke_cases`: sites it found, cases it made, and any error it raised.
@@ -7886,7 +8809,7 @@ def compose(seed_name, text, names, choices):
             info_all['verb'] = info['verb']
         if info.get('expect'):
             info_all['expect'] = info['expect']
-        for key in ('breaking', 'signature', 'refusal', 'keep_client'):
+        for key in ('breaking', 'signature', 'refusal', 'token', 'keep_client'):
             if info.get(key):
                 info_all[key] = info[key]
         # The strongest role a step gives decides which limits apply: a phase payload, then a result shape.
