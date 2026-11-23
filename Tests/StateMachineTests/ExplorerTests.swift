@@ -21,6 +21,8 @@ import os
 // - `EXPLORER_SLICES="core,second:5;core,async:4"` replaces the slices and their full depths.
 //   `EXPLORER_KIND` limits a run to one class or owner, and `EXPLORER_TEARDOWN_DEPTH` sets the owner depth.
 // - `EXPLORER_SMOKE=0` skips the smoke configuration.
+// - `EXPLORER_LIST_CONFIGS=1` prints `full()`'s planned configurations without running them, and
+//   `EXPLORER_CONFIG_INDEX=N` runs only that single configuration from `full()`.
 
 private let environment = ProcessInfo.processInfo.environment
 
@@ -459,7 +461,29 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
     // The exhaustive tier (`EXPLORER_FULL=1`), or the standard tier (`EXPLORER_TIER=standard`).
     @Test func full() async {
         guard environment["EXPLORER_FULL"] == "1" || standardTier else { return }
-        for configuration in configurations(full: true) {
+        let planned = configurations(full: true)
+        if let listFlag = environment["EXPLORER_LIST_CONFIGS"] {
+            guard listFlag == "1", environment["EXPLORER_CONFIG_INDEX"] == nil else {
+                Issue.record("Invalid EXPLORER_LIST_CONFIGS=\(listFlag) or conflicting EXPLORER_CONFIG_INDEX")
+                return
+            }
+            print("EXPLORER PLAN count=\(planned.count)")
+            for (index, configuration) in planned.enumerated() {
+                print("EXPLORER PLAN \(index) \(configuration)")
+            }
+            return
+        }
+        let selected: [ExplorerConfiguration]
+        if let rawIndex = environment["EXPLORER_CONFIG_INDEX"] {
+            guard let index = Int(rawIndex), String(index) == rawIndex, planned.indices.contains(index) else {
+                Issue.record("Invalid EXPLORER_CONFIG_INDEX=\(rawIndex) for \(planned.count) configurations")
+                return
+            }
+            selected = [planned[index]]
+        } else {
+            selected = planned
+        }
+        for configuration in selected {
             let report = await explore(configuration)
             print("EXPLORER \(report.summary)")
             for finding in report.findings {

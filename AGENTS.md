@@ -73,20 +73,31 @@ xcrun swift-format lint --strict --recursive Sources Tests Package.swift
 The schedule explorer (`Tests/StateMachineTests/Explorer*.swift`) runs in three
 tiers. Its smoke tier runs in the normal suite in about 10 seconds. For a change
 to presentation, publisher, registration, or owner-lifetime code, also run the
-standard tier (about 7 minutes). Before a release, run the exhaustive tier
-(about 2 hours). Run each in its own scratch path, one at a time:
+standard tier (about 4 minutes across 4 workers). Before a release, run the
+exhaustive tier (about 75–80 minutes across 4 workers). Run one tier at a time
+with a fresh `--output` directory:
 
 ```sh
-EXPLORER_SMOKE=0 EXPLORER_TIER=standard swift test --build-system native --scratch-path /tmp/state-machine-explorer --filter ExplorerTests/full
-EXPLORER_SMOKE=0 EXPLORER_FULL=1 swift test --build-system native --scratch-path /tmp/state-machine-explorer --filter ExplorerTests/full
+python3 Scripts/check-explorer.py --tier standard --scratch-path /tmp/state-machine-explorer --output /tmp/state-machine-explorer-standard
+python3 Scripts/check-explorer.py --tier exhaustive --scratch-path /tmp/state-machine-explorer --output /tmp/state-machine-explorer-exhaustive
 ```
 
-`EXPLORER_FAILURES=PATH` appends every violation found, and
-`EXPLORER_REPLAY="Class: script"` with `--filter ExplorerTests/replay` replays
-one with a trace. `ExplorerTests.swift` lists the other variables.
-`Tests/ScheduleExplorer.md` describes the explorer's events and invariants.
-Update that file and the explorer together whenever presentation, registration,
-or owner-teardown behavior changes.
+`Scripts/check-explorer.py` builds or updates one native Debug test binary in
+`--scratch-path` (never Release), queries that binary for its exact tier plan
+(`EXPLORER_LIST_CONFIGS=1`), and fans out one configuration per read-only worker
+(`EXPLORER_CONFIG_INDEX=N`, `--workers 1..4`, capped at 4) via
+`swiftpm-testing-helper`, ordered by costly cases first. It rejects inherited
+`EXPLORER_*` overrides, preserves per-unit logs, coverage files, L1 window
+counts, and failure artifacts, and writes an aggregate `receipt.json` bound to
+the candidate commit, Debug binary SHA-256, and toolchain.
+
+For single-process debugging or replaying a finding, `EXPLORER_FAILURES=PATH`
+appends every violation found and `EXPLORER_REPLAY="Class: script"` with
+`swift test --build-system native --scratch-path /tmp/state-machine-explorer
+--filter ExplorerTests/replay` replays one with a trace. `ExplorerTests.swift`
+lists the other variables. `Tests/ScheduleExplorer.md` describes the explorer's
+events and invariants. Update that file and the explorer together whenever
+presentation, registration, or owner-teardown behavior changes.
 
 ### Test targets, compiler fixtures, and macro checks
 
