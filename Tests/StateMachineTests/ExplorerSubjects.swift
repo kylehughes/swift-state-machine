@@ -504,33 +504,30 @@ nonisolated final class ExplorerElsewhereSubscriber: Subscriber, Sendable {
     struct State: Sendable {
         var received: [UInt64] = []
         var finished = false
-        /// Units requested while the presentation was not yet released, and after.
+        /// Units this subscriber requested while the presentation was alive.
         var whileAlive = 0
-        var afterRelease = 0
-        var released = false
     }
     let index: Int
     let world: ExplorerWorld
     let state = OSAllocatedUnfairLock(initialState: State())
-    init(index: Int, world: ExplorerWorld) {
+    private weak let presentation: (any AnyObject & Sendable)?
+    init(index: Int, world: ExplorerWorld, presentation: (any AnyObject & Sendable)?) {
         self.index = index
         self.world = world
+        self.presentation = presentation
     }
-    /// The harness began releasing the presentation.
-    func released() { state.withLock { $0.released = true } }
     var finished: Bool { state.withLock { $0.finished } }
 
     func receive(subscription: any Subscription) {
-        state.withLock { state in
-            if state.released { state.afterRelease += 1 } else { state.whileAlive += 1 }
-        }
+        if presentation != nil { state.withLock { $0.whileAlive += 1 } }
         subscription.request(.max(1))
     }
     func receive(_ input: UInt64) -> Subscribers.Demand {
+        let alive = presentation != nil
         let problem = state.withLock { state -> String? in
             state.received.append(input)
             let covered = state.received.count <= state.whileAlive
-            if state.released { state.afterRelease += 1 } else { state.whileAlive += 1 }
+            if alive { state.whileAlive += 1 }
             return covered
                 ? nil
                 : "subscriber \(index) received r\(input), which only demand requested after the release covered"

@@ -580,6 +580,30 @@ func explorerIngressMembershipProblem(id: Int, revision: UInt64, staged: Set<Int
             explorerCheckReceived(world, subscriber(world, unlimited: true), world.makeValue(.initial, attempt: nil))
         }
     )
+    // The seed consumes the initial unit. Its returned unit can pay for the queued value only
+    // when the presentation was still alive during the seed callback.
+    func uncoveredQueuedValue(releaseBeforeSeedCallback: Bool) -> Bool {
+        flagged(.publishedAfterRelease) { world in
+            final class Presentation: Sendable {}
+            let presentation = Presentation()
+            let subscriber = ExplorerElsewhereSubscriber(index: 1, world: world, presentation: presentation)
+            subscriber.receive(subscription: ExplorerNullSubscription())
+            if releaseBeforeSeedCallback {
+                _ = consume presentation
+                _ = subscriber.receive(10)
+            } else {
+                withExtendedLifetime(presentation) { _ = subscriber.receive(10) }
+                _ = consume presentation
+            }
+            _ = subscriber.receive(20)
+        }
+    }
+    check(
+        .publishedAfterRelease,
+        "a queued value covered only by demand returned after presentation deallocation",
+        planted: uncoveredQueuedValue(releaseBeforeSeedCallback: true),
+        control: !uncoveredQueuedValue(releaseBeforeSeedCallback: false)
+    )
     check(
         .combineFinish,
         "a subscriber attached after the release given a value",

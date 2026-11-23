@@ -788,16 +788,20 @@ import StateMachineUI
         case .dropMain:
             observing = false
             presentationEnds()
-            for subscriber in elsewhere { subscriber.released() }
             subject.dropMain()
         case .dropElsewhere:
             observing = false
             presentationEnds()
-            for subscriber in elsewhere { subscriber.released() }
             if !subject.dropElsewhere() { world.violate(.stuck, "release on a worker never returned") }
         case .subscribeElsewhere(let once):
             guard subject.alive() else { return }
-            let subscriber = ExplorerElsewhereSubscriber(index: elsewhere.count, world: world)
+            // A publication can hold the presentation after a reentrant drop. Check its actual
+            // lifetime on the subscriber's queue when that subscriber supplies demand.
+            let subscriber = ExplorerElsewhereSubscriber(
+                index: elsewhere.count,
+                world: world,
+                presentation: subject.object()
+            )
             elsewhere.append(subscriber)
             // Suspended from the first such subscriber on, until quiescence lets it run.
             if !elsewhereSuspended {
@@ -1209,7 +1213,6 @@ import StateMachineUI
         drainElsewhere(keepRunning: true)
         if subject.held() {
             observing = false
-            for subscriber in elsewhere { subscriber.released() }
             // With a host that delivers inside its cancellations, the release at quiescence stops first,
             // so only the drop events reach the disposal path, and a defect on that path does not end
             // every sequence at its root.

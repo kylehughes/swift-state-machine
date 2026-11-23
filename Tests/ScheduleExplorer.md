@@ -727,8 +727,9 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   harness cancels tasks itself.
 - **I39** Combine: no subscriber receives a value once the presentation is deallocated (UI-007, "discarding a value
   its demand has not reached"). A subscriber through `receive(on:)` (53) receives only values covered by demand it
-  requested while the presentation could still deliver, so a unit requested after the release supplies none
-  (`PresentingState.md`, buffered values and the release).
+  requested while the presentation was still alive, checked through a weak reference on the subscriber's queue so a
+  reentrant drop while a publication still holds the presentation does not count as deallocation. A unit requested
+  only after deallocation supplies none (`PresentingState.md`, buffered values and the release).
 - **I40** Confined streams: when `cancel()` returns, the element it held unread has been released (OBS-005). The
   fake hosts cancel on the main thread, so no cancellation runs elsewhere then.
 - **I41** Confined streams and the free-standing sequence: the element unread when the host finished the
@@ -1101,7 +1102,7 @@ check that is not trusted.
 | I23 | A subscriber given a value the presentation never showed, older than the snapshot shown. |
 | I36 | 33 elements of one registration in one main-actor turn (also `turnBoundSelfCheck`). |
 | I37 | `true` reported while the snapshot shown is older than the live registration's seed. |
-| I39 | A subscriber given a value after the presentation was deallocated. |
+| I39 | A subscriber given a value after the presentation was deallocated, and a queued value covered only by demand returned after deallocation. |
 | I44 | A later attempt reported before an earlier one, a refused attempt skipped, a later payload under the same ticket, a refusal reported as an admission failure, a handler's reconciliation reported before a report decided earlier, and two works' reports naming one retained entry. |
 | I47 | A subscriber given two subscriptions. |
 | I48 | A newly published value delivered before `objectWillChange` announced it. |
