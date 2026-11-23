@@ -354,12 +354,14 @@ jobs:
   explorer:
     needs: validate
     runs-on: xcode-27
-    timeout-minutes: 300
+    timeout-minutes: 360
     steps:
     - *checkout-candidate
     - *check-credentials
     - *select-swift
     - name: Schedule explorer
+      id: schedules
+      timeout-minutes: 330
       shell: bash
       run: |
         for tier in standard exhaustive; do
@@ -367,10 +369,10 @@ jobs:
             --scratch-path "$RUNNER_TEMP/explorer-build" --output "$RUNNER_TEMP/explorer/$tier"
         done
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && (steps.schedules.outcome == 'success' || steps.schedules.outcome == 'failure') }}
       timeout-minutes: 5
       with:
-        name: explorer-${{ inputs.candidate }}
+        name: explorer-${{ inputs.candidate }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/explorer
         if-no-files-found: error
         retention-days: 7
