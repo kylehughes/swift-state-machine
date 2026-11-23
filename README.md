@@ -71,6 +71,12 @@ Mac Catalyst 18. See the
 [API documentation](https://kylehughes.github.io/swift-state-machine/documentation/)
 for full symbol references and guides.
 
+### Suggested prompt for a coding agent
+
+```text
+Identify implicit state machines in this codebase and make them explicit with kylehughes/swift-state-machine.
+```
+
 ## A first graph
 
 A schema is a `nonisolated enum` annotated with `@StateMachine(mode:)`. This
