@@ -16,7 +16,7 @@ let package = Package(
     name: "Transfers",
     platforms: [.iOS(.v17), .macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/kylehughes/swift-state-machine.git", from: "1.0.0")
+        .package(url: "https://github.com/kylehughes/swift-state-machine.git", from: "1.1.0")
     ],
     targets: [
         .target(
