@@ -24,9 +24,6 @@ name: Release
         default: false
 permissions:
   contents: read
-concurrency:
-  group: release-${{ github.repository }}
-  cancel-in-progress: false
 jobs:
   validate:
     runs-on: ubuntu-24.04
@@ -74,7 +71,7 @@ jobs:
             page = 1
             while True:
                 releases = api("GET", f"/releases?per_page=100&page={page}")
-                if not isinstance(releases, list):
+                if not isinstance(releases, list) or not all(isinstance(item, dict) for item in releases):
                     raise Unknown("Release listing is unobservable")
                 if any(item.get("tag_name") == tag for item in releases):
                     raise ValueError("Draft or published release already exists")
@@ -112,12 +109,24 @@ jobs:
                     raise Unknown(f"API {method} outcome unknown. Inspect before another write") from error
 
 
+        def check_default_branch_head(api, branch, candidate):
+            head = api("GET", "/git/ref/heads/" + urllib.parse.quote(branch, safe="/"), missing=True)
+            if (not isinstance(head, dict) or head.get("ref") != "refs/heads/" + branch
+                    or not isinstance(head.get("object"), dict)
+                    or head["object"].get("type") != "commit"
+                    or head["object"].get("sha") != candidate):
+                raise ValueError("Default branch HEAD no longer matches candidate")
+
+
         def inspect_candidate(api, candidate, ref, workflow):
             repo = api("GET", "")
-            if ref != "refs/heads/" + repo["default_branch"] or workflow != candidate:
+            branch = repo["default_branch"]
+            if ref != "refs/heads/" + branch or workflow != candidate:
                 raise ValueError("Dispatch workflow and candidate must be the same default-branch commit")
+            check_default_branch_head(api, branch, candidate)
             if api("GET", "/commits/" + candidate).get("sha") != candidate:
                 raise ValueError("Candidate did not resolve exactly")
+            return repo
 
 
         def tag_matches(reference, tag, candidate):
@@ -346,8 +355,13 @@ jobs:
     if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: release
+    concurrency:
+      group: release-publish-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       contents: write
+      actions: read
     steps:
     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
       timeout-minutes: 5
@@ -396,7 +410,7 @@ jobs:
             page = 1
             while True:
                 releases = api("GET", f"/releases?per_page=100&page={page}")
-                if not isinstance(releases, list):
+                if not isinstance(releases, list) or not all(isinstance(item, dict) for item in releases):
                     raise Unknown("Release listing is unobservable")
                 if any(item.get("tag_name") == tag for item in releases):
                     raise ValueError("Draft or published release already exists")
@@ -434,12 +448,24 @@ jobs:
                     raise Unknown(f"API {method} outcome unknown. Inspect before another write") from error
 
 
+        def check_default_branch_head(api, branch, candidate):
+            head = api("GET", "/git/ref/heads/" + urllib.parse.quote(branch, safe="/"), missing=True)
+            if (not isinstance(head, dict) or head.get("ref") != "refs/heads/" + branch
+                    or not isinstance(head.get("object"), dict)
+                    or head["object"].get("type") != "commit"
+                    or head["object"].get("sha") != candidate):
+                raise ValueError("Default branch HEAD no longer matches candidate")
+
+
         def inspect_candidate(api, candidate, ref, workflow):
             repo = api("GET", "")
-            if ref != "refs/heads/" + repo["default_branch"] or workflow != candidate:
+            branch = repo["default_branch"]
+            if ref != "refs/heads/" + branch or workflow != candidate:
                 raise ValueError("Dispatch workflow and candidate must be the same default-branch commit")
+            check_default_branch_head(api, branch, candidate)
             if api("GET", "/commits/" + candidate).get("sha") != candidate:
                 raise ValueError("Candidate did not resolve exactly")
+            return repo
 
 
         def tag_matches(reference, tag, candidate):
@@ -476,12 +502,87 @@ jobs:
                 raise Unknown("Created tag identity is unverified. Stop and inspect before another write")
 
 
-        def publish(api, *, tag, candidate, notes, generated, archive, expected_digest):
+        def require_publish_gate(api, *, repo, candidate, run_id, run_attempt, env_name, env_id, approver, approver_id):
+            # GitHub's /approvals endpoint is scoped by run_id without a run_attempt field.
+            # Refuse re-runs so a prior attempt's approval cannot satisfy a later attempt.
+            if run_attempt != "1":
+                raise ValueError("Re-run attempt cannot prove fresh approval; inspect remote state and dispatch a fresh run")
+            if not re.fullmatch(r"[1-9][0-9]*", run_id):
+                raise ValueError("Invalid workflow run ID")
+            repo_id = repo.get("id")
+            branch = repo["default_branch"]
+            if not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id < 1:
+                raise Unknown("Repository ID is unobservable")
+            run = api("GET", f"/actions/runs/{run_id}/attempts/1")
+            if (not isinstance(run, dict) or run.get("id") != int(run_id) or run.get("run_attempt") != 1
+                    or run.get("event") != "workflow_dispatch" or run.get("path") != ".github/workflows/release.yml"
+                    or run.get("head_branch") != branch or run.get("head_sha") != candidate
+                    or not isinstance(run.get("repository"), dict) or run["repository"].get("id") != repo_id
+                    or not isinstance(run.get("head_repository"), dict) or run["head_repository"].get("id") != repo_id):
+                raise ValueError("Workflow run does not match candidate release dispatch")
+            approvals = api("GET", f"/actions/runs/{run_id}/approvals")
+            if not isinstance(approvals, list) or not all(
+                isinstance(item, dict) and isinstance(item.get("environments"), list) for item in approvals
+            ):
+                raise Unknown("Workflow approval history is unobservable")
+            env_reviews = [
+                item for item in approvals
+                if any(isinstance(env, dict) and (env.get("name") == env_name or env.get("id") == env_id)
+                       for env in item["environments"])
+            ]
+            if not env_reviews:
+                raise ValueError("No matching release environment approval recorded for this run")
+            if any(item.get("state") != "approved" for item in env_reviews):
+                raise ValueError("Release environment has non-approved review state for this run")
+            if not any(
+                any(isinstance(env, dict) and env.get("name") == env_name
+                    and isinstance(env.get("id"), int) and not isinstance(env.get("id"), bool)
+                    and env["id"] == env_id for env in item["environments"])
+                and isinstance(item.get("user"), dict)
+                and item["user"].get("login") == approver
+                and isinstance(item["user"].get("id"), int) and not isinstance(item["user"].get("id"), bool)
+                and item["user"]["id"] == approver_id
+                and item["user"].get("type") == "User"
+                for item in env_reviews
+            ):
+                raise ValueError("No release environment approval by authorized maintainer for this run")
+            ci = api("GET", f"/actions/workflows/ci.yml/runs?event=push&branch={urllib.parse.quote(branch, safe='')}&head_sha={candidate}&status=success&per_page=100")
+            if not isinstance(ci, dict) or not isinstance(ci.get("workflow_runs"), list):
+                raise Unknown("CI workflow runs are unobservable")
+            for ci_run in ci["workflow_runs"]:
+                if (isinstance(ci_run, dict) and ci_run.get("path") == ".github/workflows/ci.yml"
+                        and ci_run.get("event") == "push" and ci_run.get("head_branch") == branch
+                        and ci_run.get("head_sha") == candidate
+                        and ci_run.get("status") == "completed" and ci_run.get("conclusion") == "success"
+                        and isinstance(ci_run.get("repository"), dict) and ci_run["repository"].get("id") == repo_id
+                        and isinstance(ci_run.get("head_repository"), dict) and ci_run["head_repository"].get("id") == repo_id
+                        and isinstance(ci_run.get("id"), int) and not isinstance(ci_run.get("id"), bool)
+                        and isinstance(ci_run.get("run_attempt"), int) and not isinstance(ci_run.get("run_attempt"), bool)):
+                    jobs_resp = api("GET", f"/actions/runs/{ci_run['id']}/attempts/{ci_run['run_attempt']}/jobs?per_page=100")
+                    if not isinstance(jobs_resp, dict) or not isinstance(jobs_resp.get("jobs"), list):
+                        raise Unknown("CI job listing is unobservable")
+                    jobs = jobs_resp["jobs"]
+                    if jobs_resp.get("total_count") != len(jobs) or not jobs:
+                        raise Unknown("CI job listing is incomplete")
+                    if (any(isinstance(j, dict) and j.get("name") == "Required checks"
+                            and j.get("status") == "completed" and j.get("conclusion") == "success" for j in jobs)
+                            and all(isinstance(j, dict) and j.get("status") == "completed"
+                                    and j.get("conclusion") == "success" for j in jobs)):
+                        print(json.dumps({"gate_verified": {"run_id": int(run_id), "environment_id": env_id,
+                                                            "approver_id": approver_id, "ci_run_id": ci_run["id"]}}), flush=True)
+                        return
+            raise ValueError("Official push CI Required checks did not succeed for this candidate on main")
+
+
+        def publish(api, *, tag, candidate, branch, notes, generated, archive, expected_digest):
+            if archive.is_symlink() or not archive.is_file():
+                raise ValueError("Release archive is missing or invalid")
             payload = archive.read_bytes()
             digest = hashlib.sha256(payload).hexdigest()
             if not re.fullmatch(r"[0-9a-f]{64}", expected_digest) or digest != expected_digest:
                 raise ValueError("Artifact bytes differ from read-only build output")
             check_conflicts(api, tag)
+            check_default_branch_head(api, branch, candidate)
             # Retained job logs identify intent before the first write. Never retry a
             # write automatically. Inspect the remote and stop on an unknown outcome.
             print(json.dumps({"tag": tag, "candidate": candidate, "asset": archive.name, "sha256": digest}), flush=True)
@@ -546,11 +647,22 @@ jobs:
             if os.environ["GITHUB_REPOSITORY"] != os.environ["EXPECTED_REPOSITORY"]:
                 raise ValueError("Release destination differs from the selected repository")
             api = API(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
-            inspect_candidate(api, candidate, os.environ["DISPATCH_REF"], os.environ["WORKFLOW_SHA"])
+            repo = inspect_candidate(api, candidate, os.environ["DISPATCH_REF"], os.environ["WORKFLOW_SHA"])
             if os.environ["OPERATION"] == "validate":
                 check_conflicts(api, tag)
             else:
-                publish(api, tag=tag, candidate=candidate, notes=notes, generated=generated,
+                require_publish_gate(
+                    api,
+                    repo=repo,
+                    candidate=candidate,
+                    run_id=os.environ["RUN_ID"],
+                    run_attempt=os.environ["RUN_ATTEMPT"],
+                    env_name=os.environ["EXPECTED_ENVIRONMENT"],
+                    env_id=int(os.environ["EXPECTED_ENVIRONMENT_ID"]),
+                    approver=os.environ["EXPECTED_APPROVER"],
+                    approver_id=int(os.environ["EXPECTED_APPROVER_ID"]),
+                )
+                publish(api, tag=tag, candidate=candidate, branch=repo["default_branch"], notes=notes, generated=generated,
                         archive=Path("release/source.tar.gz"), expected_digest=os.environ["ARCHIVE_SHA256"])
 
 
@@ -565,7 +677,13 @@ jobs:
         DISPATCH_SHA: ${{ github.sha }}
         DISPATCH_REF: ${{ github.ref }}
         WORKFLOW_SHA: ${{ github.workflow_sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
         GH_TOKEN: ${{ github.token }}
         EXPECTED_REPOSITORY: kylehughes/swift-state-machine
+        EXPECTED_ENVIRONMENT: release
+        EXPECTED_ENVIRONMENT_ID: "28291228374"
+        EXPECTED_APPROVER: kylehughes
+        EXPECTED_APPROVER_ID: "229059"
         OPERATION: publish
         ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}
