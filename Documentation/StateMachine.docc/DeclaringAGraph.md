@@ -870,8 +870,22 @@ for another owner's receipt. `Task.yield()` gives no flush barrier.
 Because handlers run outside admission while draining, `host.snapshot()` inside
 `on<Event>` can already reflect later commits, and a snapshot read or new
 subscription immediately after an emitting `send(_:)` can observe the committed
-state before that commit's `on<Event>` runs. A handler may read the host or call
-`send(_:)`, and any commit it makes drains in commit order without nesting.
+state before that commit's `on<Event>` runs. On `MainActorHost`, a synchronous
+`send(_:)` from a main-actor notification callback can move the machine into
+another phase before the later turn invokes `on<Event>`, and an `@Event` carries
+no scope or authority to suppress that handler. A handler may read the host or
+call `send(_:)`, and any commit it makes drains in commit order without nesting.
+
+Use `@Event` for fire-and-forget announcements such as logging or haptics that
+remain valid after later transitions. On `MainActorHost`, if a short
+synchronous action in `on<Event>` must run only while a phase still holds,
+recheck `host.currentSnapshot` or `host.snapshot()` in that same non-suspending
+main-actor turn before acting. For asynchronous phase-bound work, declare an
+`@Operation(activeIn:)`. An intervening transition that revokes authority before
+launch skips starting the driver. Once the driver has started, revocation
+rejects any late completion as stale and requests cooperative task cancellation,
+so stopping in-flight work depends on the driver cooperating through
+cancellation checks or cancellation-aware APIs.
 
 ## Choose among edges with a router
 

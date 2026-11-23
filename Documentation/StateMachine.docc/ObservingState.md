@@ -344,6 +344,17 @@ registration buffers the initial snapshot synchronously before `snapshots()` or
 checking the deadline and returns `.matched` without starting a timer even when
 the deadline has already passed.
 
+`.matched` carries a historical value, and another commit can advance the owner
+before the awaiting task resumes. After waiting on a projection such as
+`distinctSnapshots(_:)`, check the condition again on a fresh snapshot before
+acting, and commit a proposal prepared from that checked snapshot when a racing
+writer could intervene. In a `shared` schema, waiting directly on `snapshots()`
+yields a full snapshot whose `Observed` value can prepare a proposal right
+away, and `commit(_:)` rejects it with `.conflict` if a later ordinary commit
+advances the same open incarnation. See
+[Act on the observation a caller saw](<doc:HostingAGraph#Act-on-the-observation-a-caller-saw>)
+for proposal commits and rejection handling.
+
 `wait` runs on the caller's isolation (`nonisolated(nonsending)`), so the
 predicate stays on the caller's actor without needing `@Sendable` or moving a
 sequence iterator across task-group boundaries. Avoid iterating a

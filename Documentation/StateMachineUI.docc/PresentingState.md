@@ -128,6 +128,22 @@ while the property is still `nil`, because that modifier runs each time the view
 appears. Keep the presentation for the screen's lifetime, and create a new one
 when returning after `close()`.
 
+A `MainActorHost` keeps its driver and event-handler closures for its entire
+lifetime. Each closure retains whatever it captured when SwiftUI constructed the
+host stored in `@State`. If a parent updates the view in place without changing
+its identity, such as switching selection in `NavigationSplitView`, SwiftUI
+reuses that host and its original closures. A captured value input, such as a
+`String` property like `name`, keeps its initial value, and swapping in a new
+model instance leaves the closures bound to the earlier object reference.
+Property changes on that same captured model instance remain visible.
+
+Pass changing view inputs through `send(_:)` and operation inputs so init-time
+closures avoid capturing them, as `ProfileScreen` passes `name` in
+`send(.load(name))`. When drivers or handlers need live external state, own the
+host in a long-lived `@MainActor` model or controller and read its current
+properties through a weak reference to it. When a new selection calls for a
+fresh host lifetime, key the owning view with `.id(selectionID)`.
+
 If the host has no room for another observer, creation still succeeds. The
 presentation shows the host's snapshot at creation and every change made
 through it, `isObserving` is `false`, and `observationFailure` holds the
