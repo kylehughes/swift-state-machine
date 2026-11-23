@@ -441,6 +441,12 @@ The labels E1 to E15 name the scenarios that the families below cover. The code'
   (`cancel()`), `deliver(A)`, `finish(A)`, `hostCancel(A)`, `hostCancelReturn(A)`, `hostCancelMain(A)`,
   `dropMain`, `dropElsewhere`, and `turn`. After every event that completes a waiting read, the step waits for that
   read's return, with a 2,000-turn safety net that fails the run as I16. One read runs after the end.
+  `ExplorerTests/boundedWaitRegistrationAndFinalOfferSchedules` adds scoped deterministic schedules over the same
+  one-slot fake host (`ExplorerHost`) and manual clock for `SnapshotSequence.wait(deadline:clock:where:)`: a deadline
+  releasing a claimed registration while a worker's `hostCancel` is parked (I2, I15), a final offer and `finish`
+  arriving synchronously during the initial non-matching predicate right as the deadline expires (I41, I15), and a
+  host `finish` with a final offer racing ahead of deadline expiry (`.ended` preserved over `.timedOut`, I41, I2,
+  I15).
 - **69** `arm(h, e)` at the client callback sites of the `sites` family — `hostRead` (a host's `snapshot()` on the
   main thread), `hostSend` (the driving host's `send`, after it delivered the change, before it returns),
   `hostSubscribe` (a registration call on the main thread, after its provisional delivery, before it returns or
@@ -663,10 +669,12 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   released without closing first processes every batch it accepted, delivering each (`ObservingState.md`, "An
   owner released without closing first processes every batch it accepted", OBS-005). Until its teardown begins, a
   value no newer than the revision it had accepted at its last reference is therefore allowed. The harness marks
-  teardown at the first driver cancellation or callback release it sees. The exception applies only when the
-  sequence made the owner accept a change, because an owner with nothing to process tears down at once. Source:
-  `ObservingState.md` ("demand first made after the release receives only the completion" and "tells a publisher of
-  its release before it cancels any driver"), API-120.
+  teardown at the first genuine driver cancellation or owner-released callback destruction it sees. At quiescence it
+  waits for every armed capture callback and driver cancellation hook to run and every subscriber to finish before
+  disarming those hooks and releasing its own registration tokens, so explicit harness cleanup never impersonates
+  owner teardown. The exception applies only when the sequence made the owner accept a change, because an owner with
+  nothing to process tears down at once. Source: `ObservingState.md` ("demand first made after the release receives
+  only the completion" and "tells a publisher of its release before it cancels any driver"), API-120.
 - **I29** T: with the same exception as I28, no ordinary value reaches any subscriber, including one attached
   earlier, after the owner was released ("finishes it at once and discards every ordinary value not yet
   delivered"). This is the stricter reading of the same paragraph. API-120 names the one further exception. An

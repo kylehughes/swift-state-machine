@@ -157,6 +157,9 @@ LIMITS = [
                     r"no calls to throwing functions occur within 'try' expression|"
                     r"'catch' block is unreachable because no errors are thrown in 'do' block",
          doc='that the macro reads as a type with values without confirming its kind, must not be `Never`'),
+    dict(id='outside-never-owned', rewrites=r'^alias-file$', observed='macro-diagnostic', exact=True, token=r'throws',
+         pattern=r'Owned-only transitions cannot throw; return Advance<Source, Destination, Effect, Failure> to give the source back\.',
+         doc='an alias declared outside the schema is invisible to the macro'),
     dict(id='nfc-refusal', rewrites=r'^collide-(nfd|kelvin|varia)', observed='macro-diagnostic',
          pattern=r"The name '[^']*' is not in Unicode Normalization Form C(; spell it '[^']*'|, and composed it reads '[^']*', which is no name; spell it with other characters)\. .*",
          doc='The macro therefore refuses a name that is not in that form anywhere it reads one'),
@@ -172,8 +175,8 @@ CASCADE = re.compile(r"^cannot find (type )?'(Effect|Route|Change|Advance|Restor
                      r"Prepared|Snapshot|Phase|Local|Shared|\w+Request|\w+Completion|\w+Result)' is not a member type|"
                      # Swift's own access errors where an access refusal names the declaration that lacks access.
                      r"uses an? (internal|fileprivate|private|package) type|is (internal|fileprivate|private|package) and cannot be referenced|"
-                     # The harness's accessor of a graph whose expansion was refused.
-                     r"^type '[^']*' has no member 'graph'$")
+                     # The harness's accessor of a graph or owner whose expansion was refused.
+                     r"^type '[^']*' has no member '(graph|owned)'$")
 
 # What a breaking rewrite must be rejected with: the macro's documented diagnostic, or Swift's own error where the
 # grammar is Swift's. A case rejected any other way, or by a link error, fails.
@@ -268,6 +271,14 @@ EXPECTED_REPORTS = {
     'own-phase-set': 'draft.edit@1; noted d; rejected edit; editing.revert@2; draft.submit@3; review.edit@4; noted r; '
                      'editing.archive@5; archived; owned noted o; archived; edges 9',
     'own-phase-set-owned': 'closed; open; edges 5',
+    'own-routed-handoff': 'comparing.advance@1/11; comparing.stay@2/11; rejected empty; comparing.finish@3/ok:22; '
+                          'delivery reviewing.followUp@4/req:7|ok:22; delivery followUp.done@5/req:7|ok:22; owned 33; edges 6',
+    'own-routed-noncopyable': 'open.inspect@1/5; open.take@2/9; taken; owned 12; closure 42; edges 5',
+    'own-generic-source': 'browsing.select@1/7; noted 7; browsing.show@2/7:s1; presenting.select@3/9:s1; noted 9; '
+                          'presenting.presentConfirmation@4/9:s1:c1; sheetConfirming.select@5/11:s1:c1; noted 11; '
+                          'sheetConfirming.back@6/11; rejected back; browsing.reset@7/0; browsing.finish@8/0+end; '
+                          'done; owned 5:s2; edges 19',
+    'own-generic-source-owned': 'advanced r1; rejected r1; closed r1; reset init; edges 6',
 }
 
 
@@ -1534,6 +1545,450 @@ func fuzzReport() -> String {
     return "\\(closed); \\(reopened); edges \\(Handle.graph.edges.count)"
 }
 ''',
+    # A public `.isolated` schema exercising typed `routed:` handoffs: a `fileprivate` non-`Sendable` closure payload
+    # kept out of the public interface, a labeled tuple payload, a bare fallback candidate, typed router throws, and
+    # a completion router passing both `request:` and `routed:` in order with distinct per-branch `starts:`.
+    'routed-handoff': '''
+import StateMachine
+
+@StateMachine(mode: .isolated, owners: [.owned, .local, .mainActorHost])
+public nonisolated enum FlowHandoff {
+    fileprivate struct Step {
+        let compute: () -> Swift::Int
+    }
+    public struct Comparing {
+        public let score: Swift::Int
+        public init(score: Swift::Int = 0) { self.score = score }
+    }
+    public struct Reviewing {
+        public let summary: Swift::String
+    }
+    public struct FollowUpPhase {
+        public let summary: Swift::String
+    }
+    public struct Finished {
+        public let summary: Swift::String
+    }
+    public enum ChoiceError: Swift::Error, Swift::Equatable { case empty }
+    @Initial case comparing(Comparing = Comparing())
+    case reviewing(Reviewing)
+    case followUp(FollowUpPhase)
+    @Terminal case finished(Finished)
+    public enum Input { case choose(Swift::Int) }
+    @Operation(activeIn: [Reviewing.self])
+    public enum Fetch {
+        public typealias Input = Swift::Int
+        public typealias Output = Swift::String
+    }
+    @Operation(activeIn: [FollowUpPhase.self])
+    public enum FollowUp {
+        public typealias Output = Swift::String
+    }
+    @Transition(on: Input.choose)
+    fileprivate static func advance(_ source: Comparing, _ delta: Swift::Int, routed step: Step) -> Comparing {
+        Comparing(score: source.score + step.compute())
+    }
+    @Transition(on: Input.choose)
+    fileprivate static func stay(_ source: Comparing, _ delta: Swift::Int) -> Comparing {
+        source
+    }
+    @Transition(on: Input.choose, starts: [Fetch.self])
+    fileprivate static func finish(
+        _ source: Comparing,
+        _ delta: Swift::Int,
+        routed pair: (label: Swift::String, score: Swift::Int)
+    ) -> Change<Reviewing, Effect.Finish> {
+        Change(Reviewing(summary: "\\(pair.label):\\(pair.score)"), effects: [.fetch(7)])
+    }
+    @Route(on: Input.choose)
+    fileprivate static func routeChoice(_ source: Comparing, _ delta: Swift::Int) throws(ChoiceError) -> Route.RouteChoice {
+        if delta < 0 { throw .empty }
+        if delta == 0 { return .stay }
+        if delta >= 10 { return .finish((label: "ok", score: source.score + delta)) }
+        let added = delta + 10
+        return .advance(Step(compute: { added }))
+    }
+    @Transition(onSuccess: Fetch.self, starts: [FollowUp.self])
+    fileprivate static func followUp(
+        _ source: Reviewing,
+        _ output: Fetch.Output,
+        request: FetchRequest,
+        routed summary: Swift::String
+    ) -> Change<FollowUpPhase, Effect.FollowUp> {
+        Change(FollowUpPhase(summary: summary), effects: [.followUp])
+    }
+    @Transition(onSuccess: Fetch.self)
+    fileprivate static func completeDirect(_ source: Reviewing, _ output: Fetch.Output) -> Finished {
+        Finished(summary: output)
+    }
+    @Route(onSuccess: Fetch.self)
+    fileprivate static func routeFetch(
+        _ source: Reviewing,
+        _ output: Fetch.Output,
+        request: FetchRequest
+    ) -> Route.RouteFetch {
+        output == "need" ? .followUp("req:\\(request.input)|\\(source.summary)") : .completeDirect
+    }
+    @Transition(onSuccess: FollowUp.self)
+    fileprivate static func done(_ source: FollowUpPhase, _ output: FollowUp.Output) -> Finished {
+        Finished(summary: source.summary)
+    }
+}
+
+func fuzzReport() -> String {
+    var out: [String] = []
+    var owner = FlowHandoff.Local()
+    for delta in [1, 0, -1, 11] {
+        do {
+            let receipt = try owner.send(.choose(delta))
+            let detail: String = switch receipt.snapshot {
+            case .comparing(let c): "\\(c.value.score)"
+            case .reviewing(let r): r.value.summary
+            case .followUp(let f): f.value.summary
+            case .finished(let d): d.value.summary
+            }
+            out.append("\\(receipt.edgeID ?? "-")@\\(receipt.snapshot.revision)/\\(detail)")
+        } catch {
+            out.append("rejected empty")
+        }
+    }
+    guard case .fetch(let fetchWork)? = owner.drainCommands(limit: .max).flatMap(\\.commands).first else {
+        return "missing fetch"
+    }
+    guard case .committed(let firstDelivery) = owner.deliver(.fetch(fetchWork.succeeded("need"))),
+        case .followUp(let followPhase) = firstDelivery.snapshot
+    else { return "bad fetch delivery" }
+    out.append("delivery \\(firstDelivery.edgeID ?? "-")@\\(firstDelivery.snapshot.revision)/\\(followPhase.value.summary)")
+    _ = owner.acknowledgeExecution(fetchWork.execution)
+    guard case .followUp(let followWork)? = owner.drainCommands(limit: .max).flatMap(\\.commands).first else {
+        return "missing followUp"
+    }
+    guard case .committed(let secondDelivery) = owner.deliver(.followUp(followWork.succeeded("ok"))),
+        case .finished(let donePhase) = secondDelivery.snapshot
+    else { return "bad followUp delivery" }
+    out.append("delivery \\(secondDelivery.edgeID ?? "-")@\\(secondDelivery.snapshot.revision)/\\(donePhase.value.summary)")
+    _ = owner.acknowledgeExecution(followWork.execution)
+    let ownedScore: Int = switch FlowHandoff.owned(FlowHandoff.Comparing(score: 20)).routeChoice(3) {
+    case .advance(let next): next.withValue { $0.score }
+    case .stay(let next): next.withValue { $0.score }
+    case .finish(let change): change.next.withValue { _ in -1 }
+    case .rejected: -2
+    }
+    out.append("owned \\(ownedScore)")
+    out.append("edges \\(FlowHandoff.graph.edges.count)")
+    return out.joined(separator: "; ")
+}
+// fuzz-client
+import Fz
+
+func fuzzClient() -> Swift::Int {
+    switch FlowHandoff.owned().routeChoice(0) {
+    case .stay(let next): next.withValue { $0.score }
+    case .advance(let next): next.withValue { $0.score }
+    case .finish(let change): change.next.withValue { _ in 1 }
+    case .rejected: -1
+    }
+}
+''',
+    # An `.isolated` schema with `~Copyable` `routed:` ownership (`consuming` and `borrowing`) plus `@escaping` and
+    # `sending` conventions on routed parameters.
+    'routed-noncopyable': '''
+import StateMachine
+
+@StateMachine(mode: .isolated, owners: [.owned, .local])
+nonisolated enum TokenRouter {
+    struct Token: ~Swift::Copyable { let value: Swift::Int }
+    struct Open {
+        let total: Swift::Int
+        init(total: Swift::Int = 0) { self.total = total }
+    }
+    struct Taken { let value: Swift::Int }
+    @Initial case open(Open = Open())
+    @Terminal case taken(Taken)
+    enum Input { case step(Swift::Int), run }
+    @Transition(on: Input.step)
+    fileprivate static func inspect(_ source: Open, _ amount: Swift::Int, routed token: borrowing Token) -> Open {
+        Open(total: source.total + token.value)
+    }
+    @Transition(on: Input.step)
+    fileprivate static func take(_ source: Open, _ amount: Swift::Int, routed token: consuming Token) -> Taken {
+        Taken(value: source.total + token.value)
+    }
+    @Transition(on: Input.step)
+    fileprivate static func stay(_ source: Open, _ amount: Swift::Int) -> Open {
+        source
+    }
+    @Route(on: Input.step)
+    fileprivate static func routeStep(_ source: Open, _ amount: Swift::Int) -> Route.RouteStep {
+        if amount == 0 { return .stay }
+        if amount > 0 { return .inspect(Token(value: amount)) }
+        return .take(Token(value: -amount))
+    }
+    @Transition(on: Input.run)
+    fileprivate static func runClosure(_ source: Open, routed work: @escaping () -> Swift::Int) -> Taken {
+        Taken(value: work())
+    }
+    @Transition(on: Input.run)
+    fileprivate static func runSending(_ source: Open, routed flag: sending Swift::Int) -> Open {
+        Open(total: flag)
+    }
+    @Route(on: Input.run)
+    fileprivate static func routeRun(_ source: Open) -> Route.RouteRun {
+        .runClosure({ 42 })
+    }
+}
+
+func fuzzReport() -> String {
+    var out: [String] = []
+    var owner = TokenRouter.Local()
+    if let r1 = try? owner.send(.step(5)), case .open(let p) = r1.snapshot {
+        out.append("\\(r1.edgeID ?? "-")@\\(r1.snapshot.revision)/\\(p.value.total)")
+    }
+    if let r2 = try? owner.send(.step(-4)), case .taken(let p) = r2.snapshot {
+        out.append("\\(r2.edgeID ?? "-")@\\(r2.snapshot.revision)/\\(p.value.value)")
+    }
+    out.append("\\(TokenRouter.Local.phase(of: owner.snapshot()))")
+    let ownedVal: Int = switch TokenRouter.owned(TokenRouter.Open(total: 10)).routeStep(-2) {
+    case .take(let done): done.withValue { $0.value }
+    case .inspect(let open): open.withValue { $0.total }
+    case .stay(let open): open.withValue { $0.total }
+    }
+    out.append("owned \\(ownedVal)")
+    let closureVal: Int = switch TokenRouter.owned().routeRun() {
+    case .runClosure(let done): done.withValue { $0.value }
+    case .runSending(let open): open.withValue { $0.total }
+    }
+    out.append("closure \\(closureVal)")
+    out.append("edges \\(TokenRouter.graph.edges.count)")
+    return out.joined(separator: "; ")
+}
+''',
+    # A public `.shared` schema combining generic `<Source>` multi-source transitions (same-phase `-> Change<Source, ...>`,
+    # fixed destination with trailing `where`, typed error, two same-named multi-source transitions over `@PhaseSet`,
+    # old parameterless `from:`, deprecated generic `from:`, and composed `from:` + `routed:`) with a cross-module client.
+    'generic-source': '''
+import StateMachine
+
+nonisolated public protocol NavSelectionCarrying: Swift::Sendable {
+    var selected: Swift::Int? { get set }
+}
+nonisolated public protocol NavSheetCarrying: NavSelectionCarrying {
+    var sheet: Swift::String { get }
+}
+
+@StateMachine(mode: .shared, owners: [.owned, .local])
+public nonisolated enum NavFlow: Swift::Sendable {
+    public struct Browsing: NavSelectionCarrying {
+        public var selected: Swift::Int?
+        public init(selected: Swift::Int? = nil) { self.selected = selected }
+    }
+    public struct Confirming: NavSelectionCarrying {
+        public var selected: Swift::Int?
+        public let confirm: Swift::String
+    }
+    public struct Presenting: NavSheetCarrying {
+        public var selected: Swift::Int?
+        public let sheet: Swift::String
+    }
+    public struct SheetConfirming: NavSheetCarrying {
+        public var selected: Swift::Int?
+        public let sheet: Swift::String
+        public let confirm: Swift::String
+    }
+    public struct Done: Swift::Sendable {
+        public let note: Swift::String
+    }
+    public enum NavError: Swift::Error, Swift::Sendable, Swift::Equatable { case missingSelection }
+    @Initial case browsing(Browsing = Browsing())
+    case confirming(Confirming)
+    case presenting(Presenting)
+    case sheetConfirming(SheetConfirming)
+    @Terminal case done(Done)
+    public enum Input: Swift::Sendable {
+        case select(Swift::Int?)
+        case show(Swift::String)
+        case presentConfirmation(Swift::String)
+        case back
+        case reset
+        case finish
+    }
+    @Event
+    public enum Noted { public typealias Payload = Swift::Int }
+    @PhaseSet([Browsing.self, Confirming.self, Presenting.self, SheetConfirming.self])
+    fileprivate enum AllActive {}
+    @PhaseSet([Browsing.self, Confirming.self])
+    fileprivate enum NonSheet {}
+    @PhaseSet([Presenting.self, SheetConfirming.self])
+    fileprivate enum SheetPhases {}
+    @available(*, deprecated, message: "use rename")
+    @Transition(from: AllActive.self, on: Input.select, emits: [Noted.self])
+    fileprivate static func select<Source: NavSelectionCarrying>(
+        _ source: Source,
+        _ id: Swift::Int?
+    ) -> Change<Source, Effect.Select> {
+        var next = source
+        next.selected = id
+        return Change(next, effects: [.noted(id ?? -1)])
+    }
+    @Transition(from: [Browsing.self, Confirming.self], on: Input.show)
+    fileprivate static func show<Source>(
+        _ source: Source,
+        _ sheet: Swift::String
+    ) -> Presenting where Source: NavSelectionCarrying {
+        Presenting(selected: source.selected, sheet: sheet)
+    }
+    @Transition(from: NonSheet.self, on: Input.presentConfirmation)
+    fileprivate static func presentConfirmation<Source: NavSelectionCarrying>(
+        _ source: Source,
+        _ confirm: Swift::String
+    ) -> Confirming {
+        Confirming(selected: source.selected, confirm: confirm)
+    }
+    @Transition(from: SheetPhases.self, on: Input.presentConfirmation)
+    fileprivate static func presentConfirmation<Source: NavSheetCarrying>(
+        _ source: Source,
+        _ confirm: Swift::String
+    ) -> SheetConfirming {
+        SheetConfirming(selected: source.selected, sheet: source.sheet, confirm: confirm)
+    }
+    @Transition(from: [Confirming.self, Presenting.self, SheetConfirming.self], on: Input.back)
+    fileprivate static func back<Source: NavSelectionCarrying>(_ source: Source) throws(NavError) -> Browsing {
+        guard let selected = source.selected else { throw .missingSelection }
+        return Browsing(selected: selected)
+    }
+    @Transition(from: [Browsing.self, Presenting.self], on: Input.reset)
+    fileprivate static func reset() -> Browsing {
+        Browsing(selected: 0)
+    }
+    @Transition(from: [Browsing.self, Confirming.self], on: Input.finish)
+    fileprivate static func finish<Source: NavSelectionCarrying>(_ source: Source, routed suffix: Swift::String) -> Done {
+        Done(note: "\\(source.selected ?? -1)\\(suffix)")
+    }
+    @Transition(on: Input.finish)
+    fileprivate static func keepBrowsing(_ source: Browsing) -> Browsing { source }
+    @Route(on: Input.finish)
+    fileprivate static func routeFinishBrowsing(_ source: Browsing) -> Route.RouteFinishBrowsing {
+        .finish("+end")
+    }
+    @Transition(on: Input.finish)
+    fileprivate static func keepConfirming(_ source: Confirming) -> Confirming { source }
+    @Route(on: Input.finish)
+    fileprivate static func routeFinishConfirming(_ source: Confirming) -> Route.RouteFinishConfirming {
+        .finish("+conf")
+    }
+}
+
+func fuzzReport() -> String {
+    var out: [String] = []
+    var nav = NavFlow.Local()
+    func describe(_ snapshot: NavFlow.Snapshot) -> String {
+        switch snapshot {
+        case .browsing(let p): "\\(p.value.selected ?? -1)"
+        case .confirming(let p): "\\(p.value.selected ?? -1):\\(p.value.confirm)"
+        case .presenting(let p): "\\(p.value.selected ?? -1):\\(p.value.sheet)"
+        case .sheetConfirming(let p): "\\(p.value.selected ?? -1):\\(p.value.sheet):\\(p.value.confirm)"
+        case .done(let p): p.value.note
+        }
+    }
+    func step(_ input: NavFlow.Input, _ label: String) {
+        do {
+            let receipt = try nav.send(input)
+            out.append("\\(receipt.edgeID ?? "-")@\\(receipt.snapshot.revision)/\\(describe(receipt.snapshot))")
+        } catch {
+            out.append("rejected \\(label)")
+        }
+        for batch in nav.drainCommands() {
+            for command in batch.commands {
+                if case .noted(let value) = command { out.append("noted \\(value)") }
+            }
+        }
+    }
+    step(.select(7), "select")
+    step(.show("s1"), "show")
+    step(.select(9), "select")
+    step(.presentConfirmation("c1"), "confirm")
+    step(.select(11), "select")
+    step(.back, "back")
+    step(.back, "back")
+    step(.reset, "reset")
+    step(.finish, "finish")
+    out.append("\\(NavFlow.Local.phase(of: nav.snapshot()))")
+    let ownedShown = NavFlow.owned(NavFlow.Browsing(selected: 5)).show("s2").withValue { "\\($0.selected ?? -1):\\($0.sheet)" }
+    out.append("owned \\(ownedShown)")
+    out.append("edges \\(NavFlow.graph.edges.count)")
+    return out.joined(separator: "; ")
+}
+// fuzz-client
+import Fz
+
+func fuzzClient() -> Swift::String {
+    let presented = NavFlow.owned(NavFlow.Browsing(selected: 3)).show("c")
+    return presented.withValue { "\\($0.selected ?? -1):\\($0.sheet)" }
+}
+''',
+    # An `.ownedOnly` noncopyable schema with a generic `<Source>` same-phase `Advance`, fixed destination, and old
+    # parameterless `from:`.
+    'generic-source-owned': '''
+import StateMachine
+
+nonisolated protocol UniqueTitled: ~Swift::Copyable {
+    var title: Swift::String { get set }
+}
+
+@StateMachine(mode: .ownedOnly)
+nonisolated enum UniqueDoc: ~Swift::Copyable {
+    struct Draft: ~Swift::Copyable, UniqueTitled { var title: Swift::String }
+    struct Review: ~Swift::Copyable, UniqueTitled { var title: Swift::String }
+    struct Closed: ~Swift::Copyable { let title: Swift::String }
+    enum RenameError: Swift::Error { case empty }
+    @Initial case draft(Draft)
+    case review(Review)
+    @Terminal case closed(Closed)
+    enum Input { case rename(Swift::String) }
+    @PhaseSet([Review.self, Draft.self])
+    fileprivate enum Editable {}
+    @Transition
+    fileprivate static func submit(_ source: consuming Draft) -> Review { Review(title: source.title) }
+    @Transition(from: Editable.self, on: Input.rename)
+    fileprivate static func rename<Source: UniqueTitled & ~Swift::Copyable>(
+        _ source: consuming Source,
+        _ title: Swift::String
+    ) -> Advance<Source, Source, Swift::Never, RenameError> {
+        guard !title.isEmpty else { return .rejected(.empty, source) }
+        var next = source
+        next.title = title
+        return .advanced(next, effects: [])
+    }
+    @Transition(from: [Review.self, Draft.self])
+    fileprivate static func close<Source: UniqueTitled & ~Swift::Copyable>(_ source: consuming Source) -> Closed {
+        Closed(title: source.title)
+    }
+    @Transition(from: [Review.self])
+    fileprivate static func reset() -> Draft { Draft(title: "init") }
+}
+
+func fuzzReport() -> String {
+    var out: [String] = []
+    let review = UniqueDoc.owned(UniqueDoc.Draft(title: "d0")).submit()
+    switch review.rename("r1") {
+    case .advanced(let updated, _):
+        out.append("advanced \\(updated.withValue { $0.title })")
+        switch updated.rename("") {
+        case .advanced(let kept, _):
+            out.append("unexpected \\(kept.withValue { $0.title })")
+        case .rejected(_, let original):
+            out.append("rejected \\(original.withValue { $0.title })")
+            out.append("closed \\(original.close().withValue { $0.title })")
+        }
+    case .rejected:
+        out.append("failed")
+    }
+    let resetTitle = UniqueDoc.owned(UniqueDoc.Draft(title: "d1")).submit().reset().withValue { $0.title }
+    out.append("reset \\(resetTitle)")
+    out.append("edges \\(UniqueDoc.graph.edges.count)")
+    return out.joined(separator: "; ")
+}
+''',
 }
 
 # A seed whose name is in this set has its own fuzzReport; every seed's graphs are printed.
@@ -1791,18 +2246,20 @@ def type_sites(text):
     schemas = [(start, end, set(payloads.values())) for start, end, payloads in phase_sites]
     phases = {offset for _, _, payloads in phase_sites for offset in payloads}
 
-    def add(start, end, kind, context):
+    def add(start, end, kind, context, generic_params=()):
         if end <= start or not mask[start]:
             return
         spelling = text[start:end]
         if re.fullmatch(r'\s*-?\d[\w]*\s*', spelling):
             # An integer argument of a value generic is a value, not a type.
             return
+        references_generic = any(re.search(r'(?<![\w.`])' + re.escape(gp) + r'(?![\w`])', spelling) for gp in generic_params)
         phase = kind == 'phase-case'
         if kind in ('param', 'return', 'return-arg'):
             names = next((names for lower, upper, names in reversed(schemas) if lower <= start < upper), ())
             phase = core_name(spelling) in names
-        sites.append(Site(start, end, kind, spelling, context, phase))
+        if not references_generic:
+            sites.append(Site(start, end, kind, spelling, context, phase))
         # Generic arguments of a nominal spelling are sites of their own.
         head = re.match(r'[\w.`:]+<', spelling)
         if head:
@@ -1812,16 +2269,22 @@ def type_sites(text):
                 if arg_end > end - 1:
                     break
                 lead = len(text[index:arg_end]) - len(text[index:arg_end].lstrip())
-                add(index + lead, arg_end, kind + '-arg', context)
+                add(index + lead, arg_end, kind + '-arg', context, generic_params)
                 index = arg_end
                 while index < end and text[index] in ', ':
                     index += 1
                 if text[index:index + 1] == '>' or index >= end - 1:
                     break
 
-    for match in re.finditer(r'static func\s+`?\w+`?\s*\(', text):
+    for match in re.finditer(r'static func\s+`?\w+`?\s*(?:<([^>]*)>\s*)?\(', text):
         if not mask[match.start()]:
             continue
+        generic_params = tuple(
+            p.strip().strip('`')
+            for raw in (split_top(match.group(1)) if match.group(1) else ())
+            for p in [re.sub(r'^each\s+', '', raw.strip()).split(':', 1)[0].strip()]
+            if p
+        )
         index = match.end()
         context = 'edge' if re.search(r'@(Transition|Route|Restoration)', text[max(0, match.start() - 300):match.start()].split('\n\n')[-1]) else 'function'
         depth_end = index
@@ -1832,24 +2295,38 @@ def type_sites(text):
             elif text[depth_end] == ')':
                 depth -= 1
             depth_end += 1
-        params = text[index:depth_end - 1]
-        offset = index
-        for param in re.finditer(r'(?:^|,)\s*(?:`?\w+`?\s+)?`?\w+`?\s*:\s*' + MODIFIERS, params):
-            type_start = offset + param.end()
-            type_end = scan_type_end(text, type_start, ',=')
-            add(type_start, type_end, 'param', context)
+        # Walk top-level parameters so commas inside tuple types (`(a: Int, b: String)`) stay intact.
+        cursor = index
+        params_end = depth_end - 1
+        while cursor < params_end:
+            p_end = scan_type_end(text, cursor, ',')
+            if p_end > params_end:
+                p_end = params_end
+            segment = text[cursor:p_end]
+            param = re.match(r'\s*(?:`?\w+`?\s+)?`?\w+`?\s*:\s*' + MODIFIERS, segment)
+            if param:
+                type_start = cursor + param.end()
+                type_end = scan_type_end(text, type_start, ',=')
+                if type_end > p_end:
+                    type_end = p_end
+                add(type_start, type_end, 'param', context, generic_params)
+            cursor = p_end + 1
         rest = depth_end
         throws = re.match(r'\s*(?:async\s+)?throws\(', text[rest:])
         if throws:
             type_start = rest + throws.end()
             type_end = scan_type_end(text, type_start, '')
-            add(type_start, type_end, 'throws', context)
+            add(type_start, type_end, 'throws', context, generic_params)
             rest = type_end + 1
         arrow = re.match(r'\s*(?:throws\s*)?->\s*', text[rest:])
         if arrow:
             type_start = rest + arrow.end()
             type_end = scan_type_end(text, type_start, '{\n')
-            add(type_start, type_end, 'return', context)
+            # A trailing `where` clause ends the return type spelling before `{`.
+            where_match = re.search(r'\s+where\b', text[type_start:type_end])
+            if where_match:
+                type_end = type_start + where_match.start()
+            add(type_start, type_end, 'return', context, generic_params)
     for match in re.finditer(r'typealias\s+`?\w+`?(?:<[^>=]*>)?\s*=\s*', text):
         type_end = scan_type_end(text, match.end(), ';\n')
         indent = text.rfind('\n', 0, match.start())
@@ -2017,10 +2494,35 @@ def _(text, rng):
     return at_sites(text, lambda s: True, lambda s: backtick_last(s.text))
 
 
+def enclosing_namespace(text, site_start):
+    """If `site_start` lies inside a direct nested `enum` or `struct` namespace of its schema, return `(schema, name)`."""
+    schema = schema_of(text, site_start)
+    if not schema:
+        return None, None
+    for namespace in re.finditer(r'^    (?:@[\w.:`]+(?:\([^)\n]*\))?\s+)*(?:(?:public|package|internal|fileprivate|private)\s+)*(?:enum|struct)\s+`?(\w+)`?[^{\n]*\{', text, re.M):
+        body = body_of(text, namespace)
+        if namespace.end() <= site_start < namespace.end() + len(body):
+            return schema, namespace.group(1)
+    return schema, None
+
+
+def direct_schema_types(text, schema):
+    """Types declared directly inside `schema`'s body (excluding types declared only inside nested namespaces)."""
+    body = schema_body(text, schema)
+    if body is None:
+        return set()
+    return declared_types(direct_member_text(body))
+
+
 @rewrite('self-qualify', 'eq', 'may be written `Draft`, `Self.Draft`, or `Approval.Draft`')
 def _(text, rng):
     def transform(site):
-        if not is_simple_name(site.text) or core_name(site.text) not in schema_types(text) or site.context in ('nested',):
+        if not is_simple_name(site.text) or site.context in ('nested',):
+            return None
+        schema, namespace = enclosing_namespace(text, site.start)
+        if not schema or namespace is not None:
+            return None
+        if core_name(site.text) not in direct_schema_types(text, schema):
             return None
         return 'Self.' + site.text.strip()
     return at_sites(text, lambda s: within_schema(text, s) and s.kind != 'case', transform)
@@ -2029,22 +2531,82 @@ def _(text, rng):
 @rewrite('schema-qualify', 'eq', 'may be written `Draft`, `Self.Draft`, or `Approval.Draft`')
 def _(text, rng):
     def transform(site):
-        if not is_simple_name(site.text) or core_name(site.text) not in schema_types(text):
+        if not is_simple_name(site.text):
             return None
-        schema = schema_of(text, site.start)
-        return f'{schema}.{site.text.strip()}' if schema else None
+        schema, namespace = enclosing_namespace(text, site.start)
+        if not schema:
+            return None
+        name = core_name(site.text)
+        # Inside a nested namespace such as `Input` or an `@Operation`, a bare name that the namespace declares
+        # (including via an extension) resolves to that namespace's member, not the outer schema's type of that name.
+        if namespace is not None and name in scope_members(text, schema, namespace):
+            return f'{schema}.{namespace}.{site.text.strip()}'
+        if name not in direct_schema_types(text, schema):
+            return None
+        return f'{schema}.{site.text.strip()}'
     return at_sites(text, lambda s: within_schema(text, s), transform)
 
 
-def alias_rewrite(text, make, predicate=lambda s: True, phases=False):
+def generic_bindings(text):
+    """Spans `(start, end, names)` where generic parameters `names` are in scope."""
+    mask = code_mask(text)
+    bindings = []
+    for declaration in re.finditer(r'\b(typealias|enum|struct|class|actor|func)\s+`?\w+`?\s*<', text):
+        if not mask[declaration.start()]:
+            continue
+        parameters_end = scan_type_end(text, declaration.end(), '')
+        if parameters_end >= len(text) or text[parameters_end] != '>':
+            continue
+        parameters = {name.group(1) for parameter in split_top(text[declaration.end():parameters_end])
+                      if (name := re.match(r'\s*(?:(?:let|each)\s+)?`?(\w+)', parameter))}
+        if not parameters:
+            continue
+        kind = declaration.group(1)
+        if kind == 'typealias':
+            equals = re.match(r'\s*=\s*', text[parameters_end + 1:])
+            if equals:
+                start = parameters_end + 1 + equals.end()
+                bindings.append((start, scan_type_end(text, start, ';\n'), parameters))
+        elif kind == 'func':
+            start = parameters_end + 1
+            depth, cursor = 0, start
+            while cursor < len(text):
+                if mask[cursor]:
+                    ch = text[cursor]
+                    if ch in '([{':
+                        if ch == '{' and depth == 0:
+                            break
+                        depth += 1
+                    elif ch in ')]}':
+                        depth = max(0, depth - 1)
+                cursor += 1
+            if cursor < len(text) and text[cursor] == '{':
+                body = body_of(text, re.compile(r'\{').match(text, cursor))
+                bindings.append((start, cursor + 1 + len(body), parameters))
+            else:
+                bindings.append((start, scan_type_end(text, start, ';\n'), parameters))
+        else:
+            opening = re.match(r'[^{};]*\{', text[parameters_end + 1:])
+            if opening:
+                brace_at = parameters_end + 1 + opening.end() - 1
+                bindings.append((parameters_end + 1, brace_at + 1 + len(body_of(text, re.compile(r'\{').match(text, brace_at))), parameters))
+    return bindings
+
+
+def alias_rewrite(text, make, predicate=lambda s: True, phases=False, hoists=True):
     """Mutations that spell one site through an alias. A phase payload spelled through an alias is a documented limit,
     so only `alias-local` tries those sites."""
     results = []
+    bindings = generic_bindings(text) if hoists else []
     for site in type_sites(text):
         if not within_schema(text, site) or not predicate(site) or not not_generated(site):
             continue
         if not phases and site_role(site) == 'phase':
             continue
+        if hoists and bindings:
+            roots = {root.group(0).strip('`') for root in type_lookup_roots(site.text)}
+            if any(start <= site.start < end and roots & names for start, end, names in bindings):
+                continue
         made = make(text, site)
         if made is None:
             continue
@@ -2071,9 +2633,17 @@ def alias_rewrite(text, make, predicate=lambda s: True, phases=False):
                 if qualified != site.text and not already:
                     declaration = declaration.replace(site.text, qualified if scope == 'schema' else f'{schema}.{qualified}')
         # A helper that a public or package schema's spelling names needs that access too, or the rewrite is no
-        # longer the same program.
+        # longer the same program — unless the aliased type itself is `fileprivate` or `private` (e.g. a `fileprivate`
+        # `routed:` payload inside a public schema).
         access = re.search(r'\b(public|package)\s+(?:\w+\s+)*enum\s+`?' + re.escape(schema) + r'\b', text) if schema else None
-        if access:
+        restricted = set(re.findall(r'\b(?:fileprivate|private)\s+(?:struct|enum|class|protocol|typealias)\s+`?(\w+)`?', text))
+        uses_restricted = any(re.search(r'(?<![\w.`])' + re.escape(name) + r'(?![\w`])', site.text) for name in restricted)
+        if uses_restricted:
+            if scope == 'file':
+                continue
+            declaration = re.sub(r'(^\s*|\{\s*|;\s*)(typealias|enum|struct)\b', lambda m: f'{m.group(1)}fileprivate {m.group(2)}',
+                                 declaration, flags=re.M)
+        elif access:
             declaration = re.sub(r'(^\s*|\{\s*|;\s*)(typealias|enum|struct)\b', lambda m: f'{m.group(1)}{access.group(1)} {m.group(2)}',
                                  declaration, flags=re.M)
         new = text[:site.start] + spelling + text[site.end:]
@@ -2135,7 +2705,7 @@ def _(text, rng):
 
 @rewrite('alias-generic', 'eq', 'A generic alias the schema declares reads with its arguments')
 def _(text, rng):
-    return alias_rewrite(text, lambda t, s: (f'FuzzIdentity<{s.text}>', 'typealias FuzzIdentity<FuzzT: ~Copyable> = FuzzT', 'schema'))
+    return alias_rewrite(text, lambda t, s: (f'FuzzIdentity<{s.text}>', 'typealias FuzzIdentity<FuzzT: ~Copyable> = FuzzT', 'schema'), hoists=False)
 
 
 @rewrite('alias-chain', 'eq', 'An alias chain of any length reads through to the type it names')
@@ -2145,35 +2715,22 @@ def _(text, rng):
 
 @rewrite('alias-nested', 'eq', 'inside the nongeneric types the schema declares')
 def _(text, rng):
-    return alias_rewrite(text, lambda t, s: ('FuzzSpace.Alias', f'enum FuzzSpace {{ typealias Alias = {s.text} }}', 'schema'))
+    def make(t, s):
+        rhs = s.text
+        schema, namespace = enclosing_namespace(t, s.start)
+        # Inside `enum FuzzSpace`, `Self` names `FuzzSpace`, not the enclosing schema. When `s` stands at schema
+        # scope (not inside a nested namespace whose `Self.` `alias_rewrite` qualifies to that namespace), rewrite
+        # root `Self` to the schema's name so the nested alias keeps Swift's original type lookup.
+        if schema and namespace is None:
+            rhs = re.sub(r'(?<![\w.`])Self(?=\s*\.|\s*\)\s*\.)', schema, rhs)
+        alias_name = 'FuzzTarget' if re.search(r'(?<![\w`])Alias(?![\w`])', rhs) else 'Alias'
+        return (f'FuzzSpace.{alias_name}', f'enum FuzzSpace {{ typealias {alias_name} = {rhs} }}', 'schema')
+    return alias_rewrite(text, make)
 
 
 @rewrite('alias-file', 'eq', 'an alias declared outside the schema is invisible to the macro')
 def _(text, rng):
-    mask = code_mask(text)
-    bindings = []
-    for declaration in re.finditer(r'\b(typealias|enum|struct|class|actor)\s+`?\w+`?\s*<', text):
-        if not mask[declaration.start()]:
-            continue
-        parameters_end = scan_type_end(text, declaration.end(), '')
-        parameters = {name.group(1) for parameter in split_top(text[declaration.end():parameters_end])
-                      if (name := re.match(r'\s*(?:(?:let|each)\s+)?`?(\w+)', parameter))}
-        if declaration.group(1) == 'typealias':
-            equals = re.match(r'\s*>\s*=\s*', text[parameters_end:])
-            if equals:
-                start = parameters_end + equals.end()
-                bindings.append((start, scan_type_end(text, start, ';\n'), parameters))
-        else:
-            opening = re.match(r'\s*>[^{};]*\{', text[parameters_end:])
-            if opening:
-                start = parameters_end + opening.end()
-                bindings.append((start, start + len(body_of(text, re.compile(r'\{').match(text, start - 1))), parameters))
-
     def make(t, s):
-        # A file-scope alias cannot refer to the generic parameters bound where the original spelling appears.
-        roots = {root.group(0).strip('`') for root in type_lookup_roots(s.text)}
-        if any(start <= s.start < end and roots & names for start, end, names in bindings):
-            return None
         # A site inside `Input` or an operation's namespace reads that namespace's members first, an extension's
         # among them; at file scope the alias names them through the namespace.
         spelled = s.text
@@ -2343,7 +2900,7 @@ def member_blocks(text):
             continue
         top = line.startswith('    ') and not line.startswith('     ')
         stripped = line.strip()
-        if top and (stripped.startswith((')', '}', ']')) or stripped.startswith('->')):
+        if top and (stripped.startswith((')', '}', ']', 'where ')) or stripped.startswith('->')):
             # A schema nested in another declaration has no member at this indentation.
             if current is not None:
                 current.append(line)
@@ -2448,6 +3005,10 @@ def shared_parameters(text, source):
         if first != source or (source and site_role(site) != 'phase'):
             continue
         before = text[:site.start]
+        if not source and re.search(r'(?<![\w`])`?routed`?\s+`?\w+`?\s*:\s*' + MODIFIERS + r'$', before):
+            # Adding ownership to a `routed:` parameter intentionally marks `Route.<Router>` `~Copyable` (covered by
+            # `routed-convention`), so `shared-param` targets trigger/request payloads.
+            continue
         if re.search(r'(borrowing|consuming|__owned|__shared|sending|@escaping|inout)\s+$', before):
             continue
         new = before + '__shared ' + text[site.start:]
@@ -2794,7 +3355,9 @@ def _(text, rng):
         refusal = (rf"Terminal phase '{re.escape(match.group(1))}' cannot have an outgoing (transition|router) '[^']*'; "
                    r"remove '@Terminal', or remove the (transition|router)\.|"
                    rf"Terminal phase '{re.escape(match.group(1))}' in @PhaseSet '[^']*' cannot have an outgoing transition '[^']*'; "
-                   r"remove '@Terminal', remove '[^']*\.self' from '[^']*', or remove the transition\.")
+                   r"remove '@Terminal', remove '[^']*\.self' from '[^']*', or remove the transition\.|"
+                   rf"Operation '[^']*' cannot be active in terminal phase '{re.escape(match.group(1))}'(, because its scope '[^']*' spans every phase)?; "
+                   r"remove [^ ]+\.self from the phases where it is active, or remove '@Terminal'\.")
         results.append((text[:match.start()] + '    @Initial @Terminal case' + text[match.end():],
                         dict(site='add @Terminal to initial', role='value', refusal=refusal)))
 
@@ -2826,16 +3389,26 @@ def _(text, rng):
 
 def authored_functions_at(text):
     """Each static function an attribute marks: (attribute, name, index of its name, index after its parameters, the
-    text between the parameters and `{`)."""
+    text between the parameters and `{`, plus optional generic clause and `from:`/`routed:` metadata)."""
     found = []
-    for match in re.finditer(r'@(?:StateMachine\.)?(Transition|Route|Restoration)\b[^\n]*\n\s*((?:\w+\s+)*)static func\s+`?(\w+)`?\s*\(', text):
+    pattern = (r'@(?:StateMachine(?:::|\.))?(Transition|Route|Restoration)\b[^\n]*\n'
+               r'(?:\s*@[^\n]*\n)*'
+               r'\s*((?:\w+\s+)*)static func\s+`?(\w+)`?\s*(?:(<[^>]*>)\s*)?\(')
+    for match in re.finditer(pattern, text):
         depth, index = 1, match.end()
         while depth and index < len(text):
             depth += {'(': 1, ')': -1}.get(text[index], 0)
             index += 1
         brace = text.find('{', index)
+        attr_text = text[match.start():match.start(2)]
+        params_text = text[match.end():index - 1]
         found.append(dict(attribute=match.group(1), attribute_at=match.start(), modifiers=match.group(2), name=match.group(3), name_at=match.start(3),
-                          func_at=text.rfind('static func', 0, match.start(3)), after=index, effects=text[index:brace]))
+                          func_at=text.rfind('static func', 0, match.start(3)), after=index, effects=text[index:brace],
+                          generic=match.group(4), generic_at=match.start(4) if match.group(4) else None,
+                          generic_end=match.end(4) if match.group(4) else None,
+                          params_start=match.end(), params_end=index - 1,
+                          has_from=bool(re.search(r'(?<![\w`])`?from`?\s*:', attr_text)),
+                          has_routed=bool(re.search(r'(?:^|,)\s*`?routed`?\s+`?\w+`?\s*:', params_text))))
     return found
 
 
@@ -3128,6 +3701,10 @@ def _(text, rng):
 def _(text, rng):
     results = []
     for function in authored_functions_at(text):
+        # Multi-source `from:` transitions support a single generic `<Source>` parameter (covered by
+        # `generic-source-invalid`); single-source transitions, routers, and restorations remain nongeneric.
+        if function['generic'] or function['has_from']:
+            continue
         at = function['name_at'] + len(function['name'])
         if text[at] == '`':
             at += 1
@@ -3393,7 +3970,7 @@ def _(text, rng):
         marker = text.rfind('\n    @', 0, at)
         if marker < 0:
             continue
-        new = text[:marker + 1] + '    #if true\n    @discardableResult\n    #endif\n' + text[marker + 1:]
+        new = text[:marker + 1] + '    #if true\n    @inline(__always)\n    #endif\n' + text[marker + 1:]
         results.append((new, dict(site=f'#if attribute on {function["name"]}', role='value', expect='conditional-attributes')))
     return results
 
@@ -3651,9 +4228,17 @@ def _(text, rng):
         phase = phase_of_type(text, source.group(1)) if source else None
         # The finding names the source by its payload type or its case.
         names = '|'.join(re.escape(n) for n in ([source.group(1)] if source else []) + ([phase] if phase else []))
-        refusal = (rf"Ambiguous routing from '({names})' for .*; declare exactly one @Route when multiple edges match\."
+        trig = re.search(r'(on|onSuccess|onFailure)\s*:\s*([\w.]+)', head)
+        has_routed_candidate = trig and any(
+            f['attribute'] == 'Transition' and f['has_routed']
+            and re.search(rf'{trig.group(1)}\s*:\s*{re.escape(trig.group(2))}', text[f['attribute_at']:f['func_at']])
+            for f in authored_functions_at(text)
+        )
+        refusal = (rf"(?:Ambiguous routing from '({names})' for .*; declare exactly one @Route when multiple edges match\.|"
+                   rf"Transition '[^']*' takes a routed: parameter, but no @Route selects it from '({names})'(?:; every source phase in from: must be routed, or remove routed:)?\.)"
                    if names else None)
-        results.append((text[:start] + text[end + 1:], dict(site=f'router {name} removed', role='value', refusal=refusal)))
+        token = r'routed' if has_routed_candidate else None
+        results.append((text[:start] + text[end + 1:], dict(site=f'router {name} removed', role='value', refusal=refusal, token=token)))
     return results
 
 
@@ -4505,6 +5090,449 @@ def _(text, rng):
     return results
 
 
+# --- `routed:` and generic `<Source>` multi-source rewrites -----------------------------------------------------------
+
+def find_routed_params(text):
+    """Each authored `routed:` parameter on a `@Transition` with its function metadata and exact spans."""
+    found = []
+    for function in authored_functions_at(text):
+        if function['attribute'] != 'Transition' or not function['has_routed']:
+            continue
+        cursor = function['params_start']
+        params_end = function['params_end']
+        param_index = 0
+        while cursor < params_end:
+            p_end = scan_type_end(text, cursor, ',')
+            if p_end > params_end:
+                p_end = params_end
+            segment = text[cursor:p_end]
+            match = re.match(r'\s*(`?routed`?)\s+(`?\w+`?)\s*:\s*(' + MODIFIERS + r')', segment)
+            if match:
+                type_start = cursor + match.end()
+                type_end = scan_type_end(text, type_start, ',=')
+                if type_end > p_end:
+                    type_end = p_end
+                found.append(dict(
+                    function=function,
+                    param_index=param_index,
+                    param_start=cursor + match.start(1),
+                    param_end=p_end,
+                    label_start=cursor + match.start(1),
+                    label_end=cursor + match.end(1),
+                    name=match.group(2).strip('`'),
+                    modifiers=match.group(3),
+                    modifiers_start=cursor + match.start(3),
+                    type_start=type_start,
+                    type_end=type_end,
+                    type_text=text[type_start:type_end].strip(),
+                ))
+            cursor = p_end + 1
+            param_index += 1
+    return found
+
+
+@rewrite('routed-spelling', 'eq', 'Parentheses, backticks, comments, and schema qualification on `routed:` change nothing')
+def _(text, rng):
+    """Equivalent spellings on a candidate's `routed:` parameter: backticked label, comments, parentheses, and
+    `Self.`/`<Schema>.` qualification for schema-local routed payload types."""
+    results = []
+    local_types = schema_types(text)
+    for item in find_routed_params(text):
+        func_name = item['function']['name']
+        raw_type = text[item['type_start']:item['type_end']]
+        # 1. Backticked `routed` label + comments around label and parenthesized type.
+        wrapped_type = raw_type if raw_type.startswith('(') and raw_type.endswith(')') else f'({raw_type})'
+        replacement = f'/* fuzz */ `routed` {item["name"]}: {item["modifiers"]}/* r */ {wrapped_type}'
+        spelled = text[:item['param_start']] + replacement + text[item['type_end']:]
+        results.append((spelled, dict(site=f'backtick/comment routed on {func_name}', role='value')))
+        # 2. Schema qualification when the routed type is a bare schema-local nominal type.
+        bare = item['type_text'].strip('`')
+        schema = schema_of(text, item['param_start'])
+        if is_simple_name(bare) and bare in local_types and schema and not bare.startswith(('Self.', schema + '.')):
+            for prefix in ('Self.', f'{schema}.'):
+                qualified = text[:item['type_start']] + prefix + raw_type + text[item['type_end']:]
+                results.append((qualified, dict(site=f'{prefix}{bare} routed on {func_name}', role='value')))
+    return results
+
+
+@rewrite('routed-convention', 'valid', 'A candidate may pass its `routed:` payload with borrowing, consuming, or sending')
+def _(text, rng):
+    """Valid ownership/convention variations on a plain Copyable `routed:` parameter (`borrowing`, `consuming`,
+    `__shared`, `__owned`, and `sending` for Sendable types)."""
+    results = []
+    for item in find_routed_params(text):
+        if item['modifiers'].strip():
+            continue
+        type_text = item['type_text']
+        func_name = item['function']['name']
+        conventions = ['borrowing ', 'consuming ', '__shared ', '__owned ']
+        if re.fullmatch(r'(?:Swift::)?(?:Int|String|Bool)', type_text):
+            conventions.append('sending ')
+        for conv in conventions:
+            new = text[:item['modifiers_start']] + conv + text[item['modifiers_start']:]
+            results.append((new, dict(site=f'{conv.strip()} routed {type_text} on {func_name}', role='value')))
+    return results
+
+
+@rewrite('routed-invalid', 'break', 'Only a candidate @Transition selected by a @Route may take a single final non-Never routed: parameter')
+def _(text, rng):
+    """Invalid `routed:` forms with exact macro diagnostics and anchors: unrouted transition, `@Route` taking
+    `routed:`, `routed:` not last (including before `request:`), duplicate `routed:`, confirmed `Never`,
+    `.ownedOnly`, public `@Route` leaking a `fileprivate` routed struct, and partially routed multi-source `from:`."""
+    results = []
+    functions = authored_functions_at(text)
+    routed_items = find_routed_params(text)
+    is_owned_only = bool(re.search(r'@StateMachine\([^)]*mode:\s*\.ownedOnly', text))
+    # 1. `routed:` on `.ownedOnly` transition.
+    if is_owned_only:
+        for fn in functions:
+            if fn['attribute'] == 'Transition' and not fn['has_routed']:
+                sep = ', ' if text[fn['params_start']:fn['params_end']].strip() else ''
+                new = text[:fn['params_end']] + f'{sep}routed fuzzTag: Swift::Int' + text[fn['params_end']:]
+                results.append((new, dict(
+                    site=f'routed: in .ownedOnly on {fn["name"]}', role='value',
+                    refusal=r'routed: requires a @Route, which is unavailable in \.ownedOnly\.',
+                    token=r'routed')))
+                break
+    # 2. `routed:` on an unrouted `@Transition`.
+    if not is_owned_only:
+        routes_on = set()
+        for fn in functions:
+            if fn['attribute'] == 'Route':
+                attr = text[fn['attribute_at']:fn['func_at']]
+                m = re.search(r'(on|onSuccess|onFailure)\s*:\s*([\w.]+)', attr)
+                if m:
+                    routes_on.add((m.group(1), m.group(2)))
+        for fn in functions:
+            if fn['attribute'] != 'Transition' or fn['has_routed'] or fn['has_from']:
+                continue
+            attr = text[fn['attribute_at']:fn['func_at']]
+            m = re.search(r'(on|onSuccess|onFailure)\s*:\s*([\w.]+)', attr)
+            if m and (m.group(1), m.group(2)) in routes_on:
+                continue
+            sep = ', ' if text[fn['params_start']:fn['params_end']].strip() else ''
+            new = text[:fn['params_end']] + f'{sep}routed fuzzExtra: Swift::Int' + text[fn['params_end']:]
+            results.append((new, dict(
+                site=f'routed: on unrouted {fn["name"]}', role='value',
+                refusal=rf"Transition '{re.escape(fn['name'])}' takes a routed: parameter, but no @Route selects it from '[^']*'\.",
+                token=r'routed')))
+            break
+    # 3. `routed:` on a `@Route` function.
+    for fn in functions:
+        if fn['attribute'] == 'Route':
+            sep = ', ' if text[fn['params_start']:fn['params_end']].strip() else ''
+            new = text[:fn['params_end']] + f'{sep}routed fuzzBad: Swift::Int' + text[fn['params_end']:]
+            results.append((new, dict(
+                site=f'routed: on @Route {fn["name"]}', role='value',
+                refusal=r'Only a candidate @Transition selected by a @Route may take a routed: parameter\.',
+                token=r'routed')))
+            break
+    # 4. Mutations of an existing `routed:` candidate: not last (including before `request:`), duplicate, Never,
+    #    public `@Route` exposing `fileprivate` routed type, and partially routed `from:`.
+    did_not_last_payload, did_not_last_request, did_dup, did_never, did_public_leak, did_partial_from = (False,) * 6
+    for item in routed_items:
+        fn = item['function']
+        # 4a. `routed:` before the preceding parameter (both payload + `routed:` and `request:` + `routed:` ordering).
+        if item['param_index'] >= 1:
+            params_text = text[fn['params_start']:fn['params_end']]
+            parts = [p.strip() for p in split_top(params_text)]
+            if len(parts) >= 2 and parts[-1].lstrip().startswith(('routed ', '`routed` ')):
+                prev_label = parts[-2].split(':')[0].strip()
+                is_request = prev_label.strip('`') == 'request'
+                if (is_request and not did_not_last_request) or (not is_request and not did_not_last_payload):
+                    swapped = parts[:-2] + [parts[-1], parts[-2]]
+                    new = text[:fn['params_start']] + ', '.join(swapped) + text[fn['params_end']:]
+                    results.append((new, dict(
+                        site=f'routed: before {prev_label} on {fn["name"]}', role='value',
+                        refusal=r'Take the routed payload last, labeled routed:\.',
+                        token=r'routed')))
+                    if is_request:
+                        did_not_last_request = True
+                    else:
+                        did_not_last_payload = True
+        # 4b. Duplicate `routed:` parameter.
+        if not did_dup:
+            new = text[:fn['params_end']] + ', routed fuzzSecond: Swift::Int' + text[fn['params_end']:]
+            results.append((new, dict(
+                site=f'duplicate routed: on {fn["name"]}', role='value',
+                refusal=r'Take the routed payload once, in the last parameter, labeled routed:\.',
+                token=r'routed')))
+            did_dup = True
+        # 4c. Confirmed `Swift::Never` routed payload via schema alias (strip parameter ownership and replace body so
+        #     the macro anchors directly at `FuzzNever` and Swift emits no unrelated body/ownership errors).
+        if not did_never:
+            never_alias = fresh_identifier(text, 'FuzzNever')
+            brace = text.find('{', fn['after'])
+            body_end = brace + len(body_of(text, re.compile(r'\{').match(text, brace))) + 2 if brace > 0 else fn['after']
+            new = text[:item['modifiers_start']] + never_alias + text[item['type_end']:brace] + '{ fatalError() }' + text[body_end:]
+            new = insert_in_schema(new, f'fileprivate typealias {never_alias} = Swift::Never', item['param_start'])
+            if new:
+                results.append((new, dict(
+                    site=f'routed: {never_alias} (Never) on {fn["name"]}', role='value',
+                    refusal=rf"Transition '{re.escape(fn['name'])}' cannot take a routed: payload of type Never\.",
+                    token=re.escape(never_alias))))
+                did_never = True
+        # 4d. Promoting a `fileprivate @Route` to `public` when a candidate takes a `fileprivate` routed struct in a
+        #     `public` schema.
+        if not did_public_leak:
+            schema = schema_of(text, item['param_start'])
+            bare = item['type_text'].strip('`')
+            if (schema and re.search(r'\bpublic\s+(?:\w+\s+)*enum\s+`?' + re.escape(schema) + r'\b', text)
+                    and re.search(rf'\bfileprivate\s+(?:struct|enum)\s+`?{re.escape(bare)}`?\b', text)):
+                attr = text[fn['attribute_at']:fn['func_at']]
+                trig = re.search(r'(on|onSuccess|onFailure)\s*:\s*([\w.]+)', attr)
+                route_fn = next((r for r in functions if r['attribute'] == 'Route'
+                                 and trig and re.search(rf'{trig.group(1)}\s*:\s*{re.escape(trig.group(2))}', text[r['attribute_at']:r['func_at']])
+                                 and 'fileprivate' in r['modifiers']), None)
+                if route_fn:
+                    mod_start = text.rfind('fileprivate', route_fn['attribute_at'], route_fn['func_at'])
+                    if mod_start >= 0:
+                        new = text[:mod_start] + 'public' + text[mod_start + len('fileprivate'):]
+                        results.append((new, dict(
+                            site=f'public @Route {route_fn["name"]} exposes fileprivate {bare}', role='value',
+                            refusal=rf"Declare '{re.escape(bare)}' public: the public schema '{re.escape(schema)}' generates public members that name it.*",
+                            token=re.escape(bare))))
+                        did_public_leak = True
+        # 4e. Partially routed multi-source `from:` transition with `routed:`: add an unrouted phase to `from:`.
+        if not did_partial_from and fn['has_from']:
+            attr_start, attr_end = fn['attribute_at'], fn['func_at']
+            attr = text[attr_start:attr_end]
+            from_list = re.search(r'(?<![\w`])`?from`?\s*:\s*\[([^\]]+)\]', attr)
+            if from_list:
+                listed = [re.sub(r'\.\s*`?self`?\s*$', '', s).strip().strip('`') for s in split_top(from_list.group(1))]
+                # Find a non-terminal phase in the same schema not in `listed` and not routed for this trigger.
+                schema = schema_of(text, attr_start)
+                body = schema_body(text, schema) if schema else ''
+                direct = direct_member_text(body)
+                term_cases = set(re.findall(r'@Terminal[^\n]*\bcase\s+`?(\w+)`?', direct))
+                candidates = [core_name(p) for name, _, p in direct_case_items(body, direct)
+                              if p is not None and name not in term_cases and core_name(p) not in listed]
+                if candidates:
+                    extra = candidates[0]
+                    abs_close = attr_start + from_list.end(1)
+                    new = text[:abs_close] + f', {extra}.self' + text[abs_close:]
+                    results.append((new, dict(
+                        site=f'partially routed from: +{extra} on {fn["name"]}', role='value',
+                        refusal=rf"Transition '{re.escape(fn['name'])}' takes a routed: parameter, but no @Route selects it from '{re.escape(extra)}'; every source phase in from: must be routed, or remove routed:\.",
+                        token=r'routed')))
+                    did_partial_from = True
+    return results
+
+
+def find_generic_from_functions(text):
+    """Multi-source `@Transition(from: ...)` functions declaring a single generic `<Source...>` type parameter."""
+    found = []
+    for fn in authored_functions_at(text):
+        if fn['attribute'] != 'Transition' or not fn['has_from'] or not fn['generic']:
+            continue
+        inner = fn['generic'][1:-1].strip()
+        parts = split_top(inner)
+        if len(parts) != 1 or parts[0].strip().startswith('each '):
+            continue
+        param_name, sep, constraint = parts[0].partition(':')
+        param_name = param_name.strip().strip('`')
+        constraint = constraint.strip() if sep else ''
+        where_match = re.search(r'\bwhere\s+([^\n{]+)', fn['effects'])
+        found.append(dict(
+            function=fn,
+            param=param_name,
+            constraint=constraint,
+            where_match=where_match,
+        ))
+    return found
+
+
+@rewrite('generic-source-where', 'eq', 'A generic multi-source transition may constrain its source inline or in a where clause, under any parameter name')
+def _(text, rng):
+    """Equivalent rewrites of a generic `<Source>` multi-source transition: moving the constraint between `<Source: P>`
+    and trailing `where Source: P`, and renaming the generic source parameter `<Source>` -> `<FuzzPhaseSource>`."""
+    results = []
+    for item in find_generic_from_functions(text):
+        fn = item['function']
+        param = item['param']
+        constraint = item['constraint']
+        where_match = item['where_match']
+        # 1. Move inline constraint `<Source: P>` to trailing `where Source: P` (only when not `~Copyable`, which Swift
+        #    forbids in trailing `where` clauses).
+        if constraint and not where_match and '~' not in constraint:
+            brace = text.find('{', fn['after'])
+            if brace > 0:
+                new = (text[:fn['generic_at']] + f'<{param}>' + text[fn['generic_end']:brace].rstrip()
+                       + f' where {param}: {constraint} ' + text[brace:])
+                results.append((new, dict(site=f'move {param}: {constraint} to where on {fn["name"]}', role='value')))
+        # 2. Move trailing `where Source: P` inline into `<Source: P>`.
+        if where_match and not constraint:
+            where_clause = where_match.group(1).strip()
+            simple = re.fullmatch(rf'`?{re.escape(param)}`?\s*:\s*(.+)', where_clause)
+            if simple:
+                w_start = fn['after'] + where_match.start()
+                w_end = fn['after'] + where_match.end()
+                before_w = text[fn['generic_end']:w_start].rstrip()
+                after_w = text[w_end:]
+                new = text[:fn['generic_at']] + f'<{param}: {simple.group(1).strip()}>' + before_w + ' ' + after_w.lstrip()
+                results.append((new, dict(site=f'inline where {where_clause} on {fn["name"]}', role='value')))
+        # 3. Rename the generic source parameter `<Source>` -> `<FuzzPhaseSource>` inside the function declaration.
+        fresh = fresh_identifier(text, 'FuzzPhaseSource')
+        start, end = function_block(text, fn)
+        block = text[start:end]
+        renamed_block = re.sub(r'(?<![\w.`])' + re.escape(param) + r'(?![\w`])', fresh, block)
+        if renamed_block != block:
+            results.append((text[:start] + renamed_block + text[end:], dict(site=f'rename <{param}> -> <{fresh}> on {fn["name"]}', role='value')))
+    return results
+
+
+@rewrite('generic-source-invalid', 'break', 'A multi-source transition may declare at most one generic source parameter used only for its source and same-phase destination')
+def _(text, rng):
+    """Invalid generic `<Source>` multi-source forms with exact macro diagnostics and token anchors."""
+    results = []
+    items = find_generic_from_functions(text)
+    if not items:
+        return results
+    did_multi, did_pack, did_first, did_payload, did_throws, did_routed, did_advance, did_ineligible = (False,) * 8
+    for item in items:
+        fn = item['function']
+        param = item['param']
+        brace = text.find('{', fn['after'])
+        body_end = brace + len(body_of(text, re.compile(r'\{').match(text, brace))) + 2 if brace > 0 else fn['after']
+        is_noncopyable = '~' in item['constraint']
+        # 1. Multiple generic parameters `<Source, FuzzExtra>` (use `FuzzExtra` in a parameter so Swift emits no
+        #    `#NoUsage` warning beside the macro refusal).
+        if not did_multi:
+            extra = fresh_identifier(text, 'FuzzExtra')
+            sep = ', ' if text[fn['params_start']:fn['params_end']].strip() else ''
+            new = (text[:fn['generic_end'] - 1] + f', {extra}' + text[fn['generic_end'] - 1:fn['params_end']]
+                   + f'{sep}_ fuzzExtra: {extra}' + text[fn['params_end']:brace] + '{ fatalError() }' + text[body_end:])
+            results.append((new, dict(
+                site=f'two generics <{param}, {extra}> on {fn["name"]}', role='value',
+                refusal=r'A multi-source transition may declare at most one generic type parameter for its source phase\.',
+                token=re.escape(extra))))
+            did_multi = True
+        # 2. Parameter pack `<each Source>` (keep valid Swift pack syntax in the signature and body so only the
+        #    macro refusal fires).
+        if not did_pack:
+            payloads = sorted(phase_payloads(text))
+            ret_type = payloads[0] if payloads else 'Swift::Void'
+            new = text[:fn['generic_at']] + f'<each {param}>(_ source: repeat each {param}) -> {ret_type} {{ fatalError() }}' + text[body_end:]
+            results.append((new, dict(
+                site=f'pack <each {param}> on {fn["name"]}', role='value',
+                refusal=r"A multi-source transition's generic parameter must be a single type parameter for its source phase\.",
+                token=r'each')))
+            did_pack = True
+        # 3. Concrete phase payload in first parameter instead of generic `Source`.
+        if not did_first:
+            payloads = sorted(phase_payloads(text))
+            if payloads:
+                concrete = payloads[0]
+                params_text = text[fn['params_start']:fn['params_end']]
+                first_param = re.search(r'(:\s*' + MODIFIERS + r')' + re.escape(param) + r'(?![\w`])', params_text)
+                if first_param:
+                    abs_start = fn['params_start'] + first_param.end(1)
+                    abs_end = abs_start + len(param)
+                    new = text[:abs_start] + concrete + text[abs_end:brace] + '{ fatalError() }' + text[body_end:]
+                    results.append((new, dict(
+                        site=f'concrete first param {concrete} on generic {fn["name"]}', role='value',
+                        refusal=rf"Use the generic source parameter '{re.escape(param)}' as the first parameter of this multi-source transition\.",
+                        token=re.escape(concrete))))
+                    did_first = True
+        # 4. Trigger payload parameter referencing generic `Source`.
+        if not did_payload and not fn['has_routed']:
+            params_text = text[fn['params_start']:fn['params_end']]
+            parts = split_top(params_text)
+            if len(parts) == 2:
+                second_offset = fn['params_start'] + len(parts[0]) + 1
+                m = re.match(r'\s*(?:`?\w+`?\s+)?`?\w+`?\s*:\s*' + MODIFIERS, parts[1])
+                if m:
+                    t_start = second_offset + m.end()
+                    t_end = fn['params_end']
+                    replacement = f'borrowing {param}' if is_noncopyable else param
+                    new = text[:t_start] + replacement + text[t_end:brace] + '{ fatalError() }' + text[body_end:]
+                    results.append((new, dict(
+                        site=f'payload references {param} on {fn["name"]}', role='value',
+                        refusal=rf"A trigger payload parameter cannot reference the generic source parameter '{re.escape(param)}'\.",
+                        token=r'borrowing' if is_noncopyable else re.escape(param))))
+                    did_payload = True
+        # 5. Thrown failure type referencing generic `Source` (only when `Source` is `Copyable`, since `Error` requires
+        #    `Copyable`; constrain `Source: Swift::Error` so Swift itself accepts `throws(Source)`).
+        if not did_throws and not is_noncopyable and 'throws' not in fn['effects']:
+            arrow = fn['effects'].find('->')
+            if arrow >= 0:
+                at = fn['after'] + arrow
+                if item['constraint']:
+                    head = text[:fn['generic_end'] - 1] + ' & Swift::Error' + text[fn['generic_end'] - 1:at]
+                else:
+                    head = text[:fn['generic_end'] - 1] + ': Swift::Error' + text[fn['generic_end'] - 1:at]
+                new = head + f'throws({param}) ' + text[at:brace] + '{ fatalError() }' + text[body_end:]
+                results.append((new, dict(
+                    site=f'throws({param}) on {fn["name"]}', role='value',
+                    refusal=rf"A thrown failure type cannot reference the generic source parameter '{re.escape(param)}'\.",
+                    token=r'throws')))
+                did_throws = True
+        # 6. `routed:` parameter referencing generic `Source`.
+        if not did_routed and fn['has_routed']:
+            routed_item = next((r for r in find_routed_params(text) if r['function']['func_at'] == fn['func_at']), None)
+            if routed_item:
+                new = text[:routed_item['type_start']] + param + text[routed_item['type_end']:brace] + '{ fatalError() }' + text[body_end:]
+                results.append((new, dict(
+                    site=f'routed: references {param} on {fn["name"]}', role='value',
+                    refusal=rf"A routed: parameter cannot reference the generic source parameter '{re.escape(param)}'\.",
+                    token=re.escape(param))))
+                did_routed = True
+        # 7. `.ownedOnly` `Advance<ConcretePhase, Source, ...>` using concrete phase as before-type.
+        if not did_advance:
+            adv = re.search(rf'\bAdvance<\s*({re.escape(param)})\s*,', fn['effects'])
+            payloads = sorted(phase_payloads(text))
+            if adv and payloads:
+                concrete = payloads[0]
+                abs_start = fn['after'] + adv.start(1)
+                abs_end = fn['after'] + adv.end(1)
+                new = text[:abs_start] + concrete + text[abs_end:brace] + '{ fatalError() }' + text[body_end:]
+                results.append((new, dict(
+                    site=f'Advance<{concrete}, ...> on generic {fn["name"]}', role='value',
+                    refusal=rf"Use the generic source parameter '{re.escape(param)}' as the source type of Advance\.",
+                    token=re.escape(concrete))))
+                did_advance = True
+        # 8. Same-phase `-> Change<Source, ...>` starting an `@Operation` ineligible in one of `from:`'s phases.
+        if not did_ineligible and re.search(rf'\bChange<\s*{re.escape(param)}\s*,', fn['effects']):
+            attr_start, attr_end = fn['attribute_at'], fn['func_at']
+            attr = text[attr_start:attr_end]
+            schema = schema_of(text, attr_start)
+            body = schema_body(text, schema) if schema else ''
+            direct = direct_member_text(body)
+            sets = phase_sets(direct)
+            from_list = re.search(r'(?<![\w`])`?from`?\s*:\s*\[([^\]]+)\]', attr)
+            from_set = re.search(r'(?<![\w`])`?from`?\s*:\s*(' + IDENT_TOKEN + r')\s*\.\s*`?self`?(?![\w`])', attr)
+            phases = ([core_name(re.sub(r'\.\s*`?self`?\s*$', '', s)) for s in split_top(from_list.group(1))] if from_list
+                      else sets.get(from_set.group(1).strip('`'), []) if from_set else [])
+            if len(phases) >= 2 and 'starts:' not in attr:
+                op_name = fresh_identifier(text, 'FuzzLimitedOp')
+                active_first, missing_second = phases[0], phases[1]
+                access = re.search(r'\b(public|package)\s+(?:\w+\s+)*enum\s+`?' + re.escape(schema) + r'\b', text) if schema else None
+                acc = f'{access.group(1)} ' if access else ''
+                op_decl = f'@Operation(activeIn: [{active_first}.self])\n    {acc}enum {op_name} {{}}'
+                # Insert `starts: [FuzzLimitedOp.self]` before `emits:`/`cancels:`/`invalidates:` to preserve
+                # `@Transition` argument order, and replace the body so Swift does not emit an extra `Effect` error.
+                emits_match = re.search(r'\b(?:emits|cancels|invalidates)\s*:', text[attr_start:attr_end])
+                close_paren = text.find(')', attr_start, attr_end)
+                brace = text.find('{', fn['after'])
+                body_end = brace + len(body_of(text, re.compile(r'\{').match(text, brace))) + 2 if brace > 0 else fn['after']
+                if emits_match:
+                    insert_at = attr_start + emits_match.start()
+                    new = text[:insert_at] + f'starts: [{op_name}.self], ' + text[insert_at:brace] + '{ fatalError() }' + text[body_end:]
+                elif close_paren > 0:
+                    new = text[:close_paren] + f', starts: [{op_name}.self]' + text[close_paren:brace] + '{ fatalError() }' + text[body_end:]
+                else:
+                    new = None
+                if new:
+                    new = insert_in_schema(new, op_decl, attr_start)
+                if new:
+                    results.append((new, dict(
+                        site=f'same-phase starts [{op_name}.self] ineligible in {missing_second}', role='value',
+                        refusal=rf"Started operation '{re.escape(op_name)}' and every required scope must be eligible in destination '{re.escape(missing_second)}'\.",
+                        token=rf'{re.escape(op_name)}\.self')))
+                    did_ineligible = True
+    return results
+
+
 REWRITE_BY_NAME = {r.name: r for r in REWRITES}
 
 
@@ -4774,10 +5802,10 @@ def is_authored_static(line, authored, schemas=None):
     funcs = '|'.join(map(re.escape, authored))
     if schemas:
         paths = '|'.join(re.escape(path.replace('`', '')) for path in schemas)
-        return re.match(rf'static Fz\.(?:{paths})\.(?:{funcs})\(', line) is not None
+        return re.match(rf'static Fz\.(?:{paths})\.(?:{funcs})(?:<|\()', line) is not None
     generated = '|'.join(set(OWNER_TYPES.values()) | {'Observed', 'Route', 'Effect', 'Prepared', 'Snapshot', 'Receipt',
                                                       'Completion', 'PendingCompletion', 'Restoration', 'Drivers', 'Command'})
-    return re.match(rf'static Fz\.(?:(?!({generated})\.)[^.(]+\.)+(?:{funcs})\(', line) is not None
+    return re.match(rf'static Fz\.(?:(?!({generated})\.)[^.(]+\.)+(?:{funcs})(?:<|\()', line) is not None
 
 
 def demangled_fingerprint(objects, authored, schemas=None):
@@ -5323,7 +6351,7 @@ def scope_members(text, schema, scope):
 
 def qualify_in(spelling, members, prefix):
     """Spells at schema scope what `spelling` means inside the namespace `prefix` declaring `members`."""
-    spelling = re.sub(r'(?<![\w.`])Self\.', prefix + '.', spelling)
+    spelling = re.sub(r'(?<![\w.`])Self(?=\s*\.|\s*\)\s*\.)', prefix, spelling)
     def replace(match):
         name = match.group(2) or match.group(3)
         if spelling[:match.start()].rstrip().endswith('.') or name not in members:
@@ -6045,6 +7073,14 @@ def anchored_token(case, name, line, column, message, token=None):
     # A qualified token (`Box.Hidden`) stands at its first component.
     if bare in quoted_names(message) or bare.split('.')[0] in quoted_names(message):
         return True
+    # A phase metatype (`Ready.self`) stands for a quoted phase whose payload it names, when the message names that metatype.
+    if bare.endswith('.self') and re.search(r'(?<![\w])' + re.escape(bare) + r'(?![\w])', message):
+        payloads = dict(re.findall(r'\bcase\s+`?(\w+)`?\s*\(\s*(\w+)', case['text']))
+        if bare[:-len('.self')] in {payloads[n] for n in quoted_names(message) if n in payloads}:
+            return True
+    # A `Scope.<case>` reference stands at its case when the message quotes that scope name.
+    if bare.startswith('Scope.') and bare.split('.', 1)[1] in quoted_names(message):
+        return True
     # A refusal of the whole schema stands at its attribute or its name.
     if re.match(SCHEMA_WIDE, message) and (text == '@StateMachine' or bare in schema_names(case['text'])):
         return True
@@ -6148,6 +7184,77 @@ def refusal_matches(pattern, case, variant, exact=False, token=None, consequent=
     return all(allowed(m) for p, m, name, line in located)
 
 
+def outside_never_throws(case, variant, pattern):
+    """Whether every primary diagnostic matching `pattern` stands on a `throws(...)` clause whose thrown type resolves
+    to `Never` through a file-scope alias declared outside the schema, never a literal `Never` or local alias alone."""
+    files, _ = split_case(case['text'])
+    file_aliases, local_aliases = {}, {}
+    for content in files.values():
+        spans = schema_lines(content)
+        for line_no, raw in enumerate(content.split('\n'), 1):
+            in_schema = any(a <= line_no <= b for a, b in spans)
+            if not in_schema:
+                match = re.match(r'\s*(?:(?:public|package|internal|fileprivate|private)\s+)?typealias\s+`?([A-Za-z_]\w*)`?\s*=\s*(.+?)\s*$', raw)
+                if match:
+                    file_aliases[match.group(1)] = strip_comments(match.group(2)).strip()
+            else:
+                nested = re.match(r'\s*(?:(?:public|package|internal|fileprivate|private)\s+)?enum\s+`?([A-Za-z_]\w*)`?\s*\{\s*(?:(?:public|package|internal|fileprivate|private)\s+)?typealias\s+`?([A-Za-z_]\w*)`?\s*=\s*([^}]+)\}', raw)
+                if nested:
+                    local_aliases[f'{nested.group(1)}.{nested.group(2)}'] = strip_comments(nested.group(3)).strip()
+                else:
+                    match = re.match(r'\s*(?:(?:public|package|internal|fileprivate|private)\s+)?typealias\s+`?([A-Za-z_]\w*)`?\s*=\s*(.+?)\s*$', raw)
+                    if match:
+                        local_aliases[match.group(1)] = strip_comments(match.group(2)).strip()
+
+    def unwrap(text):
+        text = strip_comments(text).strip()
+        while text.startswith('(') and text.endswith(')') and scan_type_end(text, 1, '') == len(text) - 1:
+            text = text[1:-1].strip()
+        return text
+
+    def resolves_through_file_alias_to_never(spelling):
+        current = unwrap(spelling).strip('`')
+        seen, used_file = set(), False
+        while current not in seen:
+            seen.add(current)
+            if current in file_aliases:
+                used_file = True
+                target = unwrap(file_aliases[current])
+            elif current in local_aliases:
+                target = unwrap(local_aliases[current])
+            else:
+                return False
+            if re.fullmatch(r'(?:Swift(?:\.|::))?`?Never`?', target):
+                return used_file
+            current = target.strip('`')
+        return False
+
+    primaries = [(m, line, name) for p, m, name, line in variant.get('located', [])
+                 if p == 'macro' and re.fullmatch(pattern, m)]
+    if not primaries:
+        return False
+    for message, line, name in primaries:
+        column = column_of(variant, message, name, line)
+        if column is None or name not in files:
+            return False
+        lines = files[name].split('\n')
+        if not 0 < line <= len(lines):
+            return False
+        source_line = lines[line - 1]
+        char_col = len(source_line.encode('utf-8')[:column - 1].decode('utf-8', errors='ignore')) + 1
+        rest = '\n'.join([source_line[char_col - 1:]] + lines[line:line + 3])
+        throws_match = re.match(r'throws\s*\(', rest)
+        if not throws_match:
+            return False
+        inner_start = throws_match.end()
+        inner_end = scan_type_end(rest, inner_start, '')
+        if inner_end >= len(rest) or rest[inner_end] != ')':
+            return False
+        if not resolves_through_file_alias_to_never(rest[inner_start:inner_end]):
+            return False
+    return True
+
+
 def limit_for(case, observed, detail, role, variant=None):
     """The id of the documented limit a case's observation meets, or None. A macro diagnostic must stand at the
     changed site."""
@@ -6161,6 +7268,8 @@ def limit_for(case, observed, detail, role, variant=None):
             continue
         if observed == 'macro-diagnostic' and isinstance(case, dict) and variant is not None:
             if refusal_matches(entry['pattern'], case, variant, entry.get('exact', False), entry.get('token')):
+                if entry['id'] == 'outside-never-owned' and not outside_never_throws(case, variant, entry['pattern']):
+                    continue
                 return entry['id']
             continue
         # Every line of the difference must be the documented one: each message, or for an interface each signature
@@ -6596,7 +7705,7 @@ def edge_positions(direct, phase_payloads):
     attributes = None
     identifier = IDENT_TOKEN
     tokens = (r'@(?:`?StateMachine`?\s*(?:::|\.)\s*)?`?(?:Transition|Route)`?(?![\w`])(?:\s*\()?'
-              r'|\bfunc\s+(' + identifier + r')\s*\(')
+              r'|\bfunc\s+(' + identifier + r')\s*(?:<[^>]*>\s*)?\(')
     parameter_prefix = re.compile(r'\s*' + identifier + r'(?:\s+' + identifier + r')?\s*:\s*' + MODIFIERS)
     for token in re.finditer(tokens, direct):
         if token.group().startswith('@'):
@@ -8536,6 +9645,153 @@ enum SCHEMA {
     check('initial-default-spelling emits shadowed Schema.Payload() in expression position', 'rewrite composition',
           'fail' if 'default Hold.Idle()' not in default_shadowed else 'pass',
           'pass' if 'default Self.Idle()' in default_shadowed and 'default Hold.Idle()' in default_plain else 'fail')
+    # (23) Planted oracle regressions for typed `routed:` payloads and generic `<Source>` multi-source transitions.
+    generic_authored = 'static Fz.NavFlow.select<A where A: Fz.NavFlow.SelectionCarrying>(A, Swift.Optional<Swift.Int>) -> StateMachine.Change<A, Fz.NavFlow.Effect.Select>'
+    old_non_generic_filter = lambda line: re.match(r'static Fz\.NavFlow\.select\(', line) is not None
+    check('generic authored static function leaked into generated fingerprint', 'fingerprint filter',
+          'fail' if not old_non_generic_filter(generic_authored) else 'pass',
+          'pass' if is_authored_static(generic_authored, ['select'], ['NavFlow']) else 'fail')
+    generic_seed = all_seeds()['own-generic-source']
+    generic_body = schema_body(generic_seed, 'NavFlow')
+    generic_direct = direct_member_text(generic_body)
+    generic_payloads = {name: payload for name, _, payload in direct_case_items(generic_body, generic_direct) if payload is not None}
+    old_edge_pos = {m.group(1) for m in re.finditer(r'\bfunc\s+(\w+)\s*\(', generic_direct)}
+    new_edge_pos = edge_positions(generic_direct, generic_payloads)
+    check('edge_positions misses generic <Source> multi-source transitions', 'declaration order',
+          'fail' if 'select' not in old_edge_pos else 'pass',
+          'pass' if all(f'{p}.select' in new_edge_pos for p in ('browsing', 'confirming', 'presenting', 'sheetConfirming'))
+          and new_edge_pos['browsing.select'] < new_edge_pos['confirming.select'] < new_edge_pos['presenting.select'] < new_edge_pos['sheetConfirming.select'] else 'fail')
+    routed_seed = all_seeds()['own-routed-handoff']
+    routed_sites = type_sites(routed_seed)
+    generic_sites = type_sites(generic_seed)
+    old_tuple_split = [m.group(0) for m in re.finditer(r'(?:^|,)\s*(?:`?\w+`?\s+)?`?\w+`?\s*:\s*', '_ source: Comparing, _ delta: Swift::Int, routed pair: (label: Swift::String, score: Swift::Int)')]
+    check('type_sites splits tuple routed: payload or exposes generic Source as a concrete type site', 'source scanner',
+          'fail' if len(old_tuple_split) != 3 else 'pass',
+          'pass' if any('(label: Swift::String, score: Swift::Int)' in s.text for s in routed_sites)
+          and not any(s.text.strip() == 'Source' for s in generic_sites)
+          and any(s.text.strip() == 'Presenting' and s.kind == 'return' for s in generic_sites) else 'fail')
+    old_generic_fn_muts = [f'generic {f["name"]}' for f in authored_functions_at(generic_seed)]
+    generic_fn_muts = [info['site'] for _, info in REWRITE_BY_NAME['generic-function'].function(generic_seed, random.Random(0))]
+    check('generic-function targets generic from: transitions instead of single-source transitions/routers', 'rewrite coverage',
+          'fail' if any('generic select' in s for s in old_generic_fn_muts) else 'pass',
+          'pass' if any('generic keepBrowsing' in s for s in generic_fn_muts) and not any('generic select' in s for s in generic_fn_muts) else 'fail')
+    routed_nc_seed = all_seeds()['own-routed-noncopyable']
+    generic_owned_seed = all_seeds()['own-generic-source-owned']
+    check('routed: and generic <Source> rewrites fail to reach their target shapes', 'rewrite coverage',
+          'fail' if not reaches(never, routed_seed, 'routed') else 'pass',
+          'pass' if (reaches(REWRITE_BY_NAME['routed-spelling'].function, routed_seed, 'Self.Step routed on advance')
+                     and reaches(REWRITE_BY_NAME['routed-convention'].function, routed_seed, 'borrowing routed')
+                     and reaches(REWRITE_BY_NAME['routed-invalid'].function, routed_seed, 'routed: before request on followUp')
+                     and reaches(REWRITE_BY_NAME['routed-invalid'].function, routed_seed, 'public @Route routeChoice exposes fileprivate Step')
+                     and reaches(REWRITE_BY_NAME['routed-invalid'].function, generic_seed, 'partially routed from:')
+                     and reaches(REWRITE_BY_NAME['routed-invalid'].function, generic_owned_seed, 'routed: in .ownedOnly')
+                     and reaches(REWRITE_BY_NAME['generic-source-where'].function, generic_seed, 'move Source: NavSelectionCarrying to where')
+                     and reaches(REWRITE_BY_NAME['generic-source-where'].function, generic_seed, 'inline where Source: NavSelectionCarrying')
+                     and reaches(REWRITE_BY_NAME['generic-source-invalid'].function, generic_seed, 'two generics <Source,')
+                     and reaches(REWRITE_BY_NAME['generic-source-invalid'].function, generic_seed, 'pack <each Source>')
+                     and reaches(REWRITE_BY_NAME['generic-source-invalid'].function, generic_seed, 'routed: references Source')
+                     and reaches(REWRITE_BY_NAME['generic-source-invalid'].function, generic_seed, 'same-phase starts [FuzzLimitedOp.self]')
+                     and reaches(REWRITE_BY_NAME['generic-source-invalid'].function, generic_owned_seed, 'Advance<'))
+          else 'fail')
+    SEED_TEXTS['selftest-routed-anchor'] = routed_seed
+    routed_dup_text, routed_dup_info = next((t, i) for t, i in REWRITE_BY_NAME['routed-invalid'].function(routed_seed, random.Random(0)) if 'duplicate routed:' in i['site'])
+    rd_line = next(i for i, l in enumerate(routed_dup_text.splitlines(), 1) if 'routed fuzzSecond' in l)
+    rd_src = routed_dup_text.splitlines()[rd_line - 1]
+    rd_msg = 'Take the routed payload once, in the last parameter, labeled routed:.'
+    rd_case = self_case(routed_dup_text, seed='selftest-routed-anchor', rewrites=['routed-invalid'], kinds=['break'],
+                        refusal=routed_dup_info['refusal'], token=routed_dup_info['token'])
+    rd_outcome = lambda col: dict(
+        status='macro-diagnostic', errors=[('macro', rd_msg)],
+        located=[('macro', rd_msg, 'Case.swift', rd_line)],
+        columns=[((rd_msg, 'Case.swift', rd_line), col)])
+    check('routed: refusal anchored off the routed token', 'refusal token',
+          judge(rd_case, base, None, rd_outcome(rd_src.index('fileprivate') + 1 if 'fileprivate' in rd_src else 1))[0],
+          judge(rd_case, base, None, rd_outcome(rd_src.index('routed fuzzSecond') + 1))[0])
+    del SEED_TEXTS['selftest-routed-anchor']
+    # (24) Planted composition regressions for `alias-nested` after `self-qualify` and `schema-qualify` in shadowed `Input`.
+    desk_self_saved = all_seeds()['own-report-local'].replace('_ saved: Saved', '_ saved: Self.Saved')
+    desk_nested_bad = insert_in_schema(desk_self_saved.replace('_ saved: Self.Saved', '_ saved: FuzzSpace.Alias'),
+                                       'enum FuzzSpace { typealias Alias = Self.Saved }')
+    desk_nested_fixed = mutation('alias-nested', desk_self_saved, 'param:Self.Saved')
+    check('alias-nested leaves schema Self. unqualified inside enum FuzzSpace', 'rewrite composition',
+          'fail' if compiled(desk_nested_bad, 'alias-nested-self-bad').get('status') != 'ok' else 'pass',
+          'pass' if desk_nested_fixed and 'typealias Alias = Desk.Saved' in desk_nested_fixed
+          and compiled(desk_nested_fixed, 'alias-nested-self-ok').get('status') == 'ok' else 'fail')
+    tray_seed = all_seeds()['own-input-shadow']
+    tray_bad = tray_seed.replace('case put(Box)', 'case put(Tray.Box)')
+    tray_fixed = mutation('schema-qualify', tray_seed, 'case:Box')
+    check('schema-qualify points shadowed Input.Box to outer schema Tray.Box', 'rewrite composition',
+          'fail' if compiled(tray_bad, 'schema-qualify-shadow-bad').get('status') != 'ok' else 'pass',
+          'pass' if tray_fixed and 'case put(Tray.Input.Box)' in tray_fixed and 'case put(Tray.Box)' not in tray_fixed
+          and compiled(tray_fixed, 'schema-qualify-shadow-ok').get('status') == 'ok' else 'fail')
+    rejecting_seed = schema_only(all_seeds()['own-rejecting-routers'])
+    SEED_TEXTS['selftest-conditional-never'] = rejecting_seed
+    cond_never_fixed = mutation('conditional-attribute', rejecting_seed, '#if attribute on deny')
+    cond_never_bad = cond_never_fixed.replace('@inline(__always)', '@discardableResult') if cond_never_fixed else ''
+    cond_verdict = lambda src, tag: judge(
+        self_case(src, seed='selftest-conditional-never', rewrites=['conditional-attribute'], kinds=['safe'], expect='conditional-attributes'),
+        base, None, compiled(src, tag))[0]
+    check('conditional-attribute places @discardableResult on a Never-returning rejecting router', 'rewrite composition',
+          cond_verdict(cond_never_bad, 'cond-attr-never-bad'),
+          cond_verdict(cond_never_fixed, 'cond-attr-never-ok'))
+    del SEED_TEXTS['selftest-conditional-never']
+    gauge_seed = schema_only(all_seeds()['doc-Gauge'])
+    SEED_TEXTS['selftest-terminal-op'] = gauge_seed
+    gauge_term_text, gauge_term_info = next(
+        (t, i) for t, i in REWRITE_BY_NAME['terminal-flip'].function(gauge_seed, random.Random(0))
+        if i['site'] == 'add @Terminal to initial')
+    gauge_term_case = self_case(gauge_term_text, seed='selftest-terminal-op', rewrites=['terminal-flip'], kinds=['break'],
+                                refusal=gauge_term_info['refusal'])
+    gauge_op_line = next(i for i, l in enumerate(gauge_term_text.splitlines(), 1) if '@Operation(activeIn: [Ready.self])' in l)
+    gauge_op_msg = "Operation 'Measure' cannot be active in terminal phase 'ready'; remove Ready.self from the phases where it is active, or remove '@Terminal'."
+    gauge_op_off = dict(status='macro-diagnostic', errors=[('macro', gauge_op_msg)],
+                        located=[('macro', gauge_op_msg, 'Case.swift', gauge_op_line + 1)],
+                        columns=[((gauge_op_msg, 'Case.swift', gauge_op_line + 1), 5)])
+    check('terminal-flip active-operation refusal anchored off Ready.self', 'refusal token',
+          judge(gauge_term_case, base, None, gauge_op_off)[0],
+          judge(gauge_term_case, base, None, compiled(gauge_term_text, 'terminal-op-ok'))[0])
+    del SEED_TEXTS['selftest-terminal-op']
+    owned_ps_seed = all_seeds()['own-phase-set-owned']
+    SEED_TEXTS['selftest-outside-never-owned'] = owned_ps_seed
+    owned_never = mutation('throws-never', owned_ps_seed, 'throws(Never) on Transition close')
+    owned_outside = mutation('alias-file', owned_never, 'throws:Never') if owned_never else ''
+    owned_outside_case = self_case(owned_outside, seed='selftest-outside-never-owned',
+                                   rewrites=['throws-never', 'alias-file'], kinds=['eq', 'eq'])
+    owned_close_line = next(i for i, l in enumerate(owned_outside.splitlines(), 1) if 'throws(FuzzOutside)' in l)
+    owned_close_msg = 'Owned-only transitions cannot throw; return Advance<Source, Destination, Effect, Failure> to give the source back.'
+    owned_close_off = dict(status='macro-diagnostic', errors=[('macro', owned_close_msg)],
+                           located=[('macro', owned_close_msg, 'Case.swift', owned_close_line)],
+                           columns=[((owned_close_msg, 'Case.swift', owned_close_line), 5)])
+    owned_outside_compiled = compiled(owned_outside, 'outside-never-owned-ok')
+    check('outside-never-owned anchored off throws token', 'documented limits',
+          judge(owned_outside_case, base, None, owned_close_off)[0],
+          'pass' if judge(owned_outside_case, base, None, owned_outside_compiled)[0] == 'limit:outside-never-owned' else 'fail')
+    owned_gen_seed = all_seeds()['own-generic-source-owned']
+    SEED_TEXTS['selftest-outside-never-unrelated'] = owned_gen_seed
+    owned_gen_never = mutation('throws-never', owned_gen_seed, 'throws(Never) on Transition close')
+    owned_unrelated_alias = mutation('alias-file', owned_gen_never, 'param:Swift::String') if owned_gen_never else ''
+    owned_unrelated_line = next(i for i, l in enumerate(owned_unrelated_alias.splitlines(), 1) if 'throws(Never)' in l)
+    owned_unrelated_col = owned_unrelated_alias.splitlines()[owned_unrelated_line - 1].index('throws(Never)') + 1
+    owned_unrelated_case = self_case(owned_unrelated_alias, seed='selftest-outside-never-unrelated',
+                                     rewrites=['throws-never', 'alias-file'], kinds=['eq', 'eq'])
+    owned_unrelated_mistaken = dict(status='macro-diagnostic', errors=[('macro', owned_close_msg)],
+                                    located=[('macro', owned_close_msg, 'Case.swift', owned_unrelated_line)],
+                                    columns=[((owned_close_msg, 'Case.swift', owned_unrelated_line), owned_unrelated_col)])
+    check('outside-never-owned excuses literal throws(Never) beside an unrelated alias-file', 'documented limits',
+          judge(owned_unrelated_case, base, None, owned_unrelated_mistaken)[0],
+          'pass' if judge(owned_outside_case, base, None, owned_outside_compiled)[0] == 'limit:outside-never-owned' else 'fail')
+    del SEED_TEXTS['selftest-outside-never-owned']
+    del SEED_TEXTS['selftest-outside-never-unrelated']
+    feed_generic = mutation('alias-generic', all_seeds()['doc-Feed'], 'alias:[String]')
+    feed_chain_bad = insert_in_schema(feed_generic.replace('typealias FuzzIdentity<FuzzT: ~Copyable> = FuzzT',
+                                                           'typealias FuzzIdentity<FuzzT: ~Copyable> = FuzzChain0'),
+                                      'typealias FuzzChain0 = FuzzChain1\n    typealias FuzzChain1 = FuzzChain2\n    typealias FuzzChain2 = FuzzT')
+    feed_chain_variants = REWRITE_BY_NAME['alias-chain'].function(feed_generic, random.Random(0))
+    feed_chain_clean = next((t for t, i in feed_chain_variants if i['site'] == 'alias:String'), None)
+    check('alias-chain hoists generic parameter FuzzT out of FuzzIdentity', 'rewrite composition',
+          'fail' if compiled(feed_chain_bad, 'alias-chain-generic-bad').get('status') != 'ok' else 'pass',
+          'pass' if not any('= FuzzT' in t and 'FuzzChain2 = FuzzT' in t for t, _ in feed_chain_variants)
+          and feed_chain_clean and compiled(feed_chain_clean, 'alias-chain-generic-ok').get('status') == 'ok' else 'fail')
     OPERATORS.clear()
     OPERATORS['paren']['applicable'] = 3
     silent = operator_problems([REWRITE_BY_NAME['paren']])
@@ -8666,6 +9922,10 @@ SMOKE_EVERY_SITE = {
     'own-deprecated-message-edge': r'^(permute-availability|qualify-renamed)$',
     'own-phase-set': r'^(phase-set-extract|phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists|reorder-members|module-attribute|attribute-trivia|terminal-flip)$',
     'own-phase-set-owned': r'^(phase-set-extract|phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists|reorder-members)$',
+    'own-routed-handoff': r'^(routed-spelling|routed-convention|routed-invalid|reorder-members|router-delete|router-duplicate|generic-function|paren|backtick-declaration|nest-schema|schema-to-file)$',
+    'own-routed-noncopyable': r'^(routed-spelling|routed-convention|routed-invalid|reorder-members|router-delete|router-duplicate|paren)$',
+    'own-generic-source': r'^(generic-source-where|generic-source-invalid|routed-spelling|routed-invalid|phase-set-extract|phase-set-inline|phase-set-move|reorder-members|reorder-lists|generic-function|permute-availability|nest-schema)$',
+    'own-generic-source-owned': r'^(generic-source-where|generic-source-invalid|routed-invalid|phase-set-extract|phase-set-inline|phase-set-move|reorder-members|reorder-lists|paren)$',
     'doc-Document': r'^(phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists)$',
     'doc-Editor': r'^phase-set-extract$',
 }
@@ -8680,12 +9940,14 @@ SMOKE_SEEDS = {
     'schema-named-value': r'^(own-event-isolated|own-alias-leaf|own-report-local|doc-Approval)$',
     'schema-named-type': r'^(own-event-isolated|own-alias-leaf)$',
     'rebind-alias': r'^(own-event-shadow|own-input-shadow|own-cross-file-input|fx-GMT-alias-router-failure)$',
-    'schema-to-file': r'^(own-alias-leaf|own-report-local|own-same-basename|doc-Approval)$',
+    'schema-to-file': r'^(own-alias-leaf|own-report-local|own-same-basename|doc-Approval|own-routed-handoff)$',
     'comment-decoy': r'^(own-report-local|doc-Approval)$',
     'nfc-body': r'^(own-report-local|own-rejecting-routers)$',
     'nfc-read': r'^(own-report-local|own-rejecting-routers)$',
     'parameter-restriction': r'^(own-report-local|own-keyed-scoped-restoration|doc-Approval)$',
     'duplicate-marker': r'^(own-report-local|own-keyed-scoped-restoration|doc-Approval)$',
+    'routed-invalid': r'^own-(routed-handoff|routed-noncopyable|generic-source|generic-source-owned)$',
+    'generic-source-invalid': r'^own-(generic-source|generic-source-owned)$',
 }
 
 
@@ -8698,6 +9960,8 @@ SMOKE_ONLY = {
     'own-parallel-32-isolated': r'^(integer-spelling|paren)$',
     'own-parallel-33-isolated': r'^(integer-spelling|paren)$',
     'own-phase-set-owned': r'^(phase-set-extract|phase-set-inline|phase-set-move|phase-set-spelling|phase-set-decl-invalid|phase-set-use-invalid|reorder-lists|reorder-members|module-attribute|attribute-trivia|paren|backtick-declaration|nest-schema)$',
+    'own-routed-noncopyable': r'^(routed-spelling|routed-convention|routed-invalid|reorder-members|router-delete|router-duplicate|paren|backtick-declaration|nest-schema)$',
+    'own-generic-source-owned': r'^(generic-source-where|generic-source-invalid|routed-invalid|phase-set-extract|phase-set-inline|phase-set-move|reorder-members|reorder-lists|paren|backtick-declaration|nest-schema)$',
 }
 
 # What each rewrite did in the last `smoke_cases`: sites it found, cases it made, and any error it raised.

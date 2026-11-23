@@ -98,7 +98,10 @@ extension Schema {
             operations: [Operation],
             events: [Event],
             transitions: [Transition],
-            routes: [Route]
+            routes: [Route],
+            effectiveAccess: Access,
+            mode: Mode,
+            typeIdentity: (String) -> TypeIdentity
         ) {
             for (index, phase) in phases.enumerated() where phaseIndices[phase.caseName] == nil {
                 phaseIndices[phase.caseName] = index
@@ -130,11 +133,37 @@ extension Schema {
             for (index, edge) in transitions.enumerated() where edges[edge.from]?[edge.name] == nil {
                 edges[edge.from, default: [:]][edge.name] = index
             }
-            var lists: [String: [Set<String>]] = [:]
+            struct ChoiceCase: Hashable {
+                let name: String
+                let routed: TypeIdentity?
+            }
+            enum ChoiceSignature: Hashable {
+                case plain(Set<String>)
+                case routed(cases: Set<ChoiceCase>, access: Access, noncopyable: Bool)
+            }
+            var lists: [String: [ChoiceSignature]] = [:]
             for route in routes where route.namespace != nil {
                 choosing.append(route)
-                candidates[route.declaration] = route.choices.compactMap { edges[route.from]?[$0] }
-                lists[route.name, default: []].append(Set(route.choices))
+                let branchIndices = route.choices.compactMap { edges[route.from]?[$0] }
+                candidates[route.declaration] = branchIndices
+                let branchEdges = branchIndices.map { transitions[$0] }
+                let hasRouted = branchEdges.contains(where: \.takesRouted)
+                let signature: ChoiceSignature
+                if hasRouted {
+                    let cases = Set(
+                        branchEdges.map { ChoiceCase(name: $0.name, routed: $0.routedType.map(typeIdentity)) }
+                    )
+                    let choiceAccess = min(effectiveAccess, max(.fileprivate, route.access))
+                    let noncopyable =
+                        mode == .ownedOnly
+                        || branchEdges.contains {
+                            $0.takesRouted && !$0.routedOwnership.isEmpty && !$0.routedConvention.contains("@escaping ")
+                        }
+                    signature = .routed(cases: cases, access: choiceAccess, noncopyable: noncopyable)
+                } else {
+                    signature = .plain(Set(route.choices))
+                }
+                lists[route.name, default: []].append(signature)
                 byPhase[route.from, default: []].append(route)
                 if byTrigger[route.from]?[route.trigger] == nil {
                     byTrigger[route.from, default: [:]][route.trigger] = route
@@ -152,6 +181,9 @@ extension Schema {
         var tables: Tables?
     }
 
+    /// The schema's effective emitted access (`private` promoted to `fileprivate`).
+    var effectiveAccess: Access { access == .private ? .fileprivate : access }
+
     /// The tables of the schema's phases, operations, events, and current transitions and routes.
     var tables: Tables {
         if let tables = tablesMemo.tables { return tables }
@@ -165,10 +197,34 @@ extension Schema {
             operations: operations,
             events: events,
             transitions: transitions,
-            routes: routes
+            routes: routes,
+            effectiveAccess: effectiveAccess,
+            mode: mode,
+            typeIdentity: typeIdentity
         )
         tablesMemo.tables = tables
         return tables
+    }
+
+    /// Whether any candidate edge of `route` takes a `routed:` payload.
+    func hasRoutedPayload(_ route: Route) -> Bool {
+        branches(route).contains(where: \.takesRouted)
+    }
+
+    /// The effective access of the choice enum generated for `route`.
+    func choiceAccess(_ route: Route) -> Access {
+        guard hasRoutedPayload(route) else { return effectiveAccess }
+        return min(effectiveAccess, max(.fileprivate, route.access))
+    }
+
+    /// Whether the choice enum generated for `route` is noncopyable and switched with `consume`.
+    func choiceIsNoncopyable(_ route: Route) -> Bool {
+        guard hasRoutedPayload(route) else { return false }
+        return mode == .ownedOnly
+            || branches(route)
+                .contains {
+                    $0.takesRouted && !$0.routedOwnership.isEmpty && !$0.routedConvention.contains("@escaping ")
+                }
     }
 
     /// The routers that have edges to choose, and so a choice type.
@@ -741,6 +797,9 @@ extension Schema {
                 names.insert("_stateMachineDeprecated\(edge.declaration)")
             }
         }
+        for edge in transitions where edge.isGenericSource {
+            names.insert("_stateMachineGeneric\(edge.declaration)")
+        }
         if generatesObservingOwner && !operations.isEmpty {
             names.formUnion([
                 "Completion", "PendingStatus", "PendingCompletionID", "PendingCompletion", "ReconcileResult",
@@ -793,10 +852,21 @@ extension Schema {
 
     // MARK: Spelling
 
-    /// The identity of a failure type, using a confirmed reading when available or the spelling otherwise.
+    /// The identity of a failure or routed type, using a confirmed reading when available or the spelling otherwise.
     enum FailureIdentity: Hashable {
         case reading(TypeKey)
         case spelled(String)
+    }
+
+    typealias TypeIdentity = FailureIdentity
+
+    /// The normalized identity of an authored type spelling, matching every spelling the schema resolves alike.
+    func typeIdentity(_ spelling: String) -> TypeIdentity {
+        let authored = spellingAliasTargets[spelling] ?? spelling
+        let type = spellings.type(authored)
+        let reading = typeScopes.resolve(type)
+        return reading.isConfirmed
+            ? .reading(reading.key) : .spelled(Schema.relativeKey(type, schema: name))
     }
 
     /// The identity of a type an authored function throws, matching every spelling the schema resolves
@@ -809,11 +879,7 @@ extension Schema {
     /// common failure explicitly.
     func failureKey(_ spelling: String) -> FailureIdentity {
         workCounter.work.failuresRead += 1
-        let authored = spellingAliasTargets[spelling] ?? spelling
-        let type = spellings.type(authored)
-        let reading = typeScopes.resolve(type)
-        return reading.isConfirmed
-            ? .reading(reading.key) : .spelled(Schema.relativeKey(type, schema: name))
+        return typeIdentity(spelling)
     }
 
     // MARK: Shielded spellings
@@ -859,6 +925,7 @@ extension Schema {
         for edge in transitions {
             consider(edge.payloadType)
             consider(edge.failureType)
+            consider(edge.routedType)
         }
         for route in routes {
             consider(route.payloadType)
@@ -880,6 +947,7 @@ extension Schema {
             var edge = edge
             edge.payloadType = shield(edge.payloadType)
             edge.failureType = shield(edge.failureType)
+            edge.routedType = shield(edge.routedType)
             return edge
         }
         schema.routes = routes.map { route in

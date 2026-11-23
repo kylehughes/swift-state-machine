@@ -127,7 +127,11 @@ func makeOwners(drivers: Lookup.Drivers) -> (Lookup.Shared, Lookup.ActorHost) {
 ```
 
 After the drivers, a schema with events takes one required handler per event,
-labeled `on` followed by the event's name. `configuration:` bounds the owner's
+labeled `on` followed by the event's name. Event handlers run post-commit
+during batch draining and are not guaranteed to have returned when `send(_:)`
+or `commit(_:)` returns. See
+[When event handlers run](<doc:DeclaringAGraph#When-event-handlers-run>) for
+each owner's timing. `configuration:` bounds the owner's
 capacity with a `Configuration`, the schema's name for
 ``ManagedConfiguration``. Its defaults allow 256 queued batches, 64 effects per
 plan, 256 execution reservations, and 128 subscribers, and its initializer
@@ -153,7 +157,11 @@ exactly one attempt and is the only owner where a concurrent write can cause
 `.commit(.conflict)`. The other managed owners read, prepare, and admit in one
 isolated turn.
 
-The receipt carries the accepted `revision` and the complete `Snapshot`. A
+The receipt carries the accepted `revision`, the taken `edgeID` (or `nil` for a
+reset, closure, or discard), and the complete `Snapshot`. Inspect the returned
+`Receipt` when caller code needs synchronous post-commit work in the same turn,
+before managed `@Event` handlers drain. On `Shared`, the receipt captures that
+exact commit even if another writer advances `snapshot()` next. A
 snapshot has one case per phase, holding an `Observed<Phase>` whose `value` is
 the payload. A `Snapshot` and a `Receipt` print the phase, the revision, and
 `closed` when they record closure, as in `searching, revision 1`. An `Observed`
@@ -239,6 +247,30 @@ func saveNote() throws {
 A SwiftUI view reads a `MainActorHost` directly on systems with Observation,
 and through `StateMachinePresentation` or `StateMachineObservableObject` from
 the `StateMachineUI` module otherwise.
+
+### SwiftUI `#Preview` macros in the same module
+
+In Swift 6.4, the compiler does not expose declarations synthesized by a
+same-module attached macro inside the body of a freestanding declaration macro
+such as `#Preview`. Writing `MyMachine.MainActorHost()` directly inside a
+`#Preview` block in the same module as `MyMachine` fails to compile with
+`type 'MyMachine' has no member 'MainActorHost'` across `swiftc`, SwiftPM, and
+Xcode builds, even though `MyMachine.MainActorHost` compiles everywhere outside
+`#Preview` (including stored properties, `@State` initializers, and view
+helpers).
+
+Use one of these patterns when previewing a view backed by a `MainActorHost`:
+
+- Construct the host in a plain `@MainActor` helper outside `#Preview`, such as
+  a static factory in an `extension MyMachine`
+  (`@MainActor static func makeMainActorHost() -> MainActorHost { MainActorHost() }`)
+  or a static helper on the previewed view, and call that helper from `#Preview`.
+- Declare the `@StateMachine` schema in a separate module and import it.
+  `#Preview` resolves `MyMachine.MainActorHost()` directly for imported schemas.
+- Inside a same-module `#Preview` body, call `MainActorStateMachineHost`
+  requirements (`snapshot()`, `send(_:)`, `close()`) or move setup into the
+  helper, because non-protocol macro-generated members such as `currentSnapshot`
+  hit the same compiler restriction.
 
 ## Share an owner across isolation domains
 
@@ -574,10 +606,13 @@ resets are `async`, and `Local`'s resets are `mutating`.
 ## Close and shut down
 
 `close()` ends admission and returns a receipt of the closed snapshot, while
-keeping read access to the final state. `flush(through:)` waits until the owner
-has processed every batch through a receipt, including the cancellation and
-launch decisions of a graph with operations. It returns ``FlushResult/processed``,
-or ``FlushResult/foreignOwner`` for a receipt another owner issued.
+keeping read access to the final state. `flush(through:)` is available on all
+four managed owners—including event-only graphs without operations—and waits
+until the owner has processed every accepted batch through `receipt.revision`,
+including cancellations, every emitted `@Event` handler returning, and operation
+start registrations (and, on `Shared`, offering snapshots to existing
+subscribers). It returns ``FlushResult/processed``, or
+``FlushResult/foreignOwner`` for a receipt another owner issued.
 
 `shutdown()` closes the owner and waits for its tasks to terminate and its
 delivery and preparation obligations to settle, then returns `.quiescent`. Pass a

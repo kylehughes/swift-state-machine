@@ -173,12 +173,17 @@ a source parameter. When several edges share the same source phases, name the
 list once with
 [`@PhaseSet`](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/phaseset(_:))
 on an empty nested enum and pass `from: <Set>.self`; omitted phases stay
-unavailable until listed. Omitted `Input` or `Output` aliases default to `Void`,
-and omitting `Failure` marks the operation infallible so its driver returns
-`Output` directly instead of `Result<Output, Failure>`. Read the
+unavailable until listed. Multi-source `from:` transitions also accept a single
+generic `<Source>` parameter when edges read shared protocol fields or return
+`Source` for a same-phase update that retains phase-specific data, and a
+candidate `@Transition` selected by `@Route` can declare a final `routed:`
+parameter to receive a typed computed value from the router without
+recomputation or fallback branches. Omitted `Input` or `Output` aliases default
+to `Void`, and omitting `Failure` marks the operation infallible so its driver
+returns `Output` directly instead of `Result<Output, Failure>`. Read the
 [declaring guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/declaringagraph)
-for `@Terminal`, `@PhaseSet`, failure edges, routers (`@Route`), named scopes,
-and the full macro grammar.
+for `@Terminal`, `@PhaseSet`, generic `from:`, routed handoffs (`routed:`),
+failure edges, named scopes, reserved names, and the full macro grammar.
 
 ## Choose an owner
 
@@ -286,7 +291,11 @@ boundaries, and side-effect announcements.
 - **Events.** An `@Event` enum with an optional `Payload` alias models an inert
   announcement listed in an edge's `emits:`. Events have no driver, result, or
   authority. Managed hosts take a required `on<Event>:` handler and call it once
-  per emission in commit order, after the commit and outside every lock.
+  per emission in commit order during post-commit batch draining, outside every
+  lock (never guaranteed before `send` returns). Inspect the returned `Receipt`
+  for synchronous post-commit work (on `Shared`, the receipt captures that exact
+  commit even if another writer advances `snapshot()` next), or
+  `await flush(through: receipt)` to wait for event handlers to return.
 
 ### Completion policy
 
@@ -435,17 +444,22 @@ struct LookupView: View {
 ```
 
 Creating the host starts no work. Sending `.search` updates `currentSnapshot`
-before `send` returns, then runs the driver and moves the view to `found`.
+before `send` returns, then runs the driver and moves the view to `found`. For
+SwiftUI `#Preview` blocks in the same module as a schema on Swift 6.4, construct
+`MainActorHost` in a `@MainActor` factory helper outside `#Preview` or import
+the schema from a separate module. See the
+[hosting guide](https://kylehughes.github.io/swift-state-machine/documentation/statemachine/hostingagraph#SwiftUI-Preview-macros-in-the-same-module).
 
 Choose among the other observation APIs based on platform target and isolation.
 
 - **Sequences and callbacks.** `snapshots()`, `snapshots(_:)`,
   `distinctSnapshots(_:)`, and `subscribe(_:onFinish:)` each claim one
   subscriber slot when called and release it when ended or cancelled with
-  `cancel()`. In an `.isolated` schema, `snapshots()` returns a noncopyable
-  actor-confined stream read with `next()`, while `snapshots(_:)` projects
-  `Sendable` values into a `SnapshotSequence` for `for await` and sequence
-  operators.
+  `cancel()`. `SnapshotSequence.wait(...)` awaits a condition with an optional
+  deadline and frees its subscriber slot on every exit path. In an `.isolated`
+  schema, `snapshots()` returns a noncopyable actor-confined stream read with
+  `next()`, while `snapshots(_:)` projects `Sendable` values into a
+  `SnapshotSequence` for `for await` and sequence operators.
 - **Combine.** `snapshotPublisher()` and `snapshotPublisher(_:)` deliver
   `Sendable` values on the main actor, claim one subscriber slot on creation,
   and accept one subscriber. `IsolatedHost` omits publishers because Combine

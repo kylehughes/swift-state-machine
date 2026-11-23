@@ -1327,5 +1327,105 @@
     "id": "GMT-phase-set-owned-direct",
     "pattern": "no exact matches in call to instance method 'discard'|requires the types|no member 'discard'",
     "scope": "a direct ~Copyable .ownedOnly edge using @PhaseSet generates consuming methods only on listed phases and omits unlisted reachable phases"
+  },
+  {
+    "id": "GCT-cross-file-preview",
+    "libraryModule": "CrossFilePreviewLibrary",
+    "librarySource": "ClientFixtures/GCT-cross-file-preview/library.swift",
+    "additionalSources": [
+      "ClientFixtures/GCT-cross-file-preview/machine.swift"
+    ],
+    "executablePositive": true,
+    "expectedOutput": "CROSS-FILE-PREVIEW-OK",
+    "probeSource": "ClientFixtures/GCT-cross-file-preview/probe.swift",
+    "knownCompilerDiagnostic": "type 'LocalPreviewMachine' has no member 'MainActorHost'",
+    "scope": "two-file SwiftUI #Preview regression distinguishing same-module cross-file static-factory/view-helper controls and separate-module inline MainActorHost() (both compiled and executed) from the Swift 6.4 freestanding-declaration-macro probe (accepting either the exact known diagnostic or a clean compile on a fixed compiler)"
+  },
+  {
+    "id": "GCT-routed-interface",
+    "libraryModule": "RoutedHandoffFixtureLibrary",
+    "librarySource": "ClientFixtures/GCT-routed-interface/library.swift",
+    "forbiddenInterfaceTokens": [
+      "SecretStep",
+      "SecretHandle",
+      "enum RouteChoice ",
+      "typealias RouteChoice ",
+      "enum RouteReadyStep ",
+      "typealias RouteReadyStep ",
+      "enum RouteOpen ",
+      "typealias RouteOpen "
+    ],
+    "pattern": "inaccessible|not a member type|no member",
+    "scope": "public routed schemas with fileprivate @Route and fileprivate routed: types (non-Sendable closure, ~Copyable handle, split-shape per-phase routers) compile across binary and .swiftinterface lanes without exposing private routed types or choice enums"
+  },
+  {
+    "id": "GMT-routed-public-visibility",
+    "pattern": "Declare 'SecretStep' public:",
+    "scope": "a public @Route in a public schema cannot use a fileprivate routed: payload type, while a fileprivate @Route can"
+  },
+  {
+    "id": "GMT-routed-owned-only",
+    "pattern": "routed: requires a @Route, which is unavailable in .ownedOnly",
+    "scope": "move-only ~Copyable routed values with consuming/borrowing work in .isolated, while routed: in .ownedOnly is refused"
+  },
+  {
+    "id": "GMT-routed-unrouted",
+    "pattern": "takes a routed: parameter, but no @Route selects it",
+    "scope": "a transition taking routed: requires a matching @Route on its source phase"
+  },
+  {
+    "id": "GMT-routed-split-choice",
+    "pattern": "not a member type|no member 'Choose'|Route\\.Alpha\\.Choose",
+    "scope": "same-named routers across phases with different routed: shapes get separate Route.<Phase>.<Router> choice enums and no shared Route.<Router>"
+  },
+  {
+    "id": "GMT-routed-sending-isolated",
+    "pattern": "does not conform to the 'Sendable' protocol",
+    "scope": "in .isolated mode, a non-Sendable routed: value compiles plain but fails the generated Sendable check when marked sending"
+  },
+  {
+    "id": "GMT-routed-never",
+    "pattern": "cannot take a routed: payload of type Never",
+    "scope": "a routed: payload aliasing Never fails the generated Never probe"
+  },
+  {
+    "id": "GCT-generic-from-interface",
+    "libraryModule": "GenericFromFixtureLibrary",
+    "librarySource": "ClientFixtures/GCT-generic-from-interface/library.swift",
+    "forbiddenInterfaceTokens": [
+      "PrivateSelectionCarrying",
+      "PrivateTagged",
+      "PrivateUniqueTitled",
+      "PrivateAllNav",
+      "enum RouteDecide ",
+      "typealias RouteDecide "
+    ],
+    "pattern": "no exact matches in call to instance method 'selectList'|requires the types|no member 'selectList'",
+    "scope": "public schemas with generic <Source> @Transition(from:), fileprivate protocols and @PhaseSets, combined generic+routed, and .ownedOnly ~Copyable Advance compile across binary and .swiftinterface lanes without leaking private types and omit unlisted reachable phases"
+  },
+  {
+    "id": "GMT-generic-from-conformance",
+    "pattern": "does not conform to .*'SelectionCarrying'|requires that .* conform to 'SelectionCarrying'",
+    "scope": "a non-conforming middle phase in a generic <Source: Protocol> @Transition(from:) fails Swift's per-phase conformance check"
+  },
+  {
+    "id": "GMT-generic-from-inactive-effect",
+    "pattern": "Started operation 'Work' and every required scope must be eligible in destination 'B'",
+    "scope": "a same-phase generic @Transition(from:) validates starts: eligibility against every expanded destination phase including a newly included middle phase"
+  },
+  {
+    "id": "GMT-generic-from-arity",
+    "pattern": "at most one generic type parameter",
+    "scope": "a multi-source transition may declare at most one generic type parameter for its source phase"
+  },
+  {
+    "id": "GMT-generic-from-payload-ref",
+    "pattern": "cannot reference the generic source parameter 'Source'",
+    "scope": "a generic multi-source transition's trigger payload cannot reference the generic source parameter"
+  },
+  {
+    "id": "GMT-generic-from-partial-route",
+    "pattern": "no @Route selects it from 'B'",
+    "scope": "combining generic @Transition(from:) with routed: requires a matching @Route for every source phase in from:"
   }
 ]

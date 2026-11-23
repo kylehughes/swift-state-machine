@@ -61,6 +61,18 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         case ended
     }
 
+    /// What a waiting consumer receives from one step of the sequence.
+    package enum Step: Sendable {
+        /// The latest unread element.
+        case element(Element)
+        /// The owner closed or released the sequence with no further elements.
+        case finished
+        /// A deadline expired before another element arrived.
+        case timedOut
+        /// The sequence or waiting task was cancelled.
+        case cancelled
+    }
+
     /// The claimed consumer of a sequence, which reads it from any isolation domain.
     ///
     /// Claiming is the same one-time decision that ``makeAsyncIterator()`` makes, so a sequence has at
@@ -74,8 +86,8 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             if case .ended = found { lifetime.end(isolation: isolation) }
             return found
         }
-        /// Whether the sequence can still deliver, meaning it is neither finished nor cancelled,
-        /// regardless of whether an element is currently pending.
+        /// Whether the sequence can still deliver, meaning it is neither finished, timed out, nor
+        /// cancelled, regardless of whether an element is currently pending.
         package var isOpen: Bool { lifetime.mailbox.isOpen }
         /// Returns the latest unread element, waiting for one when none is pending, or `nil` once the
         /// sequence has ended, and then removes the registration.
@@ -84,6 +96,16 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             lifetime.end(isolation: #isolation)
             return nil
         }
+        /// Takes the next buffered element without waiting, or atomically records timeout when
+        /// `expiring` is `true` and no element is buffered.
+        package func pollStep(expiring: Bool) -> Step? { lifetime.mailbox.pollStep(expiring: expiring) }
+        /// Returns the next unread element or the atomic reason the wait ended, together with
+        /// whether the call suspended before completing.
+        nonisolated(nonsending) package func nextStep() async -> (step: Step, suspended: Bool) {
+            await lifetime.mailbox.nextStep()
+        }
+        /// Records that a deadline expired without discarding an already-buffered element.
+        package func timeOut() { lifetime.mailbox.timeOut() }
         /// The gate that stops delivery and frees the slot at once from any thread.
         ///
         /// The owner admits through it, so closing it stops delivery without removing the registration
@@ -128,6 +150,11 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
     // an element carried in that resumption would look unsynchronized with the thread that offered
     // it. The lock orders the two in a way the sanitizer observes.
     fileprivate final class Mailbox: Sendable {
+        private enum EndReason: Sendable {
+            case finished
+            case timedOut
+            case cancelled
+        }
         private struct State: Sendable {
             var pending: Element?
             // Resumed with `true` once `handed` holds the read's element, and with `false` when the read
@@ -136,7 +163,11 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             // The element given to the read that waited, which that read takes once it resumes. It is
             // empty whenever a waiter is installed.
             var handed: Element?
-            var finished = false
+            // The first terminal cause that closed this mailbox to new offers. Once set, later causes
+            // never overwrite it.
+            var endReason: EndReason?
+            // Recorded whenever cancellation occurs, even after `finished` or `timedOut`, so `discard()`
+            // releases any unread element and further reads stop immediately.
             var cancelled = false
             var claimed = false
         }
@@ -153,7 +184,7 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         func offer(_ element: Element) {
             var handed = state.withLock {
                 state -> (waiter: CheckedContinuation<Bool, Never>?, displaced: Element?) in
-                guard !state.finished, !state.cancelled else { return (nil, nil) }
+                guard state.endReason == nil else { return (nil, nil) }
                 if let waiter = state.waiter.take() {
                     state.handed = element
                     return (waiter, nil)
@@ -167,8 +198,19 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
         // A pending final value stays readable after the mailbox has finished.
         func finish() {
             let waiter = state.withLock { state -> CheckedContinuation<Bool, Never>? in
-                guard !state.finished else { return nil }
-                state.finished = true
+                guard state.endReason == nil else { return nil }
+                state.endReason = .finished
+                return state.waiter.take()
+            }
+            waiter?.resume(returning: false)
+        }
+
+        // A pending value offered before timeout stays readable so a concurrent deadline does not
+        // discard a matching element already buffered in the mailbox.
+        func timeOut() {
+            let waiter = state.withLock { state -> CheckedContinuation<Bool, Never>? in
+                guard state.endReason == nil else { return nil }
+                state.endReason = .timedOut
                 return state.waiter.take()
             }
             waiter?.resume(returning: false)
@@ -176,7 +218,7 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
 
         /// Whether the mailbox can still deliver, pending element or not, read without retaining an
         /// element.
-        var isOpen: Bool { state.withLock { !$0.finished && !$0.cancelled } }
+        var isOpen: Bool { state.withLock { $0.endReason == nil } }
 
         // Also runs inside a task cancellation handler, so it only records the flag and wakes the
         // consumer. No later read returns any element still pending. Whoever ends the sequence then
@@ -186,6 +228,7 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             let waiter = state.withLock { state -> CheckedContinuation<Bool, Never>? in
                 guard !state.cancelled else { return nil }
                 state.cancelled = true
+                if state.endReason == nil { state.endReason = .cancelled }
                 return state.waiter.take()
             }
             waiter?.resume(returning: false)
@@ -205,13 +248,38 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             state.withLock { state in
                 if state.cancelled { return .ended }
                 if let pending = state.pending.take() { return .element(pending) }
-                return state.finished ? .ended : .empty
+                return state.endReason != nil ? .ended : .empty
+            }
+        }
+
+        private static func terminalStep(_ reason: EndReason?) -> Step {
+            switch reason {
+            case .finished: .finished
+            case .timedOut: .timedOut
+            case .cancelled, nil: .cancelled
+            }
+        }
+
+        /// Takes the next buffered element without waiting, or atomically reports the first terminal
+        /// cause.
+        ///
+        /// When `expiring` is `true` and the mailbox is still open, records `.timedOut` immediately
+        /// so no newer offers are admitted while still returning at most the one element already
+        /// buffered. If cancellation prevented reading a buffered element, reports `.cancelled`.
+        func pollStep(expiring: Bool) -> Step? {
+            state.withLock { state in
+                if state.cancelled {
+                    return state.pending != nil ? .cancelled : Self.terminalStep(state.endReason)
+                }
+                if expiring, state.endReason == nil { state.endReason = .timedOut }
+                if let pending = state.pending.take() { return .element(pending) }
+                return state.endReason.map(Self.terminalStep)
             }
         }
 
         nonisolated(nonsending) func next() async -> Element? {
             let handed = await withTaskCancellationHandler {
-                await withCheckedContinuation { wait($0) }
+                await withCheckedContinuation { _ = wait($0) }
             } onCancel: {
                 cancel()
             }
@@ -220,25 +288,45 @@ nonisolated public struct SnapshotSequence<Element: Sendable>: AsyncSequence, Se
             return state.withLock { $0.handed.take() }
         }
 
+        nonisolated(nonsending) func nextStep() async -> (step: Step, suspended: Bool) {
+            var suspended = false
+            let handed = await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    suspended = wait(continuation)
+                }
+            } onCancel: {
+                cancel()
+            }
+            if handed, let element = state.withLock({ $0.handed.take() }) {
+                return (.element(element), suspended)
+            }
+            let step: Step = state.withLock { state in
+                if state.cancelled, state.pending != nil { return .cancelled }
+                return Self.terminalStep(state.endReason)
+            }
+            return (step, suspended)
+        }
+
         // The cancelled flag is read in the same change that stores the waiter, so a cancellation on
         // either side of it resumes the consumer. A read that finds another read waiting, or not yet
-        // done taking the element handed to it, ends at once.
-        private func wait(_ continuation: CheckedContinuation<Bool, Never>) {
+        // done taking the element handed to it, ends at once. Returns whether the read suspended.
+        private func wait(_ continuation: CheckedContinuation<Bool, Never>) -> Bool {
             let answer = state.withLock { state -> Bool? in
                 if state.cancelled || state.waiter != nil || state.handed != nil { return false }
                 if let pending = state.pending.take() {
                     state.handed = pending
                     return true
                 }
-                if state.finished { return false }
+                if state.endReason != nil { return false }
                 state.waiter = continuation
                 return nil
             }
             guard let answer else {
                 SnapshotWaitPause.reached()
-                return
+                return true
             }
             continuation.resume(returning: answer)
+            return false
         }
     }
 

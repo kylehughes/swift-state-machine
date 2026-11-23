@@ -4,6 +4,7 @@ import Foundation
 import StateMachine
 import StateMachineExamples
 import StateMachineTestSupport
+import Testing
 import os
 
 // The host-teardown slice of the explorer: an owner of the profile example graph, its saved
@@ -252,6 +253,18 @@ nonisolated final class ExplorerDropOnRelease<Owner: AnyObject & Sendable>: Send
 /// For a `MainActorHost`, whose registration callbacks are client values it releases on the main
 /// actor, a destructor elsewhere violates I1.
 nonisolated final class ExplorerAttachOnRelease: Sendable {
+    /// Tracks whether this hook is still armed for genuine owner teardown and whether its destructor
+    /// has finished running, without retaining the hook itself.
+    nonisolated final class State: Sendable {
+        private let flags = OSAllocatedUnfairLock(initialState: (armed: true, released: false))
+        var isReleased: Bool { flags.withLock { $0.released } }
+        /// Disarms this hook so explicit fixture cleanup cannot impersonate genuine owner teardown.
+        func disarm() { flags.withLock { $0.armed = false } }
+        fileprivate func beginDeinit() -> Bool { flags.withLock { $0.armed } }
+        fileprivate func finishDeinit() { flags.withLock { $0.released = true } }
+    }
+
+    let state = State()
     let attach: @Sendable () -> Void
     let world: ExplorerWorld?
     let teardown: ExplorerWorld?
@@ -261,10 +274,12 @@ nonisolated final class ExplorerAttachOnRelease: Sendable {
         self.attach = attach
     }
     deinit {
+        defer { state.finishDeinit() }
         if let world, !Thread.isMainThread {
             world.violate(.offMain, "a MainActorHost registration callback's capture was destroyed off the main thread")
         }
-        // The owner releases a registration's callbacks only in its teardown.
+        guard state.beginDeinit() else { return }
+        // Only genuine owner teardown reaches here; explicit harness cleanup disarms first.
         teardown?.state.withLock { $0.ownerTeardown = true }
         attach()
     }
@@ -446,7 +461,10 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
     private var publishers: [SnapshotPublisher<UInt64>?] = [nil, nil]
     private var recorders: [ExplorerTeardownRecorder] = []
     private var tokens: [Any] = []
+    private var captureHooks: [ExplorerAttachOnRelease.State] = []
     private var driverStarted = false
+    private var driverHookArmed = false
+    private let driverHookCancelled = OSAllocatedUnfairLock(initialState: false)
     private var park: ExplorerOwnerPark?
     private var released = false
     private var turns = 0
@@ -596,12 +614,15 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
             }
             if let token = await subject.capture(hold) {
                 tokens.append(token)
+                captureHooks.append(hold.state)
                 registrationOrder.append("capture \(index)")
             }
         case .driver(let index):
             // The publisher slice's burst cancels and relaunches the fetch, so its handler does nothing.
             let teardownSlice = kind != .publisher
+            let driverCancelled = driverHookCancelled
             driver.set { [weak self, world] in
+                defer { driverCancelled.withLock { $0 = true } }
                 guard teardownSlice else { return }
                 // In the teardown slices an owner cancels its driver only in its teardown.
                 world.state.withLock { $0.ownerTeardown = true }
@@ -610,10 +631,13 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
             }
             sendsIssued = true
             driverStarted = await subject.startDriver()
+            if teardownSlice, driverStarted { driverHookArmed = true }
         case .driverParked(let index):
             // The publisher slice's burst cancels and relaunches the fetch, so its handler does nothing.
             let teardownSlice = kind != .publisher
+            let driverCancelled = driverHookCancelled
             driver.set { [weak self, world] in
+                defer { driverCancelled.withLock { $0 = true } }
                 guard teardownSlice else { return }
                 // In the teardown slices an owner cancels its driver only in its teardown.
                 world.state.withLock { $0.ownerTeardown = true }
@@ -632,6 +656,7 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
             driverStarted = true
             if parked {
                 driverPark = proceed
+                if teardownSlice { driverHookArmed = true }
             } else {
                 world.violate(.stuck, "the launched driver never reached its start")
             }
@@ -888,18 +913,20 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
             await recordAccepted()
             subject.releaseMain()
         }
-        var finished = false
-        for _ in 0 ..< 100 {
-            if subject.gone(), recorders.allSatisfy({ $0.finished || $0.cancelled }) {
-                finished = true
-                break
-            }
-            await Task { @MainActor in }.value
+        let hooksSettled = {
+            self.captureHooks.allSatisfy(\.isReleased)
+                && (!self.driverHookArmed || self.driverHookCancelled.withLock { $0 })
         }
+        let finished = await hop(
+            until: {
+                self.subject.gone() && hooksSettled() && self.recorders.allSatisfy { $0.finished || $0.cancelled }
+            },
+            limit: 2000
+        )
         if !finished {
             world.violate(
                 .ownerReleasedUnfinished,
-                "at quiescence: owner gone \(subject.gone()), unfinished subscribers \(recorders.filter { !$0.finished && !$0.cancelled }.map(\.index))"
+                "at quiescence: owner gone \(subject.gone()), hooks settled \(hooksSettled()), unfinished subscribers \(recorders.filter { !$0.finished && !$0.cancelled }.map(\.index))"
             )
         }
         // A release before the delivery's decision discards the value; one after it lets at most that
@@ -912,6 +939,10 @@ extension ExplorerTeardownRecorder: @MainActor Subscriber {
                 "subscriber \(recorder.index), whose owner was released \(forced.order), received ordinary revisions \(recorder.values)"
             )
         }
+        // Disarm capture hooks before explicit fixture cleanup so dropping `tokens` cannot
+        // impersonate genuine owner teardown if an owner leaked a registration.
+        for hook in captureHooks { hook.disarm() }
+        captureHooks = []
         tokens = []
         publishers = [nil, nil]
         recorders = []
@@ -954,5 +985,101 @@ nonisolated final class ExplorerNoticeHold: Sendable {
     func proceed() -> Bool {
         release.signal()
         return explorerWait(returned)
+    }
+}
+
+@MainActor @Suite struct ExplorerTeardownHarnessTests {
+    @Test func teardownRecorderStillFlagsDeliveryAfterOwnerTeardown() {
+        // Planted I28: once genuine owner teardown has begun, even a revision <= acceptedBound
+        // delivered to a subscriber attached after release must still violate I28.
+        let postTeardown = ExplorerWorld()
+        postTeardown.state.withLock { $0.ownerTeardown = true }
+        let afterTeardown = ExplorerTeardownRecorder(
+            index: 0,
+            publisher: 0,
+            world: postTeardown,
+            gone: { true },
+            acceptedBound: { 1 }
+        )
+        afterTeardown.receive(subscription: ExplorerNullSubscription())
+        _ = afterTeardown.receive(1)
+        #expect(postTeardown.violations.contains { $0.invariant == .ownerReleasedDelivery })
+
+        // Control + planted post-bound I28: before teardown begins, accepted revision 1 is allowed
+        // under OBS-005 while any newer revision 2 still violates I28.
+        let preTeardown = ExplorerWorld()
+        let beforeTeardown = ExplorerTeardownRecorder(
+            index: 0,
+            publisher: 0,
+            world: preTeardown,
+            gone: { true },
+            acceptedBound: { 1 }
+        )
+        beforeTeardown.receive(subscription: ExplorerNullSubscription())
+        _ = beforeTeardown.receive(1)
+        #expect(preTeardown.violations.isEmpty)
+        _ = beforeTeardown.receive(2)
+        #expect(preTeardown.violations.contains { $0.invariant == .ownerReleasedDelivery })
+
+        // Planted I29: a subscriber attached before release still flags ordinary delivery after
+        // teardown begins.
+        let pendingWorld = ExplorerWorld()
+        var released = false
+        let attachedEarlier = ExplorerTeardownRecorder(
+            index: 0,
+            publisher: 0,
+            world: pendingWorld,
+            gone: { released },
+            acceptedBound: { 1 }
+        )
+        attachedEarlier.receive(subscription: ExplorerNullSubscription())
+        released = true
+        pendingWorld.state.withLock { $0.ownerTeardown = true }
+        _ = attachedEarlier.receive(1)
+        #expect(pendingWorld.violations.contains { $0.invariant == .ownerReleasedPending })
+    }
+
+    @Test func disarmedCaptureHookDoesNotImpersonateOwnerTeardown() {
+        let disarmedWorld = ExplorerWorld()
+        let disarmedAttached = OSAllocatedUnfairLock(initialState: false)
+        let disarmedState: ExplorerAttachOnRelease.State
+        do {
+            let hook = ExplorerAttachOnRelease(nil, teardown: disarmedWorld) {
+                disarmedAttached.withLock { $0 = true }
+            }
+            disarmedState = hook.state
+            #expect(!disarmedState.isReleased)
+            disarmedState.disarm()
+        }
+        #expect(disarmedState.isReleased)
+        #expect(!disarmedAttached.withLock { $0 })
+        #expect(!disarmedWorld.state.withLock { $0.ownerTeardown })
+
+        let armedWorld = ExplorerWorld()
+        let armedAttached = OSAllocatedUnfairLock(initialState: false)
+        let armedState: ExplorerAttachOnRelease.State
+        do {
+            let hook = ExplorerAttachOnRelease(nil, teardown: armedWorld) {
+                armedAttached.withLock { $0 = true }
+            }
+            armedState = hook.state
+        }
+        #expect(armedState.isReleased)
+        #expect(armedAttached.withLock { $0 })
+        #expect(armedWorld.state.withLock { $0.ownerTeardown })
+    }
+
+    @Test(.parksCooperativeThread) func sharedTeardownWaitsForGenuineTeardownBeforeClearingTokens() async throws {
+        let scripts: [[ExplorerEvent]] = [
+            [.driverParked(0), .driverGo, .capture(0), .save(0)],
+            [.driver(0), .capture(0), .save(0)],
+            [.capture(0), .save(0), .driverParked(1), .releaseOwner(elsewhere: false)],
+            [.driver(0), .save(0), .capture(1), .capture(0)],
+        ]
+        let configuration = ExplorerConfiguration(kind: .teardownShared, families: [.core], depth: 4)
+        for script in scripts {
+            let outcome = try #require(await explorerRun(configuration, script))
+            #expect(outcome.violations.isEmpty, "\(explorerScript(script)): \(outcome.violations)")
+        }
     }
 }

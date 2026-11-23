@@ -64,11 +64,12 @@ The plain `Draft` and `Approved` values remain ordinary data. Constructing an
 | An input | A case of the nested `enum Input` |
 | An edge that starts nothing | `@Transition(on: Input.approve)` on a function returning the destination payload |
 | An edge that starts operations | `@Transition(on: Input.begin, starts: [Fetch.self])` on a function returning `Change<Destination, Effect.Begin>` |
-| One edge from several phases | `@Transition(from: [Draft.self, Failed.self], on: Input.close)` on a function without a source parameter |
+| One edge from several phases | `@Transition(from: [Draft.self, Failed.self], on: Input.close)` without a source parameter, or with a single generic `<Source>` source parameter |
 | A reusable source-phase list | `@PhaseSet([Draft.self, Failed.self])` on an empty nested enum, named by `@Transition(from: Active.self, on: Input.close)` |
 | An operation | `@Operation(activeIn: [Searching.self])` on an enum, with optional `Input`, `Output`, `Failure`, and `Key` aliases |
 | A completion edge | `@Transition(onSuccess: Fetch.self)` or `@Transition(onFailure: Fetch.self)` |
 | Several edges for one source and trigger | `@Route(on:)`, `@Route(onSuccess:)`, or `@Route(onFailure:)` on a selector function |
+| A typed handoff from a router to a chosen edge | A final `routed:` parameter on a candidate `@Transition` chosen by `@Route` |
 | Authority that several operations share | A case of the nested `enum Scope`, with `@Active(in:)` for its phases, named by `@Operation(scope: Scope.account)` |
 | Authority an edge revokes without leaving the active phases | `invalidates: [Scope.account]` |
 | A dependency on a scope another operation owns | `requires: [Scope.session]` |
@@ -822,6 +823,56 @@ events are declared. `Local` takes no handlers and delivers each event through
 moves its argument on managed initializers, and calls that pass them in the old
 order no longer compile.
 
+### When event handlers run
+
+On every managed owner, `@Event` handlers run after the commit during batch
+draining, outside admission and outside every lock. No managed owner guarantees
+that `on<Event>` has returned when `send(_:)` or `commit(_:)` returns.
+
+- On `MainActorHost`, state commits synchronously on `@MainActor`. The returned
+  `Receipt` and a synchronous post-send read of `snapshot()` or
+  `currentSnapshot` reflect the commit right away, while `on<Event>` runs on a
+  later `@MainActor` turn.
+- On `IsolatedHost<Owner>`, state commits synchronously on `Owner`. The returned
+  `Receipt` and a synchronous post-send read of `snapshot(isolation:)` reflect
+  the commit right away (`IsolatedHost` exposes `snapshot(isolation:)` and has
+  no `currentSnapshot` property), while `on<Event>` runs on a later turn of
+  `Owner` with `isolated Owner`.
+- On `ActorHost`, state commits synchronously in the host actor's turn of
+  `await send(_:)` or `await commit(_:)`. Draining runs in a detached turn on
+  the host actor, so `on<Event>` may or may not have run by the time the caller
+  resumes from `await` (including with `isolatedTo:`).
+- On `Shared`, state commits atomically and the returned `Receipt` captures that
+  exact commit, while a separate synchronous `host.snapshot()` read can already
+  show a newer revision from another writer. Draining runs concurrently on a
+  serial background task outside every lock, so when `send(_:)` or `commit(_:)`
+  returns, `on<Event>` may still be pending, running on another thread, or
+  already finished.
+- On `Local`, `mutating send(_:)` and `commit(_:)` commit synchronously and
+  append emitted events to the queued `CommandBatch` (after cancellations, in
+  authored effect order among starts) for `drainCommands(limit:)`. `Local` never
+  calls handlers.
+- On `Owned`, the consuming edge method returns emitted events synchronously in
+  `Change.effects` or `Advance.advanced(_:effects:)`.
+
+Inspect the returned `Receipt` (`receipt.snapshot`, `receipt.revision`,
+`receipt.edgeID`) when caller code needs synchronous post-commit work in the
+same turn. `Receipt` carries no emitted event payloads. Drive `Local` and call
+`drainCommands(limit:)` when a caller needs synchronous access to emitted
+events.
+
+Call `await host.flush(through: receipt)` on any of the four managed owners
+(including event-only schemas) to wait until cancellations, every `on<Event>`
+handler, and operation start registrations through `receipt.revision` have
+finished. It returns ``FlushResult/processed``, or ``FlushResult/foreignOwner``
+for another owner's receipt. `Task.yield()` gives no flush barrier.
+
+Because handlers run outside admission while draining, `host.snapshot()` inside
+`on<Event>` can already reflect later commits, and a snapshot read or new
+subscription immediately after an emitting `send(_:)` can observe the committed
+state before that commit's `on<Event>` runs. A handler may read the host or call
+`send(_:)`, and any commit it makes drains in commit order without nesting.
+
 ## Choose among edges with a router
 
 When several edges share a source and trigger, a router selects among them. It
@@ -910,6 +961,129 @@ the router has none there. A completion router that throws leaves the outcome
 retained for reconciliation, as
 [Settle completions that do not commit](<doc:HostingAGraph#Settle-completions-that-do-not-commit>)
 describes.
+
+### Pass a computed value from a router to its chosen edge
+
+When a `@Route` function inspects state or parses an input to pick a branch, a
+candidate `@Transition` that receives only `(source, input)` would have to repeat
+that work and invent unreachable fallback values. Instead, any candidate
+`@Transition` selected by a `@Route`—for an input or a completion, in `.shared`
+or `.isolated` mode—may declare one optional final parameter labeled `routed:` to
+receive a typed value directly from the router. Candidates that need no handoff
+leave `routed:` out.
+
+```swift
+@StateMachine(mode: .isolated, owners: [.owned, .local, .mainActorHost])
+public nonisolated enum SortDemo {
+    public struct Ready { public let stepInterval: Duration }
+    public struct Comparing {
+        public let left: Int
+        public let right: Int
+        public let resolve: () -> Int
+        public let stepInterval: Duration
+    }
+    public struct Finished { public let stepInterval: Duration }
+
+    fileprivate struct ComparisonStep {
+        let left: Int
+        let right: Int
+        let resolve: () -> Int
+    }
+
+    @Initial case ready(Ready)
+    case comparing(Comparing)
+    @Terminal case finished(Finished)
+
+    public enum Input { case step }
+
+    @Operation(activeIn: [Ready.self, Comparing.self])
+    public enum StepDelay {}
+
+    @Transition(on: Input.step, starts: [StepDelay.self])
+    fileprivate static func start(_ source: Ready) -> Change<Ready, Effect.Start> {
+        Change(source, effects: [.stepDelay])
+    }
+
+    @Transition(onSuccess: StepDelay.self, starts: [StepDelay.self])
+    fileprivate static func presentComparison(
+        _ source: Ready,
+        routed step: ComparisonStep
+    ) -> Change<Comparing, Effect.PresentComparison> {
+        Change(
+            Comparing(
+                left: step.left,
+                right: step.right,
+                resolve: step.resolve,
+                stepInterval: source.stepInterval
+            ),
+            effects: [.stepDelay]
+        )
+    }
+
+    @Transition(onSuccess: StepDelay.self)
+    fileprivate static func finishFromReady(_ source: Ready) -> Finished {
+        Finished(stepInterval: source.stepInterval)
+    }
+
+    @Route(onSuccess: StepDelay.self)
+    fileprivate static func routeReadyStep(_ source: Ready) -> Route.RouteReadyStep {
+        if source.stepInterval > .zero {
+            .presentComparison(ComparisonStep(left: 0, right: 1, resolve: { 1 }))
+        } else {
+            .finishFromReady
+        }
+    }
+
+    @Transition(onSuccess: StepDelay.self)
+    fileprivate static func finishFromComparing(_ source: Comparing) -> Finished {
+        Finished(stepInterval: source.stepInterval)
+    }
+}
+```
+
+When at least one candidate takes `routed:`, the generated `Route.<Router>` enum
+and dispatch follow these rules:
+
+- `routed:` must be the last parameter, after the source, any unlabeled trigger
+  payload, and any `request:` parameter on a completion edge. It may appear at
+  most once, and is rejected on `@Route`, `@Restoration`, any transition
+  missing a `@Route` in one of its source phases, and `.ownedOnly` schemas
+  (which have no `@Route`). It cannot use `inout`, `isolated`, `@autoclosure`,
+  an opaque `some` type, or `Never`.
+- Each candidate with `routed: T` generates `case <edge>(T)`, stripping
+  parameter ownership, `@escaping`, and `sending` while keeping outer
+  parentheses on tuple types. Candidates without `routed:` remain bare
+  `case <edge>`. Because routed values may be tuples or non-`Sendable` closures
+  such as `ComparisonStep` above, `Route.<Router>` omits `Sendable`,
+  `Equatable`, `Hashable`, and `CaseIterable`. Routers with no `routed:`
+  candidates keep all four conformances unchanged.
+- `Route.<Router>` (and any `Route.<Phase>.<Router>` alias) takes the narrower
+  of the schema's access and the `@Route` function's access, at least
+  `fileprivate`. A `fileprivate @Route` inside a `public` schema can therefore
+  hand off a `fileprivate` struct without exposing it in the public module
+  interface. When `Route.<Router>` keeps `public` or `package` access, its
+  `routed:` types need that access too.
+- If any candidate declares explicit ownership (`borrowing`, `consuming`,
+  `__shared`, or `__owned`) on `routed:` without `@escaping`, `Route.<Router>`
+  is `~Copyable` and generated dispatch consumes the choice value so a router
+  can hand off a noncopyable intermediate resource. In `.isolated` mode (for
+  any `owners:`, including `[.owned]`), a `sending` `routed:` parameter requires
+  a `Sendable` type on Swift 6.4 because `@Route` returns `Route.<Router>`
+  without region transfer.
+- Two routers with the same name in different phases share `Route.<Router>` only
+  when their candidate names, routed type identities, choice access, and
+  copyability match. Otherwise each gets its own `Route.<Phase>.<Router>`.
+- Public `Owned.<router>` and `Observed.<router>` signatures stay unchanged, and
+  candidate methods stay `fileprivate`. `send`, `prepare`, delivery,
+  `Owned.<router>`, and `Observed.<router>` run `@Route` once and pass the
+  routed value straight to the chosen candidate. Each branch keeps its own
+  `starts:`, `cancels:`, `emits:`, `invalidates:`, `throws(...)`, and distinct
+  edge ID in `StateMachineGraph` (`formatVersion == 2`). On completion retries,
+  capacity retries reuse the already-prepared `Prepared` candidate without
+  running `@Route` or the candidate again. Conflict retries under `.retry` and
+  explicit `reconcile(id:)` run fresh preparation (`@Route` once, then the
+  chosen candidate once). A throwing `@Route` leaves the outcome retained for
+  reconciliation.
 
 ## Handle fallible edges
 
@@ -1087,6 +1261,108 @@ expressions, qualified names, mixed arrays such as `from: [Draft.self, Active.se
 cross-file sets, and completion edges with `from:` are unsupported. Write
 `@StateMachine.PhaseSet` or `@StateMachine::PhaseSet` when the schema declares
 its own type named `PhaseSet`.
+
+### Share state-dependent edges across phases with a generic source
+
+Parameterless `@Transition(from:)` works when the destination needs nothing from
+the source phase. When several phases share fields or need a same-phase update
+that preserves phase-only data, declare a single generic type parameter
+`<Source>` (with an optional protocol constraint or `where` clause) on
+`@Transition(from: [...], ...)` or `@Transition(from: Set.self, ...)` and take
+`_ source: Source` as the first parameter.
+
+```swift
+nonisolated protocol SelectionCarrying {
+    var selectedID: Int? { get set }
+}
+
+@StateMachine(mode: .shared, owners: [.owned, .local, .mainActorHost])
+nonisolated enum Navigation: Sendable, Equatable {
+    struct Browsing: Sendable, Equatable, SelectionCarrying {
+        var selectedID: Int? = nil
+    }
+    struct Confirming: Sendable, Equatable, SelectionCarrying {
+        let confirmation: String
+        var selectedID: Int?
+    }
+    struct PresentingSheet: Sendable, Equatable, SelectionCarrying {
+        var selectedID: Int?
+        let sheet: String
+    }
+
+    @Initial case browsing(Browsing = Browsing())
+    case confirming(Confirming)
+    case presentingSheet(PresentingSheet)
+
+    @PhaseSet([Browsing.self, Confirming.self, PresentingSheet.self])
+    fileprivate enum AllPhases {}
+
+    enum Input: Sendable {
+        case select(Int?)
+        case confirm(String)
+        case presentSheet(String)
+        case dismiss
+    }
+
+    // Same-phase update: retains `confirmation` in Confirming and `sheet` in PresentingSheet.
+    @Transition(from: AllPhases.self, on: Input.select)
+    fileprivate static func select<Source: SelectionCarrying>(
+        _ source: Source,
+        _ id: Int?
+    ) -> Source {
+        var next = source
+        next.selectedID = id
+        return next
+    }
+
+    // Fixed destination reading shared protocol fields.
+    @Transition(from: [Browsing.self, Confirming.self], on: Input.presentSheet)
+    fileprivate static func presentSheet<Source: SelectionCarrying>(
+        _ source: Source,
+        _ sheet: String
+    ) -> PresentingSheet {
+        PresentingSheet(selectedID: source.selectedID, sheet: sheet)
+    }
+
+    @Transition(on: Input.confirm)
+    fileprivate static func confirm(_ source: Browsing, _ confirmation: String) -> Confirming {
+        Confirming(confirmation: confirmation, selectedID: source.selectedID)
+    }
+
+    @Transition(from: [Confirming.self, PresentingSheet.self], on: Input.dismiss)
+    fileprivate static func dismiss<Source: SelectionCarrying>(_ source: Source) -> Browsing {
+        Browsing(selectedID: source.selectedID)
+    }
+}
+```
+
+Each phase listed in `from:` expands independently in authored order:
+
+- Declare exactly one generic type parameter (no multiple parameters `<S, T>`
+  and no parameter packs `each T`). The first parameter must be unlabeled and
+  typed as that generic parameter, using the mode's source ownership rules:
+  plain or `borrowing`/`__shared` in `.shared` and `.isolated`, and
+  `consuming`/`__owned` in `.ownedOnly`. Any trigger payload or final `routed:`
+  parameter cannot reference `Source`.
+- Return either a fixed phase (`Dest`, `Change<Dest, Effect.<Edge>>`, or in
+  `.ownedOnly` `Advance<Source, Dest, Effect, Failure>`) or the source phase
+  itself (`Source`, `Change<Source, Effect.<Edge>>`, or in `.ownedOnly`
+  `Advance<Source, Source, Effect, Failure>`). Returning `Source` creates one
+  self-loop edge per phase in `from:`—such as `browsing.select -> browsing`,
+  `confirming.select -> confirming`, and
+  `presentingSheet.select -> presentingSheet`—preserving every phase-only field
+  and static phase identity.
+- Each expanded phase gets its own concrete `Owned` and `Observed` method,
+  concrete `StateMachineGraph` edge, concrete witnesses, and per-phase
+  deprecation requirements when marked `@available(*, deprecated)`. Swift
+  verifies protocol conformances for each concrete phase in `from:` at the
+  generated calls, and the macro validates every operation in `starts:` against
+  every expanded destination phase.
+- Generic `from:` transitions work on input edges in all modes and on
+  `.ownedOnly` direct edges (which take no trigger payload when `on:` is
+  omitted). They also compose with a final `routed:` parameter when every source
+  phase in `from:` has a `@Route` for that trigger. Completion edges
+  (`onSuccess:` / `onFailure:`) and `@Route` functions remain single-source.
 
 When edges of one name throw different failure types, their
 `PreparationRejection` cases are prefixed with the source phase, as in
@@ -1345,7 +1621,11 @@ other types without values, such as an enum without cases, so an operation
 whose `Input` is one can never start. Fields can use imported types and nested
 generic containers. Phase aliases, reusing a payload type for several phases,
 generic schema or phase payload declarations, async edges, untyped throws,
-`inout` sources, and generic edge functions are unsupported. A source parameter
+`inout` sources, and generic edge functions other than single-parameter `from:`
+transitions are unsupported. Generic `@StateMachine` schemas remain unsupported
+so every graph, its coverage report, and its generated owners stay concrete.
+Wrap a concrete schema in a generic helper or view type when callers need
+generic input handling. A source parameter
 is plain or `borrowing`, or `consuming` in `.ownedOnly`, and the underscored
 `__shared` and `__owned` read as `borrowing` and `consuming`. Parentheses
 change no type the graph reads, so `(Draft)`, `((Draft))`, and `(Self).Draft`
@@ -1459,7 +1739,9 @@ call `owned.submit()`, while `try flow.send(.post)` builds without a warning.
 A `public` or `package` schema generates members of its access that name its
 phase payloads, `Input`, its operation and event namespaces with their aliases,
 and the types that its payloads, outputs, keys, requests, saved data, and
-failures spell. Each declaration of the schema that one of those spellings
+failures spell. It also checks `routed:` types when the router's choice enum
+itself keeps that access, while a `fileprivate` or `internal` `@Route` narrows
+`Route.<Router>` so its `routed:` types stay private to that access. Each declaration of the schema that one of those spellings
 names, as Swift resolves the spelling where it is written, needs that access
 too, such as `Notes` and `Notes.Detail` for an edge that takes a `Notes.Detail`,
 and `Notes.Detail` again for `N.Detail` written through `typealias N = Notes`.
@@ -1515,41 +1797,109 @@ take more than a minute. A larger schema is refused with the limit it passes.
 
 Generated member names are reserved, and which names are reserved depends on
 what the schema generates. A schema that lists only `.local` may declare its
-own type named `Shared`, and a schema without a router that chooses an edge may
-declare its own `Route`. Every schema reserves `Effect`, `Change` and
-`Advance`, which authored transitions spell by their short names, and `Phase`,
-the generic parameter of the phase wrappers. It reserves `graph` at the
-signature of the generated `static let graph`, so a static property, a type, a
-case without a payload, or a synchronous static method without parameters of
-that name is diagnosed, while an instance member, a phase case (which carries a
-payload), an `async` static method such as `static func graph() async -> Int`,
-and a static method that takes arguments, such as
-`static func graph(_ index: Int)`, are other declarations. A schema whose
-owners retain completions cannot itself be named `Outcome` or `Rejection`,
-which `PendingCompletion` declares.
+own type named `Shared` or `Configuration`, and a schema without a router that
+chooses an edge may declare its own `Route`.
+
+#### Unconditional reservations (every `@StateMachine`)
+
+- `Change` and `Advance` are the short result types spelled by authored transitions.
+- `Phase` is the generic parameter of `Owned` and `Observed`.
+- `Effect` is the generated effect enum.
+- `graph` is reserved at the signature of the generated `static let graph`, so a
+  static property, a type, a case without a payload, or a synchronous static
+  method without parameters of that name is diagnosed, while an instance member,
+  a phase case (which carries a payload), an `async` static method such as
+  `static func graph() async -> Int`, and a static method that takes arguments,
+  such as `static func graph(_ index: Int)`, are other declarations.
+
+#### Contextual reservations (only when the schema generates them)
+
+- Generating `.owned` reserves `Owned` and `owned`.
+- Generating any observing owner (`.local`, `.shared`, `.actorHost`,
+  `.mainActorHost`, or `.isolatedHost`) reserves `Observed`, `Snapshot`,
+  `Prepared`, `PreparationRejection`, `CommitResult`, `CommitRejection`,
+  `Receipt`, `SendRejection`, `Restoration`, and `prepare`.
+- An observing owner with a throwing `@Restoration` reserves `ResetRejection`.
+- An observing owner with one or more `@Operation` declarations reserves
+  `Completion`, `PendingStatus`, `PendingCompletionID`, `PendingCompletion`,
+  `ReconcileResult`, and `DiscardResult`.
+- Generating `.local` reserves `Local`, `LocalConfiguration`, and
+  `InitialPhase`.
+- Generating `.local` with `@Restoration` reserves `RestorationArchive` and
+  `RestorationRejection`.
+- Generating `.local` with one or more `@Operation` declarations reserves
+  `ExecutionHandle`, `ExecutionDisposition`, `AcknowledgmentResult`, and
+  `DeliveryResult`.
+- Generating `.local` with one or more `@Operation` or `@Event` declarations
+  reserves `Command` and `CommandBatch`.
+- Generating any managed owner (`.shared`, `.actorHost`, `.mainActorHost`, or
+  `.isolatedHost`) reserves `Configuration`, `SubscriptionFailure`,
+  `ShutdownResult`, `ShutdownDiagnostics`, `FlushResult`, and `Host`.
+- A managed owner with one or more `@Operation` declarations reserves
+  `CompletionPolicy`.
+- `.shared` mode with any managed owner reserves `Snapshots`, plus
+  `PendingCompletionUpdates` when the schema declares an `@Operation`.
+- `.isolated` mode with `.mainActorHost` reserves `MainActorSnapshots`, plus
+  `PendingCompletionUpdates` when the schema declares an `@Operation`.
+- `.isolated` mode with `.isolatedHost` reserves `IsolatedSnapshots`, plus
+  `IsolatedPendingCompletionUpdates` when the schema declares an `@Operation`.
+- Generating `.shared` reserves `Shared`, `Subscription`, plus `Drivers` when
+  the schema declares an `@Operation`.
+- Generating `.actorHost` reserves `ActorHost`, `Subscription`, plus `Drivers`
+  when the schema declares an `@Operation`.
+- Generating `.mainActorHost` reserves `MainActorHost`,
+  `MainActorSubscription`, plus `MainActorDrivers` when the schema declares an
+  `@Operation`.
+- Generating `.isolatedHost` reserves `IsolatedHost`, `Owner`,
+  `IsolatedSubscription`, plus `Drivers` when the schema declares an
+  `@Operation`.
+- Declaring one or more `@Route` functions with candidate edges reserves
+  `Route`.
+
+#### Operation-derived, schema-name, companion, and implementation reservations
+
+- For each `@Operation` named `<Op>`, the expansion declares `<Op>Request` (when
+  the operation has a `Key` or takes an `Input`), `<Op>Completion` (with any
+  observing owner), `<Op>Work` (with `.local`), and `_<Op>Work` (with `.local`
+  when `Output` is not `Never`). An operation cannot be named so any of those
+  names collides with a fixed generated name above.
+- The schema's own name cannot be any reserved name above, cannot be shadowed by
+  a direct nested type or type alias of the same name, and—when the schema has
+  an observing owner and at least one `@Operation`—cannot be `Outcome` or
+  `Rejection`, which `PendingCompletion` declares.
+- An edge with effects cannot be named `effect`, `type`, `protocol`, or match
+  the schema's name. A choosing router cannot be named `route`, `type`,
+  `protocol`, or match the schema's name, and when `.owned` is generated and
+  the router needs an owned result enum, its `<Router>Result` type cannot match
+  the schema's name. When `.owned` is generated, a throwing router cannot
+  choose an edge named `rejected`, because its owned result enum uses
+  `case rejected`. A phase case may share a name with a snapshot member such as
+  `revision`, and an edge or router may share one with a phase-wrapper member
+  unless its generated method would redeclare or shadow it: a zero-payload edge
+  or router cannot be named `value`, `revision`, `description`, or (with
+  `.owned`) `takeValue`, and a one-payload edge or router cannot be named
+  `withValue` (with `.owned`). An operation's `<op>Driver:` label and an
+  event's `on<Event>:` label share one managed initializer parameter list, so
+  an operation `OnPrint` and an event `PrintDriver` cannot both be declared.
+- Generated internal helpers and compiler witnesses begin with an
+  underscore—covering the `_StateMachine*` and `_stateMachine*` families (such
+  as `_StateMachineEngine`, `_StateMachineSchema`, `_StateMachineGraph`,
+  `_StateMachineTypeN`, `_StateMachineChecked`), the witness types
+  (`_TransitionSourceIsPhasePayload`, `_TransitionReturnsDeclaredResult`,
+  `_TriggerPayloadMatchesDeclaration`, `_RouterSourceIsPhasePayload`,
+  `_SharedModeRequiresSendable`, `_OperationFailureIsError`,
+  `_OperationKeyIsHashable`, `_EffectIsCopyable`, `_SendingValueIsSendable`),
+  and `_<Op>Work` for `.local` operations. Every generated `_`-prefixed name is
+  reserved across every identifier token inside the schema body, covering both
+  declarations and references, because the expansion's own declaration would
+  hide an external declaration of the same name.
 
 Generated code names every runtime and standard-library type through a module
 selector, as `StateMachine::RuntimeState` and `Swift::Hashable`, so a schema
 may declare its own types of those names, such as `Result` or `Error`, and even
-types named `Swift` or `StateMachine`, at file scope or inside the schema. A
-phase case may share a name with a snapshot member, such as `revision`, and an
-edge or router may share one with a member of the phase wrappers unless its
-generated method would redeclare that member. An edge that takes no payload
-cannot be named for a wrapper property such as `value` or `revision`, and an
-edge also cannot be named `takeValue` without a payload or `withValue` with
-one, because its `Owned` method would shadow the owner's own verb of that name.
-An operation's driver and an event's handler are parameters of one managed
-initializer, so an operation `OnPrint`, whose driver is `onPrintDriver:`, and
-an event `PrintDriver`, whose handler is also `onPrintDriver:`, cannot both be
-declared.
-
-An extension of a generated type, such as `Approval.Shared`, may add members,
-but not a type named like one that the schema's signatures spell, such as
-`Draft`. Generated members inside that type would name the extension's type
-instead, and the macro cannot see extensions to avoid it. The expansion's
-implementation names, which begin with an underscore, such as
-`_StateMachineEngine`, are reserved in every spelling inside the schema, not
-only as declarations. A spelling that names a declaration of such a name
-outside the schema is diagnosed, because the expansion's own declaration would
-hide it. Diagnostics identify the conflicting declaration and ask for a
-distinct name.
+types named `Swift` or `StateMachine`, at file scope or inside the schema. An
+extension of a generated type, such as `Approval.Shared`, may add members, but
+not a type named like one that the schema's signatures spell, such as `Draft`.
+Generated members inside that type would name the extension's type instead, and
+the macro cannot see extensions to avoid it. Diagnostics identify the
+conflicting declaration and ask for a distinct name.

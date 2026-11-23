@@ -54,18 +54,73 @@ struct Generator {
     /// The deprecation a generated public member named for an authored function repeats, before its modifiers.
     func deprecated(_ deprecation: Schema.Deprecation?) -> String { deprecation.map { $0.attribute + " " } ?? "" }
 
+    /// The name of the bound forwarding helper for a generic `<Source>` `from:` transition.
+    func genericHelperName(_ edge: Schema.Transition) -> String {
+        "_stateMachineGeneric\(edge.declaration)"
+    }
+
+    /// Whether `edge` invokes its authored generic `<Source>` function through a bound forwarding helper.
+    func usesGenericHelper(_ edge: Schema.Transition) -> Bool {
+        edge.isGenericSource && edge.genericParameterClause != nil
+    }
+
+    /// Replaces the callee name in `deprecationCall` with the declaration's bound generic forwarding helper.
+    func genericDeprecationCall(_ edge: Schema.Transition, from deprecationCall: String) -> String {
+        guard let openParen = deprecationCall.firstIndex(of: "(") else { return deprecationCall }
+        return genericHelperName(edge) + deprecationCall[openParen...]
+    }
+
+    /// Transition names declared by more than one authored `@Transition` function in this schema.
+    var overloadedTransitionNames: Set<String> {
+        var declarationsByName: [String: Set<Int>] = [:]
+        for edge in schema.transitions {
+            declarationsByName[edge.name, default: []].insert(edge.declaration)
+        }
+        return Set(declarationsByName.compactMap { $0.value.count > 1 ? $0.key : nil })
+    }
+
+    /// The expression that invokes the authored function of `edge` with `arguments`.
+    ///
+    /// Generic `<Source>` transitions go through their bound forwarding helper (and deprecated ones through
+    /// `_stateMachineDeprecated`, whose witness calls that helper) so Swift selects the exact authored
+    /// declaration even when a phase conforms to multiple or refined constraint protocols.
+    func edgeCall(_ edge: Schema.Transition, arguments: String) -> String {
+        if edge.deprecation == nil, usesGenericHelper(edge) {
+            return "\(schemaReference).\(genericHelperName(edge))(\(arguments))"
+        }
+        return "\(authored(edge.deprecation)).\(edge.name)(\(arguments))"
+    }
+
     /// The authored functions' deprecations, each once, in declaration order, paired with whether a call
-    /// to the function needs `try`.
+    /// to the function needs `try` and the schema-scoped call expression its witness executes.
     ///
     /// A call needs `try` when the function declares `throws` and the macro reads its failure as other
     /// than `Never`. An edge that returns `Advance` reports its failure without throwing.
-    var deprecations: [(deprecation: Schema.Deprecation, throwing: Bool)] {
+    var deprecations: [(deprecation: Schema.Deprecation, throwing: Bool, call: String)] {
         var seen: Set<String> = []
-        let all =
-            schema.transitions.map { ($0.deprecation, $0.failureType != nil) }
-            + schema.routes.map { ($0.deprecation, $0.failureType != nil) }
-            + [(schema.restoration?.deprecation, schema.restoration?.failureType != nil)]
-        return all.compactMap { deprecation, throwing in deprecation.map { ($0, throwing && $0.declaresThrows) } }
+        let all: [(Schema.Deprecation?, Bool, String?)] =
+            schema.transitions.map { edge in
+                (
+                    edge.deprecation,
+                    edge.failureType != nil,
+                    edge.deprecation.map {
+                        usesGenericHelper(edge) ? genericDeprecationCall(edge, from: $0.call) : $0.call
+                    }
+                )
+            }
+            + schema.routes.map { ($0.deprecation, $0.failureType != nil, $0.deprecation?.call) }
+            + [
+                (
+                    schema.restoration?.deprecation,
+                    schema.restoration?.failureType != nil,
+                    schema.restoration?.deprecation?.call
+                )
+            ]
+        return
+            all.compactMap { deprecation, throwing, call in
+                guard let deprecation, let call else { return nil }
+                return (deprecation, throwing && deprecation.declaresThrows, call)
+            }
             .filter { seen.insert($0.deprecation.declaration).inserted }
     }
 
@@ -81,7 +136,7 @@ struct Generator {
                 \(deprecations.map(\.deprecation.declaration).joined(separator: "\n"))
             }
             fileprivate enum _StateMachineDeprecatedCalls: _StateMachineDeprecatedFunctions {
-                \(deprecations.map { "@available(*, deprecated)\n\($0.deprecation.declaration) { \($0.throwing ? "try " : "")\(schemaReference).\($0.deprecation.call) }" }
+                \(deprecations.map { "@available(*, deprecated)\n\($0.deprecation.declaration) { \($0.throwing ? "try " : "")\(schemaReference).\($0.call) }" }
                 .joined(separator: "\n"))
             }
             fileprivate static var _stateMachineDeprecated: any _StateMachineDeprecatedFunctions.Type {
@@ -90,8 +145,65 @@ struct Generator {
             """
     }
 
+    /// Schema-level forwarding helpers for generic `<Source>` `from:` transitions.
+    ///
+    /// Each helper repeats its authored declaration's generic parameter and `where` clauses, so calling the
+    /// authored function inside the helper binds to that exact declaration under its declared constraints
+    /// rather than letting a concrete phase's extra or refined conformances redirect or ambiguate dispatch.
+    func genericCalls() -> String {
+        var seen: Set<Int> = []
+        let helpers = schema.transitions.compactMap { edge -> String? in
+            guard usesGenericHelper(edge),
+                let genericClause = edge.genericParameterClause,
+                let sourceParam = edge.genericSourceParameter?.spelledAsName,
+                seen.insert(edge.declaration).inserted
+            else { return nil }
+            let parameters = [
+                "_ _source: \(edge.sourceOwnership)\(sourceParam)",
+                edge.payloadType.map { "_ _payload: \(edge.payloadOwnership)\(edge.payloadConvention)\($0)" },
+                edge.takesRequest
+                    ? "request _request: \(edge.requestConvention)\(schemaReference).\(operation(edge.trigger.name).request)"
+                    : nil,
+                edge.routedType.map { "routed _routed: \(edge.routedOwnership)\(edge.routedConvention)\($0)" },
+            ]
+            .compactMap { $0 }.joined(separator: ", ")
+            let destination = edge.preservesSourcePhase ? sourceParam : "\(schemaReference).\(phase(edge.to))"
+            let effect: String = {
+                let name = authoredEffect(edge)
+                return name == "Swift::Never" ? name : "\(schemaReference).\(name)"
+            }()
+            let resultType: String
+            switch edge.shape {
+            case .advance:
+                resultType =
+                    "StateMachine::Advance<\(sourceParam), \(destination), \(effect), \(edge.failureType ?? "Swift::Never")>"
+            case .change:
+                resultType = "StateMachine::Change<\(destination), \(effect)>"
+            case .destination:
+                resultType = destination
+            }
+            let throwsClause = (edge.shape != .advance ? edge.failureType : nil).map { " throws(\($0))" } ?? ""
+            let whereClause = edge.genericWhereClause.map { " \($0)" } ?? ""
+            let callArguments = authoredArguments(
+                edge,
+                source: "_source",
+                payload: edge.payloadType == nil ? nil : "_payload",
+                request: "_request",
+                routed: "_routed"
+            )
+            let tryPrefix = (edge.shape != .advance && edge.failureType != nil) ? "try " : ""
+            let deprecation = edge.deprecation == nil ? "" : "@available(*, deprecated)\n"
+            return """
+                \(deprecation)fileprivate static func \(genericHelperName(edge))\(genericClause)(\(parameters))\(throwsClause) -> \(resultType)\(whereClause) {
+                    \(tryPrefix)\(schemaReference).\(edge.name)(\(callArguments))
+                }
+                """
+        }
+        return helpers.joined(separator: "\n")
+    }
+
     func members() throws -> [DeclSyntax] {
-        var result = [witnesses(), effects(), requests(), deprecatedCalls()]
+        var result = [witnesses(), effects(), requests(), deprecatedCalls(), genericCalls()]
         if schema.generates(.owned) { result.append(owned()) }
         if schema.generatesObservingOwner {
             result.append(values())
@@ -148,15 +260,18 @@ struct Generator {
     func authoredEffect(_ edge: Schema.Transition) -> String { schema.effectType(edge) ?? "Swift::Never" }
 
     /// The arguments of a call to an authored function, consisting of the source when it takes one, then
-    /// the trigger payload, then a completion's request labeled `request:` when it takes one.
+    /// the trigger payload, then a completion's request labeled `request:` when it takes one, and finally
+    /// a router's handoff labeled `routed:` when it takes one.
     func authoredArguments(
         _ edge: Schema.Transition,
         source: String,
         payload: String?,
-        request: String? = nil
+        request: String? = nil,
+        routed: String? = nil
     ) -> String {
         ((edge.takesSource ? [source] : []) + (payload.map { [$0] } ?? [])
-            + (edge.takesRequest ? ["request: \(request ?? "request")"] : []))
+            + (edge.takesRequest ? ["request: \(request ?? "request")"] : [])
+            + (edge.takesRouted ? ["routed: \(routed ?? "routed")"] : []))
             .joined(separator: ", ")
     }
 
@@ -192,10 +307,13 @@ struct Generator {
             return
                 "do { func witness(_ input: consuming Input) { switch consume input { case .\(trigger.name)(let bound): let payload = _stateMachineInputPayload(bound); let _: _TriggerPayloadMatchesDeclaration<\(payload)> = payload; case _: break } } }"
         }
-        // A transition that lists several sources is one authored function, witnessed once.
+        // A transition that lists several sources is one authored function, witnessed once, unless it is
+        // generic over its source phase, where each expanded source has its own concrete source and return.
         var witnessed = Set<Int>()
-        let edges = schema.transitions.filter { witnessed.insert($0.declaration).inserted }
-            .map { edge in
+        let edges = schema.transitions
+            .compactMap { edge -> String? in
+                let first = witnessed.insert(edge.declaration).inserted
+                guard first || edge.isGenericSource else { return nil }
                 let before = phase(edge.from)
                 let result: String
                 switch edge.shape {
@@ -212,11 +330,17 @@ struct Generator {
                 lines.append(
                     "let _: _TransitionReturnsDeclaredResult<\(result)> = _TransitionReturnsDeclaredResult<\(edge.returnType)>()"
                 )
-                if let payload = edge.payloadType { lines.append(payloadWitness(edge.trigger, payload)) }
-                if let request = edge.requestType {
-                    lines.append(
-                        completionWitness(.request, declared: operation(edge.trigger.name).request, authored: request)
-                    )
+                if first {
+                    if let payload = edge.payloadType { lines.append(payloadWitness(edge.trigger, payload)) }
+                    if let request = edge.requestType {
+                        lines.append(
+                            completionWitness(
+                                .request,
+                                declared: operation(edge.trigger.name).request,
+                                authored: request
+                            )
+                        )
+                    }
                 }
                 return lines.joined(separator: "\n")
             }
@@ -890,12 +1014,27 @@ struct Generator {
             """
     }
 
-    /// The choice type of a router, with one payload-free case per candidate edge.
+    /// The choice type of a router, with one case per candidate edge, carrying each candidate's `routed:`
+    /// payload when declared.
     func choiceDeclaration(_ route: Schema.Route) -> String {
-        let cases = route.choices.map { "case \($0)" }.joined(separator: "\n")
+        guard schema.hasRoutedPayload(route) else {
+            let cases = route.choices.map { "case \($0)" }.joined(separator: "\n")
+            return """
+                /// The edges `\(route.name)` may choose.
+                \(access)enum \(route.namespace ?? Schema.companion(route.name)): Swift::Sendable, Swift::Equatable, Swift::Hashable, Swift::CaseIterable { \(cases) }
+                """
+        }
+        let visibility = schema.choiceAccess(route).rawValue + " "
+        let conformance = schema.choiceIsNoncopyable(route) ? ": ~Swift::Copyable" : ""
+        let cases = branches(route)
+            .map { edge in
+                guard let routed = edge.routedType else { return "case \(edge.name)" }
+                return "case \(edge.name)(\(schema.qualify(routed)))"
+            }
+            .joined(separator: "\n")
         return """
             /// The edges `\(route.name)` may choose.
-            \(access)enum \(route.namespace ?? Schema.companion(route.name)): Swift::Sendable, Swift::Equatable, Swift::Hashable, Swift::CaseIterable { \(cases) }
+            \(visibility)enum \(route.namespace ?? Schema.companion(route.name))\(conformance) { \(cases) }
             """
     }
 
@@ -917,9 +1056,10 @@ struct Generator {
                 let members = schema.choosingRouters(from: phase.caseName)
                     .flatMap { route -> [String] in
                         let namespace = route.namespace ?? Schema.companion(route.name)
+                        let choiceVisibility = schema.choiceAccess(route).rawValue + " "
                         var members = [
                             schema.sharesChoice(route.name)
-                                ? "\(access)typealias \(namespace) = \(name).Route.\(namespace)"
+                                ? "\(choiceVisibility)typealias \(namespace) = \(name).Route.\(namespace)"
                                 : choiceDeclaration(route)
                         ]
                         if schema.generates(.owned), schema.needsOwnedResult(route) {
@@ -979,24 +1119,27 @@ struct Generator {
             route.failureType == nil
             ? "let selection: \(choice) = \(call)"
             : "let selection: \(choice)\ndo { selection = try \(call) } catch { return .rejected(error, self) }"
+        let consume = schema.choiceIsNoncopyable(route) ? "consume " : ""
         let cases = branches(route)
             .map { edge in
                 let choice = edge.name
+                let pattern = edge.takesRouted ? ".\(choice)(let routed)" : ".\(choice)"
                 let branchArgument =
                     ((takesPayload ? ["input"] : [])
-                    + (edge.takesRequest ? ["request: request"] : []))
+                    + (edge.takesRequest ? ["request: request"] : [])
+                    + (edge.takesRouted ? ["routed: routed"] : []))
                     .joined(separator: ", ")
                 // The method's own parameters may share an edge's name, so the edge is called through `self`.
                 return wraps
-                    ? "case .\(choice): return .\(choice)(self.\(choice)(\(branchArgument)))"
-                    : "case .\(choice): return self.\(choice)(\(branchArgument))"
+                    ? "case \(pattern): return .\(choice)(self.\(choice)(\(branchArgument)))"
+                    : "case \(pattern): return self.\(choice)(\(branchArgument))"
             }
             .joined(separator: "\n")
         return """
             /// Runs the router `\(route.name)`, then advances through the edge it selects.
             \(deprecated(route.deprecation))\(access)consuming func \(route.name)(\(parameter)) -> \(result) where Phase == \(phase(route.from)) {
                 \(routedCopyCheck(route))\(selection)
-                switch selection { \(cases) }
+                switch \(consume)selection { \(cases) }
             }
             """
     }
@@ -1005,7 +1148,6 @@ struct Generator {
     func observedRoutedMethod(_ route: Schema.Route) -> String {
         let parameter = route.payloadType.map { "_ input: \(routedConvention(route))\($0)" } ?? ""
         let argument = route.payloadType == nil ? "" : ", input"
-        let branchArgument = route.payloadType == nil ? "" : "input"
         let wraps = routedFailureWraps(route)
         let call = "\(authored(route.deprecation)).\(route.name)(payload\(argument))"
         let choice = schema.choiceType(route) ?? "Route.\(Schema.companion(route.name))"
@@ -1017,16 +1159,22 @@ struct Generator {
             selection =
                 "let selection: \(choice)\ndo { selection = try \(call) } catch { throw .\(rejectionCase(route.name, from: route.from))(error) }"
         }
+        let consume = schema.choiceIsNoncopyable(route) ? "consume " : ""
         let cases = branches(route)
             .map { edge in
+                let pattern = edge.takesRouted ? ".\(edge.name)(let routed)" : ".\(edge.name)"
+                let branchArgument =
+                    ((route.payloadType == nil ? [] : ["input"])
+                    + (edge.takesRouted ? ["routed: routed"] : []))
+                    .joined(separator: ", ")
                 // The method's own parameter may share an edge's name, so the edge is called through `self`.
                 let branch = "self.\(edge.name)(\(branchArgument))"
                 switch (edge.failureType != nil, wraps) {
-                case (false, _): return "case .\(edge.name): return \(branch)"
-                case (true, false): return "case .\(edge.name): return try \(branch)"
+                case (false, _): return "case \(pattern): return \(branch)"
+                case (true, false): return "case \(pattern): return try \(branch)"
                 case (true, true):
                     return
-                        "case .\(edge.name): do { return try \(branch) } catch { throw .\(rejectionCase(edge.name, from: edge.from))(error) }"
+                        "case \(pattern): do { return try \(branch) } catch { throw .\(rejectionCase(edge.name, from: edge.from))(error) }"
                 }
             }
             .joined(separator: "\n")
@@ -1034,12 +1182,13 @@ struct Generator {
             /// Runs the router `\(route.name)`, then prepares the edge it selects.
             \(deprecated(route.deprecation))\(access)func \(route.name)(\(parameter))\(routedThrows(route)) -> Prepared where Phase == \(phase(route.from)) {
                 \(selection)
-                switch selection { \(cases) }
+                switch \(consume)selection { \(cases) }
             }
             """
     }
 
     func owned() -> String {
+        let overloadedNames = overloadedTransitionNames
         let methods = schema.transitions
             .map { edge in
                 let before = phase(edge.from)
@@ -1053,6 +1202,7 @@ struct Generator {
                     edge.payloadType.map { "_ input: \(edge.payloadOwnership)\(edge.payloadConvention)\($0)" },
                     edge.takesRequest
                         ? "request: \(edge.requestConvention)\(operation(edge.trigger.name).request)" : nil,
+                    edge.routedType.map { "routed: \(edge.routedOwnership)\(edge.routedConvention)\($0)" },
                 ]
                 .compactMap { $0 }.joined(separator: ", ")
                 let arguments = authoredArguments(
@@ -1060,35 +1210,52 @@ struct Generator {
                     source: "phase",
                     payload: edge.payloadType == nil ? nil : "input"
                 )
-                let call = "\(authored(edge.deprecation)).\(edge.name)(\(arguments))"
+                let call = edgeCall(edge, arguments: arguments)
+                let annotateOwnedResult =
+                    edge.isGenericSource || (!edge.takesSource && overloadedNames.contains(edge.name))
                 // The edge's own effect type, so a caller switches over only what this edge can start.
                 let result = ownedResult(edge, source: "Self")
                 switch edge.shape {
                 case .advance:
+                    let header: String
+                    if annotateOwnedResult {
+                        let advanceType =
+                            "StateMachine::Advance<\(before), \(after), \(authoredEffect(edge)), \(edge.failureType ?? "Swift::Never")>"
+                        header = """
+                            let advance: \(advanceType) = \(call)
+                            switch consume advance {
+                            """
+                    } else {
+                        header = "switch \(call) {"
+                    }
                     return """
                         /// Consumes the predecessor and preserves it on authored rejection.
                         \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
-                            switch \(call) {
+                            \(header)
                             case .advanced(let next, let effects): return .advanced(Owned<\(after)>(next), effects: effects)
                             case .rejected(let failure, let original): return .rejected(failure, Owned<\(before)>(original))
                             }
                         }
                         """
                 case .change where edge.failureType != nil:
+                    let changeAnnotation =
+                        annotateOwnedResult ? ": StateMachine::Change<\(after), \(authoredEffect(edge))>" : ""
                     return """
                         /// Advances through the authored edge or returns the original predecessor.
                         \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
                             do {
-                                let change = try \(call)
+                                let change\(changeAnnotation) = try \(call)
                                 return .advanced(Owned<\(after)>(change.next), effects: change.effects)
                             } catch { return .rejected(error, self) }
                         }
                         """
                 case .change:
+                    let changeAnnotation =
+                        annotateOwnedResult ? ": StateMachine::Change<\(after), \(authoredEffect(edge))>" : ""
                     return """
                         /// Advances through the authored edge, preserving effect order.
                         \(marked)\(visibility)consuming func \(edge.name)(\(payload)) -> \(result) where Phase == \(before) {
-                            let change = \(call)
+                            let change\(changeAnnotation) = \(call)
                             return .init(Owned<\(after)>(change.next), effects: change.effects)
                         }
                         """
@@ -1313,8 +1480,13 @@ struct Generator {
         let parameter: String
         let ticket: String
         let documentation: String
+        let routedParameter = edge.routedType.map { "routed: \(edge.routedOwnership)\(edge.routedConvention)\($0)" }
         if edge.trigger.kind == .input {
-            parameter = edge.payloadType.map { "_ input: \(edge.payloadConvention)\($0)" } ?? ""
+            parameter = [
+                edge.payloadType.map { "_ input: \(edge.payloadConvention)\($0)" },
+                routedParameter,
+            ]
+            .compactMap { $0 }.joined(separator: ", ")
             argument = authoredArguments(edge, source: "payload", payload: edge.payloadType == nil ? nil : "input")
             ticket = "nil"
             documentation =
@@ -1323,15 +1495,20 @@ struct Generator {
         } else {
             let op = operation(edge.trigger.name)
             let value = edge.trigger.kind == .success ? op.output : op.failure
-            parameter =
-                "_ value: \(edge.payloadConvention)\(value), \(edge.takesRequest ? "request: \(edge.requestConvention)\(op.request), " : "")authority: StateMachine::RuntimeTicket"
+            parameter = [
+                "_ value: \(edge.payloadConvention)\(value)",
+                edge.takesRequest ? "request: \(edge.requestConvention)\(op.request)" : nil,
+                routedParameter,
+                "authority: StateMachine::RuntimeTicket",
+            ]
+            .compactMap { $0 }.joined(separator: ", ")
             // A success without output passes nothing on.
             argument = authoredArguments(edge, source: "payload", payload: edge.payloadType == nil ? nil : "value")
             ticket = "authority"
             documentation =
                 "/// Prepares the completion edge that delivery selects, with operation authority preserved."
         }
-        let call = "\(edge.failureType == nil ? "" : "try ")\(authored(edge.deprecation)).\(edge.name)(\(argument))"
+        let call = "\(edge.failureType == nil ? "" : "try ")\(edgeCall(edge, arguments: argument))"
         let starts = edge.effectNamespace != nil
         let result = starts ? "change" : "next"
         let resultType = starts ? "StateMachine::Change<\(after), \(authoredEffect(edge))>" : after
@@ -1792,11 +1969,19 @@ struct Generator {
         index: DispatchIndex
     ) -> String? {
         let isInput = trigger.kind == .input
-        // A completion edge receives the retained request when it takes one, and the work's authority.
-        func arguments(_ edge: Schema.Transition) -> String {
-            guard !isInput else { return payload ?? "" }
-            return
-                "\(payload ?? "value"), \(edge.takesRequest ? "request: completion.request, " : "")authority: completion.authority"
+        // A completion edge receives the retained request when it takes one, any routed handoff, and the
+        // work's authority.
+        func arguments(_ edge: Schema.Transition, routed: Bool = false) -> String {
+            guard !isInput else {
+                return [payload, routed ? "routed: routed" : nil].compactMap { $0 }.joined(separator: ", ")
+            }
+            return [
+                payload ?? "value",
+                edge.takesRequest ? "request: completion.request" : nil,
+                routed ? "routed: routed" : nil,
+                "authority: completion.authority",
+            ]
+            .compactMap { $0 }.joined(separator: ", ")
         }
         let pair = DispatchIndex.Pair(from: from, trigger: trigger)
         let edges = index.edges[pair] ?? []
@@ -1816,15 +2001,22 @@ struct Generator {
         guard let choice = schema.choiceType(route) else {
             return "do { try \(call) } catch { throw .\(rejection)(error) }"
         }
+        let consume = schema.choiceIsNoncopyable(route) ? "consume " : ""
         let selection =
             route.failureType == nil
             ? "let selection: \(choice) = \(call)"
             : "let selection: \(choice)\ndo { selection = try \(call) } catch { throw .\(rejection)(error) }"
-        let cases = edges.map { "case .\($0.name): \(dispatchEdge($0, source: source, arguments: arguments($0)))" }
+        let cases =
+            edges
+            .map { edge in
+                let pattern = edge.takesRouted ? ".\(edge.name)(let routed)" : ".\(edge.name)"
+                return
+                    "case \(pattern): \(dispatchEdge(edge, source: source, arguments: arguments(edge, routed: edge.takesRouted)))"
+            }
             .joined(separator: "\n")
         return """
             \(selection)
-            switch selection { \(cases) }
+            switch \(consume)selection { \(cases) }
             """
     }
 

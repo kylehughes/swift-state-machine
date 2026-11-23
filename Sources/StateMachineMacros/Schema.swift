@@ -52,12 +52,14 @@ struct Schema {
         }
     }
 
-    enum Access: String {
+    enum Access: String, Comparable {
         case `public`
         case package
         case `internal`
         case `fileprivate`
         case `private`
+
+        static func < (lhs: Access, rhs: Access) -> Bool { lhs.rank < rhs.rank }
     }
 
     struct Trigger: Hashable {
@@ -224,11 +226,33 @@ struct Schema {
         let requestType: String?
         /// The passing convention generated parameters repeat for the request, such as `sending `, or empty.
         var requestConvention = ""
+        /// The authored spelling of a candidate edge's `routed:` parameter, or `nil` when it takes none.
+        var routedType: String? = nil
+        /// The passing convention generated parameters repeat for `routed:`, such as `@escaping ` or `sending `, or empty.
+        var routedConvention = ""
+        /// The ownership the authored `routed:` parameter declares as spelled (`borrowing `, `consuming `, `__shared `,
+        /// `__owned `, or empty).
+        var routedOwnership = ""
+        /// The generic source type parameter name when this multi-source transition declares `<Source>`, or `nil`.
+        var genericSourceParameter: String? = nil
+        /// The trimmed authored generic parameter clause (for example, `<Source: BaseP>`), or `nil` when nongeneric.
+        var genericParameterClause: String? = nil
+        /// The trimmed authored generic `where` clause (for example, `where Source: BaseP`), or `nil` when absent.
+        var genericWhereClause: String? = nil
+        /// The ownership the authored source parameter declares as spelled (`borrowing `, `consuming `, `__shared `,
+        /// `__owned `, or empty).
+        var sourceOwnership = ""
+        /// Whether this generic multi-source transition returns its own source phase.
+        var preservesSourcePhase = false
 
         /// Whether a completion edge takes its operation's request.
         var takesRequest: Bool { requestType != nil }
         /// Whether the authored function takes the source payload.
         var takesSource: Bool { sourceType != nil }
+        /// Whether this edge takes a routed payload from its `@Route`.
+        var takesRouted: Bool { routedType != nil }
+        /// Whether this edge came from a generic `<Source>` multi-source `from:` transition.
+        var isGenericSource: Bool { genericSourceParameter != nil }
         /// The authored function's deprecation.
         var deprecation: Deprecation?
     }
@@ -278,6 +302,8 @@ struct Schema {
         let requestType: String?
         /// The passing convention generated parameters repeat for the request, such as `sending `, or empty.
         var requestConvention = ""
+        /// The declared access of the `@Route` function (`.internal` when omitted in source).
+        var access: Access = .internal
 
         /// Whether a completion router takes its operation's request.
         var takesRequest: Bool { requestType != nil }
@@ -1194,7 +1220,9 @@ private struct SchemaParser {
                     if extra.contains(where: Self.takesRequest) { completions.takesRequest = true }
                     if label == "onSuccess" {
                         completions.succeeds = true
-                        if extra.contains(where: { !Self.takesRequest($0) }) { completions.takesOutput = true }
+                        if extra.contains(where: { !Self.takesRequest($0) && !Self.takesRouted($0) }) {
+                            completions.takesOutput = true
+                        }
                     } else {
                         completions.fails = true
                     }
@@ -1208,6 +1236,154 @@ private struct SchemaParser {
     /// Whether an authored parameter is a completion's request: its argument label is `request`.
     static func takesRequest(_ parameter: FunctionParameterSyntax) -> Bool {
         parameter.firstName.unescaped == "request"
+    }
+
+    /// Validates the ownership specifier on an authored source parameter and returns its base type and ownership prefix.
+    private func validateSourceOwnership(
+        _ sourceParameter: TypeSyntax,
+        mode: Schema.Mode
+    ) throws -> (base: TypeSyntax, ownership: String) {
+        if let attributed = sourceParameter.as(AttributedTypeSyntax.self) {
+            let ownership = attributed.specifiers.first?.as(SimpleTypeSpecifierSyntax.self)?.specifier.text
+            guard attributed.attributes.isEmpty, attributed.specifiers.count == 1, let ownership,
+                ["borrowing", "__shared", "consuming", "__owned"].contains(ownership),
+                Schema.ownsPayload(ownership: ownership + " ", convention: "") == (mode == .ownedOnly)
+            else {
+                let fits = ownership.map {
+                    ["borrowing", "__shared", "consuming", "__owned"].contains($0)
+                        && Schema.ownsPayload(ownership: $0 + " ", convention: "") == (mode == .ownedOnly)
+                }
+                let offending =
+                    attributed.attributes.first.map(Syntax.init)
+                    ?? attributed.specifiers.dropFirst(fits == true ? 1 : 0).first.map(Syntax.init)
+                    ?? Syntax(attributed)
+                try reject(
+                    offending,
+                    mode == .ownedOnly
+                        ? "Use an explicitly consuming phase payload as the source parameter."
+                        : "Use a plain or borrowing phase payload as the source parameter."
+                )
+            }
+            return (attributed.baseType.unparenthesized, ownership + " ")
+        }
+        guard mode != .ownedOnly else {
+            try reject(
+                sourceParameter,
+                "Use an explicitly consuming phase payload as the source parameter."
+            )
+        }
+        return (sourceParameter, "")
+    }
+
+    /// Parses and validates an authored `routed:` parameter on a candidate transition.
+    private func parseRoutedParameter(
+        _ param: FunctionParameterSyntax,
+        functionName: String,
+        position: Int,
+        schemaName: String,
+        mode: Schema.Mode,
+        genericSourceName: String?,
+        typeScopes: LexicalScopes,
+        checks: inout TypeChecks
+    ) throws -> (convention: String, ownership: String, type: String) {
+        let parsed = try parameter(param, schema: schemaName, role: "routed payload")
+        let parsedSyntax = spellings.type(parsed.type)
+        if let genericSourceName, Schema.freeNames(parsedSyntax).contains(genericSourceName) {
+            try reject(
+                param.type,
+                "A routed: parameter cannot reference the generic source parameter '\(genericSourceName)'."
+            )
+        }
+        let reading = try read(parsedSyntax, typeScopes)
+        let neverMessage = "Transition '\(functionName)' cannot take a routed: payload of type Never."
+        if reading.isConfirmedNever {
+            try reject(param.type, neverMessage)
+        } else if !reading.confirmsValues || reading.isNever {
+            checks.require(.isNotNever(message: neverMessage), at: parsed.type, owner: position)
+        }
+        if mode == .isolated, parsed.convention.contains("sending") {
+            checks.require(.isSendable, at: parsed.type, owner: position)
+        }
+        return parsed
+    }
+
+    /// Ensures every transition that declares a `routed:` parameter is selected by a `@Route` in each source phase.
+    private func validateRoutedCandidates(
+        transitions: [Schema.Transition],
+        routes: [Schema.Route],
+        phases: [Schema.Phase],
+        routedParameters: [Int: FunctionParameterSyntax],
+        functions: [Int: FunctionDeclSyntax],
+        declaration: EnumDeclSyntax
+    ) throws {
+        let routesByPair = Dictionary(
+            routes.map { (SourceTrigger(from: $0.from, trigger: $0.trigger), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for edge in transitions where edge.takesRouted {
+            guard routesByPair[SourceTrigger(from: edge.from, trigger: edge.trigger)] != nil else {
+                let node =
+                    routedParameters[edge.declaration].map(Syntax.init)
+                    ?? functions[edge.declaration].map { Syntax($0.name) }
+                    ?? Syntax(declaration.name)
+                let phaseName = phaseType(edge.from, in: phases)
+                if edge.sources.count > 1 {
+                    try reject(
+                        node,
+                        "Transition '\(edge.name)' takes a routed: parameter, but no @Route selects it from '\(phaseName)'; every source phase in from: must be routed, or remove routed:."
+                    )
+                } else {
+                    try reject(
+                        node,
+                        "Transition '\(edge.name)' takes a routed: parameter, but no @Route selects it from '\(phaseName)'."
+                    )
+                }
+            }
+        }
+    }
+
+    /// Whether an authored parameter is a candidate edge's routed payload: its argument label is `routed`.
+    static func takesRouted(_ parameter: FunctionParameterSyntax) -> Bool {
+        parameter.firstName.unescaped == "routed"
+    }
+
+    /// Whether `attribute` includes an argument with label `label`.
+    private static func hasArgument(_ attribute: AttributeSyntax, labeled label: String) -> Bool {
+        guard case .argumentList(let list)? = attribute.arguments else { return false }
+        return list.contains { $0.label?.lookupName == label }
+    }
+
+    /// Whether `type` is an unqualified bare reference to the generic parameter `name`.
+    private static func isGenericSource(_ type: TypeSyntax, named name: String) -> Bool {
+        guard let identifier = type.unparenthesized.as(IdentifierTypeSyntax.self),
+            identifier.moduleSelector == nil,
+            identifier.genericArgumentClause == nil
+        else { return false }
+        return identifier.name.lookupName == name
+    }
+
+    /// The spelling of `type` with unqualified bare references to generic parameter `name` replaced by
+    /// `replacement`, preserving trivia, qualified names, member names, and attributes.
+    private static func substituteGenericSource(
+        _ type: TypeSyntax,
+        named name: String,
+        with replacement: String
+    ) -> String {
+        let trimmed = type.trimmed
+        let targets = Set(
+            TypeQualifier.lookupReferences(in: trimmed)
+                .filter { $0.genericArgumentClause == nil && $0.name.lookupName == name }
+                .map(\.name.id)
+        )
+        var result = ""
+        for token in trimmed.tokens(viewMode: .sourceAccurate) {
+            if targets.contains(token.id) {
+                result += token.leadingTrivia.description + replacement + token.trailingTrivia.description
+            } else {
+                result += token.description
+            }
+        }
+        return result
     }
 
     /// Reads an authored spelling where `scope` resolves it, rejecting one a reading budget cut short:
@@ -1387,18 +1563,39 @@ private struct SchemaParser {
         }
     }
 
-    /// Checks the shape shared by authored functions, and returns the function's deprecation, if any.
+    /// Checks the shape shared by authored functions, returning the deprecation attribute (if any)
+    /// and the single generic source type parameter name (when `allowsGenericSource` is true and the
+    /// function declares one).
     ///
     /// `role` names the functions in the throws diagnostic.
     ///
-    /// Every parameter is unlabeled, except that a transition or router may label one `request:`, which
-    /// its trigger then decides it may take.
+    /// Every parameter is unlabeled, except that a transition or router may label one `request:`, and
+    /// a transition may label one `routed:`, which its trigger and routing then validate.
     private func validateFunction(
         _ function: FunctionDeclSyntax,
         role: String,
         allowsRequest: Bool = false,
-        schema: String
-    ) throws -> Schema.Deprecation? {
+        allowsRouted: Bool = false,
+        allowsGenericSource: Bool = false
+    ) throws -> (deprecation: AttributeSyntax?, genericSourceName: String?) {
+        var genericSourceName: String?
+        if allowsGenericSource, let generic = function.genericParameterClause {
+            let params = Array(generic.parameters)
+            guard params.count == 1 else {
+                try reject(
+                    params.dropFirst().first.map(Syntax.init) ?? Syntax(generic),
+                    "A multi-source transition may declare at most one generic type parameter for its source phase."
+                )
+            }
+            let param = params[0]
+            guard param.specifier == nil else {
+                try reject(
+                    param,
+                    "A multi-source transition's generic parameter must be a single type parameter for its source phase."
+                )
+            }
+            genericSourceName = param.name.lookupName
+        }
         // The refusal stands at the first offending token in source order: the `func` keyword of a function
         // that is not static, its generic parameters, a parameter's label, ellipsis, or default, `async`, or
         // its `where` clause.
@@ -1406,9 +1603,12 @@ private struct SchemaParser {
             if !function.modifiers.contains(where: { $0.name.unescaped == "static" }) {
                 return Syntax(function.funcKeyword)
             }
-            if let generic = function.genericParameterClause { return Syntax(generic) }
+            if genericSourceName == nil, let generic = function.genericParameterClause { return Syntax(generic) }
             for parameter in function.signature.parameterClause.parameters {
-                if parameter.firstName.tokenKind != .wildcard, !(allowsRequest && Self.takesRequest(parameter)) {
+                if parameter.firstName.tokenKind != .wildcard,
+                    !(allowsRequest && Self.takesRequest(parameter)),
+                    !(allowsRouted && Self.takesRouted(parameter))
+                {
                     return Syntax(parameter.firstName)
                 }
                 if let ellipsis = parameter.ellipsis { return Syntax(ellipsis) }
@@ -1417,9 +1617,21 @@ private struct SchemaParser {
             if let asyncSpecifier = function.signature.effectSpecifiers?.asyncSpecifier {
                 return Syntax(asyncSpecifier)
             }
-            return function.genericWhereClause.map(Syntax.init)
+            if genericSourceName == nil {
+                return function.genericWhereClause.map(Syntax.init)
+            }
+            return nil
         }()
         if let offending {
+            if allowsRequest && !allowsRouted,
+                let routedParam = function.signature.parameterClause.parameters.first(where: Self.takesRouted),
+                offending == Syntax(routedParam.firstName)
+            {
+                try reject(
+                    offending,
+                    "Only a candidate @Transition selected by a @Route may take a routed: parameter."
+                )
+            }
             try reject(
                 offending,
                 allowsRequest
@@ -1491,7 +1703,7 @@ private struct SchemaParser {
                 "Remove '\(modifier.trimmedDescription)': an authored function is static, with an access modifier and nonisolated as its only other modifiers."
             )
         }
-        return deprecation.map { Self.deprecation($0, of: function, schema: schema) }
+        return (deprecation, genericSourceName)
     }
 
     /// Whether `attribute` deprecates a function on every platform and nothing else: `*`, then one bare
@@ -1519,11 +1731,36 @@ private struct SchemaParser {
     private static func deprecation(
         _ attribute: AttributeSyntax,
         of function: FunctionDeclSyntax,
-        schema: String
+        schema: String,
+        substitutingGeneric: (name: String, replacement: String)? = nil
     ) -> Schema.Deprecation {
         // `Self` names the schema where the function is written, and the protocol and the type the
         // expansion declares for it are other types, so the declaration spells the schema by its name.
-        func spelled(_ type: TypeSyntax) -> String { TypeQualifier.qualify(type.trimmed, owner: schema, names: []) }
+        func spelled(_ type: TypeSyntax) -> String {
+            let trimmed = type.trimmed
+            let references = Set(TypeQualifier.lookupReferences(in: trimmed).map(\.name.id))
+            var result = ""
+            for token in trimmed.tokens(viewMode: .sourceAccurate) {
+                guard references.contains(token.id) else {
+                    result += token.description
+                    continue
+                }
+                if token.tokenKind == .keyword(.Self) {
+                    result += token.leadingTrivia.description + schema + token.trailingTrivia.description
+                } else if let substitutingGeneric,
+                    let identifier = token.parent?.as(IdentifierTypeSyntax.self),
+                    identifier.genericArgumentClause == nil,
+                    token.lookupName == substitutingGeneric.name
+                {
+                    result +=
+                        token.leadingTrivia.description + substitutingGeneric.replacement
+                        + token.trailingTrivia.description
+                } else {
+                    result += token.description
+                }
+            }
+            return result
+        }
         let parameters = function.signature.parameterClause.parameters.enumerated()
         let labels = parameters.map { $0.element.firstName.tokenKind == .wildcard ? nil : $0.element.firstName.text }
         let declared = parameters.map { index, parameter in
@@ -2305,591 +2542,27 @@ private struct SchemaParser {
                 )
             }
         }
-        let triggerLabels: Set<String> = ["on", "onSuccess", "onFailure"]
-        // The declarations functions name, each by its name, so every reference costs one lookup.
-        let inputsByName = Dictionary(inputs.map { ($0.caseName, $0) }, uniquingKeysWith: { first, _ in first })
-        let operationsByName = Dictionary(operations.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        let eventsByName = Dictionary(events.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        var transitions: [Schema.Transition] = []
-        var routes: [Schema.Route] = []
-        /// The authored spelling of each transition declaration's effect type, checked once every edge is known.
-        var effectChecks: [(declaration: Int, node: Syntax, form: EffectForm)] = []
-        /// Each router's authored result type, checked once every edge is known.
-        var routeResults: [Int: TypeSyntax] = [:]
-        /// The authored functions, by position, for diagnostics that need every edge.
-        var functions: [Int: FunctionDeclSyntax] = [:]
-        // An edge's name is unique among the edges and routers that leave one phase. The same name may
-        // leave several phases, as Swift overloads on the source payload.
-        var phasesByName: [String: Set<String>] = [:]
-        let edgeFunctionNames = Set(
-            members.compactMap { member -> String? in
-                guard let function = member.decl.as(FunctionDeclSyntax.self),
-                    function.attributes.contains(where: { element in
-                        guard let attribute = element.as(AttributeSyntax.self) else { return false }
-                        return Schema.namesMacro(attribute, "Transition") || Schema.namesMacro(attribute, "Route")
-                    })
-                else { return nil }
-                return function.name.unescaped
-            }
+        let parsedEdges = try parseTransitionsAndRoutes(
+            declaration: declaration,
+            members: members,
+            mode: mode,
+            owners: owners,
+            phases: phases,
+            phaseCases: phaseCases,
+            terminalCases: terminalCases,
+            phaseSetsByName: phaseSetsByName,
+            scopes: scopes,
+            inputs: inputs,
+            operations: operations,
+            events: events,
+            typeScopes: typeScopes,
+            checks: &checks
         )
-        for (position, member) in members.enumerated() {
-            guard let function = member.decl.as(FunctionDeclSyntax.self) else { continue }
-            let transitionAttribute = try marker(function.attributes, named: "Transition")
-            let routeAttribute = try marker(function.attributes, named: "Route")
-            // A conflict between markers stands at the later one.
-            func later(_ first: AttributeSyntax, _ second: AttributeSyntax) -> AttributeSyntax {
-                first.position < second.position ? second : first
-            }
-            if let transitionAttribute, let routeAttribute {
-                try reject(
-                    later(transitionAttribute, routeAttribute),
-                    "A function cannot be both a transition and a router."
-                )
-            }
-            if let restorationAttribute = try marker(function.attributes, named: "Restoration"),
-                let edgeAttribute = transitionAttribute ?? routeAttribute
-            {
-                try reject(
-                    later(restorationAttribute, edgeAttribute),
-                    "A @Restoration function cannot also be a transition or a router."
-                )
-            }
-            guard let attribute = transitionAttribute ?? routeAttribute else {
-                if edgeFunctionNames.contains(function.name.unescaped) {
-                    try reject(
-                        function.name,
-                        "'\(function.name.unescaped)' names a transition or router; a function that is neither cannot share its name."
-                    )
-                }
-                continue
-            }
-            functions[position] = function
-            guard identifier(function.name.unescaped) else {
-                try reject(
-                    function.name,
-                    "Name the transition or router with a Swift identifier that needs no backticks, such as one that is not a keyword."
-                )
-            }
-            let isRoute = routeAttribute != nil
-            if isRoute && mode == .ownedOnly {
-                try reject(
-                    attribute,
-                    "@Route requires hosted observations and is unavailable in .ownedOnly; select consuming edges in the caller."
-                )
-            }
-            let deprecation = try validateFunction(
-                function,
-                role: isRoute ? "Routers" : "Transitions",
-                allowsRequest: true,
-                schema: declaration.name.unescaped
-            )
-            let metadata = try arguments(
-                attribute,
-                required: [],
-                optional: isRoute
-                    ? triggerLabels.union(["failure"])
-                    : triggerLabels.union(["from", "invalidates", "starts", "cancels", "emits"])
-            )
-            let (on, input, operation) = try trigger(
-                metadata,
-                attribute: attribute,
-                inputs: inputsByName,
-                operations: operationsByName,
-                direct: mode == .ownedOnly && !isRoute ? function.name.unescaped : nil,
-                role: isRoute ? "router" : "transition"
-            )
-            let parameters = Array(function.signature.parameterClause.parameters)
-            // A success of an operation whose output is `Void` carries nothing, so its edge or router
-            // takes no output parameter.
-            let omitsOutput = on.kind == .success && operation?.producesVoid == true
-            let needsPayload = (operation != nil && !omitsOutput) || input?.payloadType != nil
-            let outcome = on.kind == .failure ? "failure" : "output"
-            // A completion edge or router takes its operation's request in the parameter labeled
-            // `request:`, after every other parameter, and no other function takes one. The label
-            // identifies the request parameter regardless of its type.
-            let requestPosition = parameters.firstIndex(where: Self.takesRequest)
-            if let requestPosition {
-                let labeled = parameters[requestPosition]
-                guard operation != nil else {
-                    try reject(
-                        labeled,
-                        "Only a completion edge or router takes its operation's request, labeled request:; take this parameter without a label."
-                    )
-                }
-                if let repeated = parameters[(requestPosition + 1)...].first(where: Self.takesRequest) {
-                    try reject(repeated, "Take the operation's request once, in the last parameter, labeled request:.")
-                }
-                guard requestPosition > 0 else {
-                    try reject(
-                        labeled,
-                        "Take the source phase payload first, without a label, and the request last, labeled request:."
-                    )
-                }
-                guard requestPosition == parameters.count - 1 else {
-                    try reject(
-                        labeled,
-                        omitsOutput
-                            ? "Take the request last, labeled request:; this success takes no output, so the request directly follows the source."
-                            : "Take the request last, labeled request:, after the source and the operation's \(outcome)."
-                    )
-                }
-            }
-            // The parameters other than the request: the source, when the function takes one, then the
-            // trigger payload, when it carries one.
-            let values = parameters.filter { !Self.takesRequest($0) }
-            // A transition that lists its sources in `from:` takes no source parameter and has an edge per source.
-            let sources: [String]
-            /// The `from:` elements that name the sources, when the transition lists them inline.
-            var sourceReferences: [(name: String, node: ExprSyntax)] = []
-            /// The `@PhaseSet` name referenced by `from:`, when the transition names a set.
-            var fromPhaseSetName: String?
-            let base: TypeSyntax?
-            if let list = metadata["from"] {
-                guard on.kind == .input || on.kind == .direct else {
-                    try reject(
-                        list,
-                        "Only an input transition lists its source phases in from:; a completion edge names its source in its first parameter."
-                    )
-                }
-                if list.is(ArrayExprSyntax.self) {
-                    sourceReferences = try typeReferences(list)
-                    sources = try sourceReferences.map { reference in
-                        if phaseSetsByName[reference.name] != nil {
-                            try reject(
-                                reference.node,
-                                "'\(reference.name)' is a @PhaseSet and cannot be listed inside a from: array literal; pass from: \(reference.name).self directly or list its phase payload types inline."
-                            )
-                        }
-                        return try phase(reference)
-                    }
-                    guard !sources.isEmpty else { try reject(list, "List at least one source phase in from:.") }
-                } else if let name = bareTypeReference(list) {
-                    if let phaseSet = phaseSetsByName[name] {
-                        fromPhaseSetName = name
-                        sources = phaseSet
-                    } else if phaseCases[name] != nil {
-                        try reject(
-                            list,
-                            "'\(name)' is a phase payload type, not a @PhaseSet; write from: [\(name).self], or reference a declared @PhaseSet enum as <Set>.self."
-                        )
-                    } else {
-                        try reject(
-                            list,
-                            "'\(name)' is not a @PhaseSet declared directly inside this schema."
-                        )
-                    }
-                } else {
-                    try reject(
-                        list,
-                        "Use an array literal of <Phase>.self references or a @PhaseSet reference as <Set>.self."
-                    )
-                }
-                guard parameters.count == (needsPayload ? 1 : 0) else {
-                    try reject(
-                        function.signature.parameterClause,
-                        needsPayload
-                            ? "A transition that lists its source phases in from: takes only the trigger payload parameter."
-                            : "A transition that lists its source phases in from: takes no parameters."
-                    )
-                }
-                base = nil
-            } else {
-                // A completion edge or router may also take the request its work was started with.
-                let required = needsPayload ? 2 : 1
-                if let operation, values.count >= 1 {
-                    let kind = isRoute ? "router" : "edge"
-                    // A success without output carries nothing to take after the source.
-                    if omitsOutput, values.count >= 2 {
-                        try reject(
-                            values[1],
-                            "Operation '\(operation.name)' succeeds without output, so its success \(kind) takes no output parameter; remove this parameter, and take the operation's request, if any, labeled request:."
-                        )
-                    }
-                    // An outcome that carries a value is taken after the source, before the request.
-                    if needsPayload, values.count == 1 {
-                        try reject(
-                            requestPosition.map { Syntax(parameters[$0]) }
-                                ?? Syntax(function.signature.parameterClause),
-                            on.kind == .success
-                                ? "Operation '\(operation.name)' succeeds with output, so its success \(kind) takes the output, unlabeled, after the source, then the request, if any, labeled request:."
-                                : "A failure \(kind) takes its operation's failure, unlabeled, after the source, then the request, if any, labeled request:."
-                        )
-                    }
-                }
-                guard values.count == required else {
-                    try reject(
-                        function.signature.parameterClause,
-                        operation != nil
-                            ? (omitsOutput
-                                ? "This trigger requires a source parameter, and optionally the operation's request, labeled request:."
-                                : "This trigger requires source and trigger payload parameters, and optionally the operation's request, labeled request:.")
-                            : "This trigger requires \(needsPayload ? "source and trigger payload parameters" : "only a source parameter")."
-                    )
-                }
-                let sourceNode: TypeSyntax
-                let sourceParameter = parameters[0].type.unparenthesized
-                if let attributed = sourceParameter.as(AttributedTypeSyntax.self) {
-                    // An edge borrows its source, or in `.ownedOnly` takes it as its own, read as a payload's
-                    // ownership is: `__shared` lends it as `borrowing` does, and `__owned` takes it as
-                    // `consuming` does.
-                    let ownership = attributed.specifiers.first?.as(SimpleTypeSpecifierSyntax.self)?.specifier.text
-                    guard attributed.attributes.isEmpty, attributed.specifiers.count == 1, let ownership,
-                        ["borrowing", "__shared", "consuming", "__owned"].contains(ownership),
-                        Schema.ownsPayload(ownership: ownership + " ", convention: "") == (mode == .ownedOnly)
-                    else {
-                        // The attribute or specifier the source may not have, or the one it has in place of
-                        // the ownership it needs.
-                        let fits = ownership.map {
-                            ["borrowing", "__shared", "consuming", "__owned"].contains($0)
-                                && Schema.ownsPayload(ownership: $0 + " ", convention: "") == (mode == .ownedOnly)
-                        }
-                        let offending =
-                            attributed.attributes.first.map(Syntax.init)
-                            ?? attributed.specifiers.dropFirst(fits == true ? 1 : 0).first.map(Syntax.init)
-                            ?? Syntax(attributed)
-                        try reject(
-                            offending,
-                            mode == .ownedOnly
-                                ? "Use an explicitly consuming phase payload as the source parameter."
-                                : "Use a plain or borrowing phase payload as the source parameter."
-                        )
-                    }
-                    sourceNode = attributed.baseType.unparenthesized
-                } else {
-                    guard mode != .ownedOnly else {
-                        try reject(
-                            sourceParameter,
-                            "Use an explicitly consuming phase payload as the source parameter."
-                        )
-                    }
-                    sourceNode = sourceParameter
-                }
-                let sourceType = payloadName(sourceNode, schema: declaration.name.unescaped)
-                guard let from = phaseCases[sourceType] else {
-                    try reject(
-                        sourceNode,
-                        "Source '\(sourceType)' is not a phase payload type declared in this schema."
-                    )
-                }
-                sources = [from]
-                base = sourceNode
-            }
-            guard let primary = sources.first else {
-                try reject(function.name, "List at least one source phase in from:.")
-            }
-            for source in sources {
-                guard phasesByName[function.name.unescaped, default: []].insert(source).inserted else {
-                    try reject(
-                        function.name,
-                        "'\(phaseType(source, in: phases))' already has an edge or router named '\(function.name.unescaped)'; give each edge from one phase a distinct name."
-                    )
-                }
-            }
-            if let operation, !operation.activeIn.contains(primary) {
-                try reject(
-                    base.map(Syntax.init) ?? Syntax(attribute),
-                    "Completion edges must start in an operation's activeIn phase."
-                )
-            }
-            if let index = sources.firstIndex(where: terminalCases.contains) {
-                let terminal = sources[index]
-                if let fromPhaseSetName, let fromExpression = metadata["from"] {
-                    try reject(
-                        fromExpression,
-                        "Terminal phase '\(terminal)' in @PhaseSet '\(fromPhaseSetName)' cannot have an outgoing transition '\(function.name.unescaped)'; remove '@Terminal', remove '\(phaseType(terminal, in: phases)).self' from '\(fromPhaseSetName)', or remove the transition."
-                    )
-                }
-                // The `from:` element that names the terminal phase, or the source parameter.
-                try reject(
-                    index < sourceReferences.count ? Syntax(sourceReferences[index].node) : Syntax(parameters[0]),
-                    "Terminal phase '\(terminal)' cannot have an outgoing \(isRoute ? "router" : "transition") '\(function.name.unescaped)'; remove '@Terminal', or remove the \(isRoute ? "router" : "transition")."
-                )
-            }
-            // Generated methods inside nested types repeat these spellings, where `Self` names another type.
-            let schemaName = declaration.name.unescaped
-            let payload =
-                try needsPayload ? parameter(values[base == nil ? 0 : 1], schema: schemaName, role: "payload") : nil
-            let payloadType = payload?.type
-            // A payload of an `.isolated` schema need not be `Sendable`, so generated code hands it to a
-            // `sending` parameter as it is only from a value it holds alone and uses once. An observing
-            // owner keeps an input it receives and each outcome until a transition accepts it, so there
-            // the expansion requires the type to be `Sendable`, which a value of it can be shared as. An
-            // `Owned` router's reuse is decided once its candidates are known.
-            let observing = owners.contains { $0 != .owned }
-            if mode == .isolated, let payload, payload.convention.contains("sending"), observing {
-                checks.require(.isSendable, at: payload.type)
-            }
-            let request = try requestPosition.map { position in
-                try parameter(parameters[position], schema: schemaName, role: "request")
-            }
-            let requestType = request?.type
-            if let requestPosition, let operation, !operation.hasRequest {
-                try reject(
-                    parameters[requestPosition],
-                    "Operation '\(operation.name)' has no Key and takes no input, so its completion carries no request; remove this parameter."
-                )
-            }
-            // An observing owner keeps each request with its outcome, so a request it passes as `sending`
-            // must be `Sendable`, which a request is exactly when its input is.
-            if mode == .isolated, request?.convention.contains("sending") == true, observing, let operation,
-                operation.takesInput
-            {
-                checks.require(.isSendable, at: operation.request)
-            }
-            // A transition becomes a method of each phase wrapper the owners use. A router's methods
-            // exist only once it has edges to choose, which is checked after every edge is known.
-            if !isRoute {
-                let owned = (payloadType == nil ? [] : ["_"]) + (requestType == nil ? [] : ["request"])
-                let observed = on.kind == .input ? (payloadType == nil ? [] : ["_"]) : nil
-                try checkWrapperMembers(function, owned: owned, observed: observed, owners: owners, role: "transition")
-            }
-            let thrown = try thrownType(
-                function,
-                owner: position,
-                schema: schemaName,
-                scopes: typeScopes,
-                checks: &checks
-            )
-            guard let result = function.signature.returnClause?.type.unparenthesized else {
-                try reject(function.signature, "Return the destination phase payload, a Change, or a Route choice.")
-            }
-            if isRoute {
-                let pinned = try metadata["failure"]
-                    .map { expression -> String in
-                        guard on.kind == .input else {
-                            try reject(
-                                expression,
-                                "Only an input router pins its failure with failure:; delivery reports a completion router's failure."
-                            )
-                        }
-                        guard let member = expression.as(MemberAccessExprSyntax.self), let typeBase = member.base,
-                            member.declName.baseName.tokenKind == .keyword(.self), member.declName.argumentNames == nil
-                        else { try reject(expression, "Name the pinned failure type as <Failure>.self.") }
-                        return outsideSchema(
-                            spellings.type(typeBase.trimmedDescription),
-                            schema: declaration.name.unescaped
-                        )
-                    }
-                routes.append(
-                    Schema.Route(
-                        name: function.name.unescaped,
-                        from: primary,
-                        trigger: on,
-                        sourceType: base?.trimmedDescription ?? "",
-                        payloadType: payloadType,
-                        payloadConvention: payload?.convention ?? "",
-                        payloadOwnership: payload?.ownership ?? "",
-                        failureType: thrown,
-                        pinnedFailure: pinned,
-                        namespace: nil,
-                        choices: [],
-                        declaration: position,
-                        requestType: requestType,
-                        requestConvention: request?.convention ?? "",
-                        deprecation: deprecation
-                    )
-                )
-                routeResults[position] = result
-                continue
-            }
-            var started: [Schema.Operation] = []
-            let startReferences = try metadata["starts"].map(typeReferences) ?? []
-            for reference in startReferences {
-                guard let operation = operationsByName[reference.name] else {
-                    try reject(
-                        reference.node,
-                        eventsByName[reference.name] != nil
-                            ? "'\(reference.name)' is an @Event; list it in emits:."
-                            : "'\(reference.name)' is not a declared @Operation namespace."
-                    )
-                }
-                started.append(operation)
-            }
-            var cancelled: [Schema.Operation] = []
-            for reference in try metadata["cancels"].map(typeReferences) ?? [] {
-                guard let operation = operationsByName[reference.name] else {
-                    try reject(
-                        reference.node,
-                        eventsByName[reference.name] != nil
-                            ? "'\(reference.name)' is an @Event, which has no work to cancel."
-                            : "'\(reference.name)' is not a declared @Operation namespace."
-                    )
-                }
-                guard operation.isKeyed else {
-                    try reject(
-                        reference.node,
-                        "'\(reference.name)' declares no Key, so it has no work to cancel by key; declare a Key, or revoke its work by invalidating its scope with invalidates:."
-                    )
-                }
-                cancelled.append(operation)
-            }
-            var emitted: [Schema.Event] = []
-            for reference in try metadata["emits"].map(typeReferences) ?? [] {
-                guard let event = eventsByName[reference.name] else {
-                    try reject(
-                        reference.node,
-                        operationsByName[reference.name] != nil
-                            ? "'\(reference.name)' is an @Operation; list it in starts:."
-                            : "'\(reference.name)' is not a declared @Event namespace."
-                    )
-                }
-                emitted.append(event)
-            }
-            let effectNamespace =
-                started.isEmpty && emitted.isEmpty && cancelled.isEmpty
-                ? nil : Schema.companion(function.name.unescaped)
-            if let effectNamespace, ["Effect", "Type", "Protocol"].contains(effectNamespace) {
-                try reject(
-                    function.name,
-                    "This transition's effect type would be Effect.\(effectNamespace), which is unavailable; rename the transition."
-                )
-            }
-            // Generated code inside `Effect` names the schema's own types through the schema's name.
-            if let effectNamespace, effectNamespace == declaration.name.unescaped {
-                try reject(
-                    function.name,
-                    "This transition's effect type would be Effect.\(effectNamespace), which hides the schema '\(declaration.name.unescaped)' inside Effect; rename the transition."
-                )
-            }
-            var failureType = thrown
-            let shape: Schema.Transition.Shape
-            let destinationNode: TypeSyntax
-            if let arguments = runtimeGenericArguments(result, named: "Advance"), arguments.count == 4 {
-                let list = Array(arguments)
-                guard mode == .ownedOnly, let destination = list[1].type else {
-                    try reject(
-                        result,
-                        "Advance<Source, Destination, Effect, Failure> is the owned-only form; value transitions use typed throws."
-                    )
-                }
-                guard base != nil else {
-                    try reject(
-                        result,
-                        "A transition that lists its source phases in from: has no one source to give back; return its destination or a Change."
-                    )
-                }
-                shape = .advance
-                destinationNode = destination
-                failureType = outsideSchema(
-                    list[3].type?.trimmed ?? spellings.type(list[3].argument.trimmedDescription),
-                    schema: schemaName
-                )
-                effectChecks.append(
-                    (
-                        position, Syntax(list[2]),
-                        .advance(list[2].type?.trimmedDescription ?? list[2].argument.trimmedDescription)
-                    )
-                )
-            } else if let arguments = runtimeGenericArguments(result, named: "Change"), arguments.count == 2 {
-                let list = Array(arguments)
-                guard let destination = list[0].type else {
-                    try reject(result, "Change must name the destination phase payload type.")
-                }
-                guard effectNamespace != nil else {
-                    try reject(
-                        result,
-                        "This transition starts no operation, cancels no work, and emits no event; return \(destination.trimmedDescription) directly."
-                    )
-                }
-                shape = .change
-                destinationNode = destination
-                effectChecks.append(
-                    (
-                        position, Syntax(list[1]),
-                        .change(list[1].type?.trimmedDescription ?? list[1].argument.trimmedDescription)
-                    )
-                )
-            } else {
-                if effectNamespace != nil {
-                    effectChecks.append((position, Syntax(result), .destination(result.trimmedDescription)))
-                }
-                shape = .destination
-                destinationNode = result
-            }
-            if mode == .ownedOnly, thrown != nil, let throwsClause = function.signature.effectSpecifiers?.throwsClause {
-                try reject(
-                    throwsClause,
-                    "Owned-only transitions cannot throw; return Advance<Source, Destination, Effect, Failure> to give the source back."
-                )
-            }
-            let destinationType = payloadName(destinationNode, schema: declaration.name.unescaped)
-            guard let to = phaseCases[destinationType] else {
-                try reject(
-                    destinationNode,
-                    "Destination '\(destinationType)' is not a phase payload type declared in this schema."
-                )
-            }
-            let invalidates = try metadata["invalidates"].map { try caseReferences($0, in: "Scope") } ?? []
-            if let listed = metadata["invalidates"], let index = invalidates.firstIndex(where: { !scopes.contains($0) })
-            {
-                // The element that names an undeclared scope.
-                let elements = listed.as(ArrayExprSyntax.self).map { Array($0.elements) } ?? []
-                try reject(
-                    index < elements.count ? Syntax(elements[index].expression) : Syntax(listed),
-                    "invalidates must reference declared Scope cases."
-                )
-            }
-            // An operation runs only where its primary scope and every required scope are active.
-            for (operation, reference) in zip(started, startReferences) {
-                guard operation.activeIn.contains(to) else {
-                    try reject(
-                        reference.node,
-                        "Started operation '\(operation.name)' and every required scope must be eligible in destination '\(destinationType)'."
-                    )
-                }
-            }
-            for source in sources {
-                transitions.append(
-                    Schema.Transition(
-                        name: function.name.unescaped,
-                        from: source,
-                        to: to,
-                        trigger: on,
-                        invalidates: invalidates,
-                        starts: started.map(\.effect),
-                        cancels: cancelled.map(\.effect),
-                        emits: emitted.map(\.effect),
-                        payloadType: payloadType,
-                        payloadConvention: payload?.convention ?? "",
-                        payloadOwnership: payload?.ownership ?? "",
-                        sourceType: base?.trimmedDescription,
-                        returnType: result.trimmedDescription,
-                        failureType: failureType,
-                        shape: shape,
-                        effectNamespace: effectNamespace,
-                        declaration: position,
-                        sources: sources,
-                        requestType: requestType,
-                        requestConvention: request?.convention ?? "",
-                        deprecation: deprecation
-                    )
-                )
-            }
-        }
-        // A router chooses among the edges that share its source and trigger, so its result type
-        // can only be checked once every edge is known.
-        // The edges of each source and trigger, in declaration order, found once for every router.
-        let edgesByPair = Dictionary(grouping: transitions) { SourceTrigger(from: $0.from, trigger: $0.trigger) }
-        routes = routes.map { route in
-            let choices = (edgesByPair[SourceTrigger(from: route.from, trigger: route.trigger)] ?? []).map(\.name)
-            return Schema.Route(
-                name: route.name,
-                from: route.from,
-                trigger: route.trigger,
-                sourceType: route.sourceType,
-                payloadType: route.payloadType,
-                payloadConvention: route.payloadConvention,
-                payloadOwnership: route.payloadOwnership,
-                failureType: route.failureType,
-                pinnedFailure: route.pinnedFailure,
-                namespace: choices.isEmpty ? nil : Schema.companion(route.name),
-                choices: choices,
-                declaration: route.declaration,
-                requestType: route.requestType,
-                requestConvention: route.requestConvention,
-                deprecation: route.deprecation
-            )
-        }
+        var transitions = parsedEdges.transitions
+        var routes = parsedEdges.routes
+        let effectChecks = parsedEdges.effectChecks
+        let routeResults = parsedEdges.routeResults
+        let functions = parsedEdges.functions
         // A router with no edge to choose can only reject, so it throws: a throws clause the macro reads
         // as `Never` without confirming it names a type with values, which the expansion checks. One
         // spelling names one type at the schema's scope, so every function that throws it throws.
@@ -3011,11 +2684,13 @@ private struct SchemaParser {
                 }
             }
         }
+        let access =
+            declaration.modifiers.lazy.compactMap { Schema.Access(rawValue: $0.name.unescaped) }.first ?? .internal
         // The names generated types and cases use depend on every edge, so they are checked against a
         // draft of the schema that the generator would read.
         var draft = Schema(
             name: declaration.name.unescaped,
-            access: .internal,
+            access: access,
             mode: mode,
             initial: initial,
             initialDefault: nil,
@@ -3279,113 +2954,35 @@ private struct SchemaParser {
                 "'\(token.unescaped)' names a declaration the expansion makes inside the schema for its own use, which would hide any declaration of that name this spelling means; rename that declaration."
             )
         }
-        // The edges and routers of each source and trigger, counted in one pass, in the order each pair
-        // first appears, so a schema with many triggers is checked in time linear in its functions.
-        var counted: [SourceTrigger: (edges: Int, routers: Int)] = [:]
-        var pairs: [SourceTrigger] = []
-        for pair in transitions.map({ SourceTrigger(from: $0.from, trigger: $0.trigger) }) {
-            if counted[pair] == nil { pairs.append(pair) }
-            counted[pair, default: (0, 0)].edges += 1
-        }
-        for pair in routes.map({ SourceTrigger(from: $0.from, trigger: $0.trigger) }) {
-            if counted[pair] == nil { pairs.append(pair) }
-            counted[pair, default: (0, 0)].routers += 1
-        }
-        let phaseNames = Dictionary(phases.map { ($0.caseName, $0.typeName) }, uniquingKeysWith: { first, _ in first })
-        for pair in pairs {
-            guard let count = counted[pair], count.routers > 1 || (count.edges > 1 && count.routers != 1) else {
-                continue
-            }
-            // The second router of the pair, or its second edge when it has no router.
-            let declarations =
-                count.routers > 1
-                ? routes.filter { SourceTrigger(from: $0.from, trigger: $0.trigger) == pair }.map(\.declaration)
-                : transitions.filter { SourceTrigger(from: $0.from, trigger: $0.trigger) == pair }.map(\.declaration)
-            try reject(
-                declarations.dropFirst().first.flatMap { functions[$0] }.map { Syntax($0.name) }
-                    ?? Syntax(declaration.name),
-                "Ambiguous routing from '\(phaseNames[pair.from] ?? pair.from)' for \(describe(pair.trigger, operations: operations)); declare exactly one @Route when multiple edges match."
-            )
-        }
-        for operation in operations {
-            for phase in operation.activeIn {
-                for kind in [Schema.Trigger.Kind.success, .failure]
-                where kind == .success ? !operation.neverSucceeds : !operation.isInfallible {
-                    let on = Schema.Trigger(kind: kind, name: operation.effect)
-                    guard counted[SourceTrigger(from: phase, trigger: on)] != nil else {
-                        try reject(
-                            operationNodes[operation.name].map { Syntax($0.name) } ?? Syntax(declaration.name),
-                            "Operation '\(operation.name)' needs a \(kind.rawValue) edge or router in active phase case '\(phase)'."
-                        )
-                    }
-                }
-            }
-        }
-        let access =
-            declaration.modifiers.lazy.compactMap { Schema.Access(rawValue: $0.name.unescaped) }.first ?? .internal
-        // A public or package schema generates members of its own access that name its phase payloads, `Input`, its
-        // operation and event namespaces with their aliases, and the types its payloads, outputs, keys, requests,
-        // saved data, and failures spell. Each declaration of the schema that one of those spellings names, as
-        // Swift resolves it where it is written, needs that access. A helper that none of them names may keep less,
-        // whatever it is called.
-        if access == .public || access == .package {
-            let sufficient: Set<String> = access == .public ? ["public", "open"] : ["public", "open", "package"]
-            // Each spelling paired with the scope it is written in. A namespace's alias is read from its declaration.
-            var spellings: [(TypeSyntax, Int)] = []
-            var authored = phases.map(\.typeName) + ["Input"] + operations.map(\.name) + events.map(\.name)
-            for (name, aliases) in operations.map({ ($0.name, ["Input", "Output", "Failure", "Key"]) })
-                + events.map({ ($0.name, ["Payload"]) })
-            {
-                let scope = typeScopes.memberScope(name) ?? LexicalScopes.schema
-                for alias in aliases {
-                    guard let target = typeScopes.declaredAlias(alias, in: scope) else { continue }
-                    authored.append("\(name).\(alias)")
-                    spellings.append((target, scope))
-                }
-            }
-            var signatures = transitions.flatMap { [$0.payloadType, $0.failureType, $0.requestType] }
-            signatures += routes.flatMap { [$0.payloadType, $0.failureType, $0.pinnedFailure] }
-            signatures += [restoration?.archiveType, restoration?.failureType]
-            authored += signatures.compactMap { $0 }
-            spellings += authored.map { (self.spellings.type($0), LexicalScopes.schema) }
-            var named: Set<SyntaxIdentifier> = []
-            for (spelling, scope) in spellings {
-                named.formUnion(typeScopes.namedDeclarations(spelling, in: scope))
-            }
-            func requireAccess(_ members: MemberBlockItemListSyntax) throws {
-                for member in members {
-                    let name: TokenSyntax
-                    let modifiers: DeclModifierListSyntax
-                    var nested: MemberBlockSyntax?
-                    if let type = member.decl.as(StructDeclSyntax.self) {
-                        (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
-                    } else if let type = member.decl.as(EnumDeclSyntax.self) {
-                        (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
-                    } else if let type = member.decl.as(ClassDeclSyntax.self) {
-                        (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
-                    } else if let type = member.decl.as(ActorDeclSyntax.self) {
-                        (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
-                    } else if let type = member.decl.as(ProtocolDeclSyntax.self) {
-                        (name, modifiers) = (type.name, type.modifiers)
-                    } else if let alias = member.decl.as(TypeAliasDeclSyntax.self) {
-                        (name, modifiers) = (alias.name, alias.modifiers)
-                    } else {
-                        continue
-                    }
-                    guard
-                        !named.contains(member.decl.id)
-                            || modifiers.contains(where: { sufficient.contains($0.name.text) })
-                    else {
-                        try reject(
-                            name,
-                            "Declare '\(name.unescaped)' \(access.rawValue): the \(access.rawValue) schema '\(declaration.name.unescaped)' generates \(access.rawValue) members that name it."
-                        )
-                    }
-                    if let nested { try requireAccess(nested.members) }
-                }
-            }
-            try requireAccess(declaration.memberBlock.members)
-        }
+        try validateRoutingAndOperationCoverage(
+            transitions: transitions,
+            routes: routes,
+            phases: phases,
+            operations: operations,
+            functions: functions,
+            operationNodes: operationNodes,
+            declaration: declaration
+        )
+        try validatePublicAccess(
+            access: access,
+            declaration: declaration,
+            phases: phases,
+            operations: operations,
+            events: events,
+            transitions: transitions,
+            routes: routes,
+            restoration: restoration,
+            draft: draft,
+            typeScopes: typeScopes
+        )
+        try validateRoutedAccess(
+            declaration: declaration,
+            routes: routes,
+            draft: draft,
+            routedParameters: parsedEdges.routedParameters,
+            functions: functions,
+            typeScopes: typeScopes
+        )
         let schema = Schema(
             name: declaration.name.unescaped,
             access: access,
@@ -3427,6 +3024,1115 @@ private struct SchemaParser {
             )
         }
         return schema
+    }
+
+    /// Parsed transitions, routes, and deferred check tables produced by ``parseTransitionsAndRoutes``.
+    private struct ParsedEdges {
+        var transitions: [Schema.Transition]
+        var routes: [Schema.Route]
+        var effectChecks: [(declaration: Int, node: Syntax, form: EffectForm)]
+        var routeResults: [Int: TypeSyntax]
+        var functions: [Int: FunctionDeclSyntax]
+        var routedParameters: [Int: FunctionParameterSyntax]
+    }
+
+    /// Parses all `@Transition` and `@Route` declarations in the schema, links routers to candidates,
+    /// and validates `routed:` coverage.
+    private func parseTransitionsAndRoutes(
+        declaration: EnumDeclSyntax,
+        members: MemberBlockItemListSyntax,
+        mode: Schema.Mode,
+        owners: [Schema.Owner],
+        phases: [Schema.Phase],
+        phaseCases: [String: String],
+        terminalCases: Set<String>,
+        phaseSetsByName: [String: [String]],
+        scopes: [String],
+        inputs: [Schema.Case],
+        operations: [Schema.Operation],
+        events: [Schema.Event],
+        typeScopes: LexicalScopes,
+        checks: inout TypeChecks
+    ) throws -> ParsedEdges {
+        func phase(_ reference: (name: String, node: ExprSyntax)) throws -> String {
+            guard let phase = phaseCases[reference.name] else {
+                try reject(reference.node, "'\(reference.name)' is not a phase payload type declared in this schema.")
+            }
+            return phase
+        }
+        let triggerLabels: Set<String> = ["on", "onSuccess", "onFailure"]
+        // The declarations functions name, each by its name, so every reference costs one lookup.
+        let inputsByName = Dictionary(inputs.map { ($0.caseName, $0) }, uniquingKeysWith: { first, _ in first })
+        let operationsByName = Dictionary(operations.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        let eventsByName = Dictionary(events.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        var transitions: [Schema.Transition] = []
+        var routes: [Schema.Route] = []
+        /// The authored spelling of each transition declaration's effect type, checked once every edge is known.
+        var effectChecks: [(declaration: Int, node: Syntax, form: EffectForm)] = []
+        /// Each router's authored result type, checked once every edge is known.
+        var routeResults: [Int: TypeSyntax] = [:]
+        /// The authored functions, by position, for diagnostics that need every edge.
+        var functions: [Int: FunctionDeclSyntax] = [:]
+        /// The authored `routed:` parameter of each transition that declares one, by declaration position.
+        var routedParameters: [Int: FunctionParameterSyntax] = [:]
+        // An edge's name is unique among the edges and routers that leave one phase. The same name may
+        // leave several phases, as Swift overloads on the source payload.
+        var phasesByName: [String: Set<String>] = [:]
+        let edgeFunctionNames = Set(
+            members.compactMap { member -> String? in
+                guard let function = member.decl.as(FunctionDeclSyntax.self),
+                    function.attributes.contains(where: { element in
+                        guard let attribute = element.as(AttributeSyntax.self) else { return false }
+                        return Schema.namesMacro(attribute, "Transition") || Schema.namesMacro(attribute, "Route")
+                    })
+                else { return nil }
+                return function.name.unescaped
+            }
+        )
+        for (position, member) in members.enumerated() {
+            guard let function = member.decl.as(FunctionDeclSyntax.self) else { continue }
+            let transitionAttribute = try marker(function.attributes, named: "Transition")
+            let routeAttribute = try marker(function.attributes, named: "Route")
+            // A conflict between markers stands at the later one.
+            func later(_ first: AttributeSyntax, _ second: AttributeSyntax) -> AttributeSyntax {
+                first.position < second.position ? second : first
+            }
+            if let transitionAttribute, let routeAttribute {
+                try reject(
+                    later(transitionAttribute, routeAttribute),
+                    "A function cannot be both a transition and a router."
+                )
+            }
+            if let restorationAttribute = try marker(function.attributes, named: "Restoration"),
+                let edgeAttribute = transitionAttribute ?? routeAttribute
+            {
+                try reject(
+                    later(restorationAttribute, edgeAttribute),
+                    "A @Restoration function cannot also be a transition or a router."
+                )
+            }
+            guard let attribute = transitionAttribute ?? routeAttribute else {
+                if edgeFunctionNames.contains(function.name.unescaped) {
+                    try reject(
+                        function.name,
+                        "'\(function.name.unescaped)' names a transition or router; a function that is neither cannot share its name."
+                    )
+                }
+                continue
+            }
+            functions[position] = function
+            guard identifier(function.name.unescaped) else {
+                try reject(
+                    function.name,
+                    "Name the transition or router with a Swift identifier that needs no backticks, such as one that is not a keyword."
+                )
+            }
+            let isRoute = routeAttribute != nil
+            if isRoute && mode == .ownedOnly {
+                try reject(
+                    attribute,
+                    "@Route requires hosted observations and is unavailable in .ownedOnly; select consuming edges in the caller."
+                )
+            }
+            let hasFrom = !isRoute && Self.hasArgument(attribute, labeled: "from")
+            let (deprecationAttribute, genericSourceName) = try validateFunction(
+                function,
+                role: isRoute ? "Routers" : "Transitions",
+                allowsRequest: true,
+                allowsRouted: !isRoute,
+                allowsGenericSource: hasFrom
+            )
+            let metadata = try arguments(
+                attribute,
+                required: [],
+                optional: isRoute
+                    ? triggerLabels.union(["failure"])
+                    : triggerLabels.union(["from", "invalidates", "starts", "cancels", "emits"])
+            )
+            let (on, input, operation) = try trigger(
+                metadata,
+                attribute: attribute,
+                inputs: inputsByName,
+                operations: operationsByName,
+                direct: mode == .ownedOnly && !isRoute ? function.name.unescaped : nil,
+                role: isRoute ? "router" : "transition"
+            )
+            let parameters = Array(function.signature.parameterClause.parameters)
+            // A success of an operation whose output is `Void` carries nothing, so its edge or router
+            // takes no output parameter.
+            let omitsOutput = on.kind == .success && operation?.producesVoid == true
+            let needsPayload = (operation != nil && !omitsOutput) || input?.payloadType != nil
+            let outcome = on.kind == .failure ? "failure" : "output"
+            // A candidate transition selected by a `@Route` may take one routed payload parameter,
+            // labeled `routed:`, strictly last.
+            let routedPosition = parameters.firstIndex(where: Self.takesRouted)
+            if let routedPosition {
+                let labeled = parameters[routedPosition]
+                if mode == .ownedOnly {
+                    try reject(
+                        labeled,
+                        "routed: requires a @Route, which is unavailable in .ownedOnly."
+                    )
+                }
+                if let repeated = parameters[(routedPosition + 1)...].first(where: Self.takesRouted) {
+                    try reject(repeated, "Take the routed payload once, in the last parameter, labeled routed:.")
+                }
+                guard routedPosition == parameters.count - 1 else {
+                    try reject(labeled, "Take the routed payload last, labeled routed:.")
+                }
+            }
+            // A completion edge or router takes its operation's request in the parameter labeled
+            // `request:`, after source and outcome (and immediately before any `routed:` parameter),
+            // and no other function takes one. The label identifies the request parameter regardless of its type.
+            let requestPosition = parameters.firstIndex(where: Self.takesRequest)
+            if let requestPosition {
+                let labeled = parameters[requestPosition]
+                guard operation != nil else {
+                    try reject(
+                        labeled,
+                        "Only a completion edge or router takes its operation's request, labeled request:; take this parameter without a label."
+                    )
+                }
+                if let repeated = parameters[(requestPosition + 1)...].first(where: Self.takesRequest) {
+                    try reject(repeated, "Take the operation's request once, in the last parameter, labeled request:.")
+                }
+                guard requestPosition > 0 else {
+                    try reject(
+                        labeled,
+                        "Take the source phase payload first, without a label, and the request last, labeled request:."
+                    )
+                }
+                let expectedRequestIndex = routedPosition == nil ? parameters.count - 1 : parameters.count - 2
+                guard requestPosition == expectedRequestIndex else {
+                    try reject(
+                        labeled,
+                        omitsOutput
+                            ? "Take the request last, labeled request:; this success takes no output, so the request directly follows the source."
+                            : "Take the request last, labeled request:, after the source and the operation's \(outcome)."
+                    )
+                }
+            }
+            // The parameters other than `request:` and `routed:`: the source, when the function takes one,
+            // then the trigger payload, when it carries one.
+            let values = parameters.filter { !Self.takesRequest($0) && !Self.takesRouted($0) }
+            // A transition that lists its sources in `from:` either takes no source parameter, or declares a
+            // single generic type parameter `<Source>` and takes `_ source: Source` first.
+            let sources: [String]
+            /// The `from:` elements that name the sources, when the transition lists them inline.
+            var sourceReferences: [(name: String, node: ExprSyntax)] = []
+            /// The `@PhaseSet` name referenced by `from:`, when the transition names a set.
+            var fromPhaseSetName: String?
+            let base: TypeSyntax?
+            let sourceOwnership: String
+            if let list = metadata["from"] {
+                guard on.kind == .input || on.kind == .direct else {
+                    try reject(
+                        list,
+                        "Only an input transition lists its source phases in from:; a completion edge names its source in its first parameter."
+                    )
+                }
+                if list.is(ArrayExprSyntax.self) {
+                    sourceReferences = try typeReferences(list)
+                    sources = try sourceReferences.map { reference in
+                        if phaseSetsByName[reference.name] != nil {
+                            try reject(
+                                reference.node,
+                                "'\(reference.name)' is a @PhaseSet and cannot be listed inside a from: array literal; pass from: \(reference.name).self directly or list its phase payload types inline."
+                            )
+                        }
+                        return try phase(reference)
+                    }
+                    guard !sources.isEmpty else { try reject(list, "List at least one source phase in from:.") }
+                } else if let name = bareTypeReference(list) {
+                    if let phaseSet = phaseSetsByName[name] {
+                        fromPhaseSetName = name
+                        sources = phaseSet
+                    } else if phaseCases[name] != nil {
+                        try reject(
+                            list,
+                            "'\(name)' is a phase payload type, not a @PhaseSet; write from: [\(name).self], or reference a declared @PhaseSet enum as <Set>.self."
+                        )
+                    } else {
+                        try reject(
+                            list,
+                            "'\(name)' is not a @PhaseSet declared directly inside this schema."
+                        )
+                    }
+                } else {
+                    try reject(
+                        list,
+                        "Use an array literal of <Phase>.self references or a @PhaseSet reference as <Set>.self."
+                    )
+                }
+                if let genericSourceName {
+                    guard values.count == (needsPayload ? 2 : 1) else {
+                        try reject(
+                            function.signature.parameterClause,
+                            needsPayload
+                                ? "A generic multi-source transition requires its source parameter '\(genericSourceName)' and the trigger payload parameter."
+                                : "A generic multi-source transition requires only its source parameter '\(genericSourceName)'."
+                        )
+                    }
+                    let validatedSource = try validateSourceOwnership(values[0].type.unparenthesized, mode: mode)
+                    guard Self.isGenericSource(validatedSource.base, named: genericSourceName) else {
+                        try reject(
+                            validatedSource.base,
+                            "Use the generic source parameter '\(genericSourceName)' as the first parameter of this multi-source transition."
+                        )
+                    }
+                    base = validatedSource.base
+                    sourceOwnership = validatedSource.ownership
+                } else {
+                    guard values.count == (needsPayload ? 1 : 0) else {
+                        try reject(
+                            function.signature.parameterClause,
+                            needsPayload
+                                ? "A transition that lists its source phases in from: takes only the trigger payload parameter."
+                                : "A transition that lists its source phases in from: takes no parameters."
+                        )
+                    }
+                    base = nil
+                    sourceOwnership = ""
+                }
+            } else {
+                // A completion edge or router may also take the request its work was started with.
+                let required = needsPayload ? 2 : 1
+                if let operation, values.count >= 1 {
+                    let kind = isRoute ? "router" : "edge"
+                    // A success without output carries nothing to take after the source.
+                    if omitsOutput, values.count >= 2 {
+                        try reject(
+                            values[1],
+                            "Operation '\(operation.name)' succeeds without output, so its success \(kind) takes no output parameter; remove this parameter, and take the operation's request, if any, labeled request:."
+                        )
+                    }
+                    // An outcome that carries a value is taken after the source, before the request.
+                    if needsPayload, values.count == 1 {
+                        try reject(
+                            requestPosition.map { Syntax(parameters[$0]) }
+                                ?? Syntax(function.signature.parameterClause),
+                            on.kind == .success
+                                ? "Operation '\(operation.name)' succeeds with output, so its success \(kind) takes the output, unlabeled, after the source, then the request, if any, labeled request:."
+                                : "A failure \(kind) takes its operation's failure, unlabeled, after the source, then the request, if any, labeled request:."
+                        )
+                    }
+                }
+                guard values.count == required else {
+                    try reject(
+                        function.signature.parameterClause,
+                        operation != nil
+                            ? (omitsOutput
+                                ? "This trigger requires a source parameter, and optionally the operation's request, labeled request:."
+                                : "This trigger requires source and trigger payload parameters, and optionally the operation's request, labeled request:.")
+                            : "This trigger requires \(needsPayload ? "source and trigger payload parameters" : "only a source parameter")."
+                    )
+                }
+                let validatedSource = try validateSourceOwnership(values[0].type.unparenthesized, mode: mode)
+                let sourceType = payloadName(validatedSource.base, schema: declaration.name.unescaped)
+                guard let from = phaseCases[sourceType] else {
+                    try reject(
+                        validatedSource.base,
+                        "Source '\(sourceType)' is not a phase payload type declared in this schema."
+                    )
+                }
+                sources = [from]
+                base = validatedSource.base
+                sourceOwnership = validatedSource.ownership
+            }
+            guard let primary = sources.first else {
+                try reject(function.name, "List at least one source phase in from:.")
+            }
+            for source in sources {
+                guard phasesByName[function.name.unescaped, default: []].insert(source).inserted else {
+                    try reject(
+                        function.name,
+                        "'\(phaseType(source, in: phases))' already has an edge or router named '\(function.name.unescaped)'; give each edge from one phase a distinct name."
+                    )
+                }
+            }
+            if let operation, !operation.activeIn.contains(primary) {
+                try reject(
+                    base.map(Syntax.init) ?? Syntax(attribute),
+                    "Completion edges must start in an operation's activeIn phase."
+                )
+            }
+            if let index = sources.firstIndex(where: terminalCases.contains) {
+                let terminal = sources[index]
+                if let fromPhaseSetName, let fromExpression = metadata["from"] {
+                    try reject(
+                        fromExpression,
+                        "Terminal phase '\(terminal)' in @PhaseSet '\(fromPhaseSetName)' cannot have an outgoing transition '\(function.name.unescaped)'; remove '@Terminal', remove '\(phaseType(terminal, in: phases)).self' from '\(fromPhaseSetName)', or remove the transition."
+                    )
+                }
+                // The `from:` element that names the terminal phase, or the source parameter.
+                try reject(
+                    index < sourceReferences.count ? Syntax(sourceReferences[index].node) : Syntax(parameters[0]),
+                    "Terminal phase '\(terminal)' cannot have an outgoing \(isRoute ? "router" : "transition") '\(function.name.unescaped)'; remove '@Terminal', or remove the \(isRoute ? "router" : "transition")."
+                )
+            }
+            // Generated methods inside nested types repeat these spellings, where `Self` names another type.
+            let schemaName = declaration.name.unescaped
+            let payloadParam = needsPayload ? values[base == nil ? 0 : 1] : nil
+            let payload = try payloadParam.map { try parameter($0, schema: schemaName, role: "payload") }
+            let payloadType = payload?.type
+            if let genericSourceName, let payloadParam, let payloadType,
+                Schema.freeNames(spellings.type(payloadType)).contains(genericSourceName)
+            {
+                try reject(
+                    payloadParam.type,
+                    "A trigger payload parameter cannot reference the generic source parameter '\(genericSourceName)'."
+                )
+            }
+            // A payload of an `.isolated` schema need not be `Sendable`, so generated code hands it to a
+            // `sending` parameter as it is only from a value it holds alone and uses once. An observing
+            // owner keeps an input it receives and each outcome until a transition accepts it, so there
+            // the expansion requires the type to be `Sendable`, which a value of it can be shared as. An
+            // `Owned` router's reuse is decided once its candidates are known.
+            let observing = owners.contains { $0 != .owned }
+            if mode == .isolated, let payload, payload.convention.contains("sending"), observing {
+                checks.require(.isSendable, at: payload.type)
+            }
+            let request = try requestPosition.map { position in
+                try parameter(parameters[position], schema: schemaName, role: "request")
+            }
+            let requestType = request?.type
+            if let requestPosition, let operation, !operation.hasRequest {
+                try reject(
+                    parameters[requestPosition],
+                    "Operation '\(operation.name)' has no Key and takes no input, so its completion carries no request; remove this parameter."
+                )
+            }
+            // An observing owner keeps each request with its outcome, so a request it passes as `sending`
+            // must be `Sendable`, which a request is exactly when its input is.
+            if mode == .isolated, request?.convention.contains("sending") == true, observing, let operation,
+                operation.takesInput
+            {
+                checks.require(.isSendable, at: operation.request)
+            }
+            let routed = try routedPosition.map { index -> (convention: String, ownership: String, type: String) in
+                let param = parameters[index]
+                routedParameters[position] = param
+                return try parseRoutedParameter(
+                    param,
+                    functionName: function.name.unescaped,
+                    position: position,
+                    schemaName: schemaName,
+                    mode: mode,
+                    genericSourceName: genericSourceName,
+                    typeScopes: typeScopes,
+                    checks: &checks
+                )
+            }
+            let routedType = routed?.type
+            // A transition becomes a method of each phase wrapper the owners use. A router's methods
+            // exist only once it has edges to choose, which is checked after every edge is known.
+            if !isRoute {
+                let owned =
+                    (payloadType == nil ? [] : ["_"]) + (requestType == nil ? [] : ["request"])
+                    + (routedType == nil ? [] : ["routed"])
+                let observed =
+                    on.kind == .input
+                    ? (payloadType == nil ? [] : ["_"]) + (routedType == nil ? [] : ["routed"]) : nil
+                try checkWrapperMembers(function, owned: owned, observed: observed, owners: owners, role: "transition")
+            }
+            let thrown = try thrownType(
+                function,
+                owner: position,
+                schema: schemaName,
+                scopes: typeScopes,
+                checks: &checks
+            )
+            if let genericSourceName, let thrown,
+                Schema.freeNames(spellings.type(thrown)).contains(genericSourceName)
+            {
+                try reject(
+                    function.signature.effectSpecifiers?.throwsClause.map(Syntax.init) ?? Syntax(function.name),
+                    "A thrown failure type cannot reference the generic source parameter '\(genericSourceName)'."
+                )
+            }
+            guard let result = function.signature.returnClause?.type.unparenthesized else {
+                try reject(function.signature, "Return the destination phase payload, a Change, or a Route choice.")
+            }
+            if isRoute {
+                let pinned = try metadata["failure"]
+                    .map { expression -> String in
+                        guard on.kind == .input else {
+                            try reject(
+                                expression,
+                                "Only an input router pins its failure with failure:; delivery reports a completion router's failure."
+                            )
+                        }
+                        guard let member = expression.as(MemberAccessExprSyntax.self), let typeBase = member.base,
+                            member.declName.baseName.tokenKind == .keyword(.self), member.declName.argumentNames == nil
+                        else { try reject(expression, "Name the pinned failure type as <Failure>.self.") }
+                        return outsideSchema(
+                            spellings.type(typeBase.trimmedDescription),
+                            schema: declaration.name.unescaped
+                        )
+                    }
+                let routeAccess =
+                    function.modifiers.lazy.compactMap { Schema.Access(rawValue: $0.name.unescaped) }.first ?? .internal
+                routes.append(
+                    Schema.Route(
+                        name: function.name.unescaped,
+                        from: primary,
+                        trigger: on,
+                        sourceType: base?.trimmedDescription ?? "",
+                        payloadType: payloadType,
+                        payloadConvention: payload?.convention ?? "",
+                        payloadOwnership: payload?.ownership ?? "",
+                        failureType: thrown,
+                        pinnedFailure: pinned,
+                        namespace: nil,
+                        choices: [],
+                        declaration: position,
+                        requestType: requestType,
+                        requestConvention: request?.convention ?? "",
+                        access: routeAccess,
+                        deprecation: deprecationAttribute.map { Self.deprecation($0, of: function, schema: schemaName) }
+                    )
+                )
+                routeResults[position] = result
+                continue
+            }
+            var started: [Schema.Operation] = []
+            let startReferences = try metadata["starts"].map(typeReferences) ?? []
+            for reference in startReferences {
+                guard let operation = operationsByName[reference.name] else {
+                    try reject(
+                        reference.node,
+                        eventsByName[reference.name] != nil
+                            ? "'\(reference.name)' is an @Event; list it in emits:."
+                            : "'\(reference.name)' is not a declared @Operation namespace."
+                    )
+                }
+                started.append(operation)
+            }
+            var cancelled: [Schema.Operation] = []
+            for reference in try metadata["cancels"].map(typeReferences) ?? [] {
+                guard let operation = operationsByName[reference.name] else {
+                    try reject(
+                        reference.node,
+                        eventsByName[reference.name] != nil
+                            ? "'\(reference.name)' is an @Event, which has no work to cancel."
+                            : "'\(reference.name)' is not a declared @Operation namespace."
+                    )
+                }
+                guard operation.isKeyed else {
+                    try reject(
+                        reference.node,
+                        "'\(reference.name)' declares no Key, so it has no work to cancel by key; declare a Key, or revoke its work by invalidating its scope with invalidates:."
+                    )
+                }
+                cancelled.append(operation)
+            }
+            var emitted: [Schema.Event] = []
+            for reference in try metadata["emits"].map(typeReferences) ?? [] {
+                guard let event = eventsByName[reference.name] else {
+                    try reject(
+                        reference.node,
+                        operationsByName[reference.name] != nil
+                            ? "'\(reference.name)' is an @Operation; list it in starts:."
+                            : "'\(reference.name)' is not a declared @Event namespace."
+                    )
+                }
+                emitted.append(event)
+            }
+            let effectNamespace =
+                started.isEmpty && emitted.isEmpty && cancelled.isEmpty
+                ? nil : Schema.companion(function.name.unescaped)
+            if let effectNamespace, ["Effect", "Type", "Protocol"].contains(effectNamespace) {
+                try reject(
+                    function.name,
+                    "This transition's effect type would be Effect.\(effectNamespace), which is unavailable; rename the transition."
+                )
+            }
+            // Generated code inside `Effect` names the schema's own types through the schema's name.
+            if let effectNamespace, effectNamespace == declaration.name.unescaped {
+                try reject(
+                    function.name,
+                    "This transition's effect type would be Effect.\(effectNamespace), which hides the schema '\(declaration.name.unescaped)' inside Effect; rename the transition."
+                )
+            }
+            var failureType = thrown
+            let shape: Schema.Transition.Shape
+            let destinationNode: TypeSyntax
+            if let arguments = runtimeGenericArguments(result, named: "Advance"), arguments.count == 4 {
+                let list = Array(arguments)
+                guard mode == .ownedOnly, let destination = list[1].type else {
+                    try reject(
+                        result,
+                        "Advance<Source, Destination, Effect, Failure> is the owned-only form; value transitions use typed throws."
+                    )
+                }
+                guard base != nil else {
+                    try reject(
+                        result,
+                        "A transition that lists its source phases in from: has no one source to give back; return its destination or a Change."
+                    )
+                }
+                if let genericSourceName {
+                    guard let beforeType = list[0].type, Self.isGenericSource(beforeType, named: genericSourceName)
+                    else {
+                        try reject(
+                            list[0],
+                            "Use the generic source parameter '\(genericSourceName)' as the source type of Advance."
+                        )
+                    }
+                }
+                shape = .advance
+                destinationNode = destination
+                failureType = outsideSchema(
+                    list[3].type?.trimmed ?? spellings.type(list[3].argument.trimmedDescription),
+                    schema: schemaName
+                )
+                if let genericSourceName, let failureType,
+                    Schema.freeNames(spellings.type(failureType)).contains(genericSourceName)
+                {
+                    try reject(
+                        list[3],
+                        "Advance's failure type cannot reference the generic source parameter '\(genericSourceName)'."
+                    )
+                }
+                let advanceEffectNode = list[2].type?.trimmed ?? spellings.type(list[2].argument.trimmedDescription)
+                if let genericSourceName, Schema.freeNames(advanceEffectNode).contains(genericSourceName) {
+                    try reject(
+                        list[2],
+                        "Advance's effect type cannot reference the generic source parameter '\(genericSourceName)'."
+                    )
+                }
+                effectChecks.append(
+                    (
+                        position, Syntax(list[2]),
+                        .advance(list[2].type?.trimmedDescription ?? list[2].argument.trimmedDescription)
+                    )
+                )
+            } else if let arguments = runtimeGenericArguments(result, named: "Change"), arguments.count == 2 {
+                let list = Array(arguments)
+                guard let destination = list[0].type else {
+                    try reject(result, "Change must name the destination phase payload type.")
+                }
+                let changeEffectNode = list[1].type?.trimmed ?? spellings.type(list[1].argument.trimmedDescription)
+                if let genericSourceName, Schema.freeNames(changeEffectNode).contains(genericSourceName) {
+                    try reject(
+                        list[1],
+                        "Change's effect type cannot reference the generic source parameter '\(genericSourceName)'."
+                    )
+                }
+                guard effectNamespace != nil else {
+                    try reject(
+                        result,
+                        "This transition starts no operation, cancels no work, and emits no event; return \(destination.trimmedDescription) directly."
+                    )
+                }
+                shape = .change
+                destinationNode = destination
+                effectChecks.append(
+                    (
+                        position, Syntax(list[1]),
+                        .change(list[1].type?.trimmedDescription ?? list[1].argument.trimmedDescription)
+                    )
+                )
+            } else {
+                if effectNamespace != nil {
+                    effectChecks.append((position, Syntax(result), .destination(result.trimmedDescription)))
+                }
+                shape = .destination
+                destinationNode = result
+            }
+            if mode == .ownedOnly, thrown != nil, let throwsClause = function.signature.effectSpecifiers?.throwsClause {
+                try reject(
+                    throwsClause,
+                    "Owned-only transitions cannot throw; return Advance<Source, Destination, Effect, Failure> to give the source back."
+                )
+            }
+            let preservesSourcePhase: Bool
+            let fixedTo: String?
+            if let genericSourceName, Self.isGenericSource(destinationNode, named: genericSourceName) {
+                preservesSourcePhase = true
+                fixedTo = nil
+            } else {
+                preservesSourcePhase = false
+                let destinationType = payloadName(destinationNode, schema: declaration.name.unescaped)
+                guard let to = phaseCases[destinationType] else {
+                    try reject(
+                        destinationNode,
+                        "Destination '\(destinationType)' is not a phase payload type declared in this schema."
+                    )
+                }
+                fixedTo = to
+            }
+            let invalidates = try metadata["invalidates"].map { try caseReferences($0, in: "Scope") } ?? []
+            if let listed = metadata["invalidates"], let index = invalidates.firstIndex(where: { !scopes.contains($0) })
+            {
+                // The element that names an undeclared scope.
+                let elements = listed.as(ArrayExprSyntax.self).map { Array($0.elements) } ?? []
+                try reject(
+                    index < elements.count ? Syntax(elements[index].expression) : Syntax(listed),
+                    "invalidates must reference declared Scope cases."
+                )
+            }
+            // An operation runs only where its primary scope and every required scope are active.
+            // A same-phase multi-source transition enters every expanded phase, so each started operation
+            // must be eligible in every one of them.
+            let destinations: [(phase: String, typeName: String)] =
+                preservesSourcePhase
+                ? sources.map { ($0, phaseType($0, in: phases)) }
+                : [(fixedTo!, phaseType(fixedTo!, in: phases))]
+            for (operation, reference) in zip(started, startReferences) {
+                for destination in destinations {
+                    guard operation.activeIn.contains(destination.phase) else {
+                        try reject(
+                            reference.node,
+                            "Started operation '\(operation.name)' and every required scope must be eligible in destination '\(destination.typeName)'."
+                        )
+                    }
+                }
+            }
+            for source in sources {
+                let concreteSource = phaseType(source, in: phases)
+                let edgeTo = preservesSourcePhase ? source : fixedTo!
+                let edgeSourceType: String? =
+                    genericSourceName != nil ? concreteSource : base?.trimmedDescription
+                let edgeReturnType: String =
+                    if let genericSourceName {
+                        Self.substituteGenericSource(result, named: genericSourceName, with: concreteSource)
+                    } else {
+                        result.trimmedDescription
+                    }
+                let edgeDeprecation: Schema.Deprecation? = deprecationAttribute.map { attr in
+                    Self.deprecation(
+                        attr,
+                        of: function,
+                        schema: schemaName,
+                        substitutingGeneric: genericSourceName.map { ($0, "\(schemaName).\(concreteSource)") }
+                    )
+                }
+                transitions.append(
+                    Schema.Transition(
+                        name: function.name.unescaped,
+                        from: source,
+                        to: edgeTo,
+                        trigger: on,
+                        invalidates: invalidates,
+                        starts: started.map(\.effect),
+                        cancels: cancelled.map(\.effect),
+                        emits: emitted.map(\.effect),
+                        payloadType: payloadType,
+                        payloadConvention: payload?.convention ?? "",
+                        payloadOwnership: payload?.ownership ?? "",
+                        sourceType: edgeSourceType,
+                        returnType: edgeReturnType,
+                        failureType: failureType,
+                        shape: shape,
+                        effectNamespace: effectNamespace,
+                        declaration: position,
+                        sources: sources,
+                        requestType: requestType,
+                        requestConvention: request?.convention ?? "",
+                        routedType: routedType,
+                        routedConvention: routed?.convention ?? "",
+                        routedOwnership: routed?.ownership ?? "",
+                        genericSourceParameter: genericSourceName,
+                        genericParameterClause: genericSourceName != nil
+                            ? function.genericParameterClause?.trimmedDescription : nil,
+                        genericWhereClause: genericSourceName != nil
+                            ? function.genericWhereClause?.trimmedDescription : nil,
+                        sourceOwnership: sourceOwnership,
+                        preservesSourcePhase: preservesSourcePhase,
+                        deprecation: edgeDeprecation
+                    )
+                )
+            }
+        }
+        // A router chooses among the edges that share its source and trigger, so its result type
+        // can only be checked once every edge is known.
+        // The edges of each source and trigger, in declaration order, found once for every router.
+        let edgesByPair = Dictionary(grouping: transitions) { SourceTrigger(from: $0.from, trigger: $0.trigger) }
+        routes = routes.map { route in
+            let choices = (edgesByPair[SourceTrigger(from: route.from, trigger: route.trigger)] ?? []).map(\.name)
+            return Schema.Route(
+                name: route.name,
+                from: route.from,
+                trigger: route.trigger,
+                sourceType: route.sourceType,
+                payloadType: route.payloadType,
+                payloadConvention: route.payloadConvention,
+                payloadOwnership: route.payloadOwnership,
+                failureType: route.failureType,
+                pinnedFailure: route.pinnedFailure,
+                namespace: choices.isEmpty ? nil : Schema.companion(route.name),
+                choices: choices,
+                declaration: route.declaration,
+                requestType: route.requestType,
+                requestConvention: route.requestConvention,
+                access: route.access,
+                deprecation: route.deprecation
+            )
+        }
+        try validateRoutedCandidates(
+            transitions: transitions,
+            routes: routes,
+            phases: phases,
+            routedParameters: routedParameters,
+            functions: functions,
+            declaration: declaration
+        )
+        return ParsedEdges(
+            transitions: transitions,
+            routes: routes,
+            effectChecks: effectChecks,
+            routeResults: routeResults,
+            functions: functions,
+            routedParameters: routedParameters
+        )
+    }
+
+    /// Checks routing ambiguity and required completion coverage across active phases.
+    private func validateRoutingAndOperationCoverage(
+        transitions: [Schema.Transition],
+        routes: [Schema.Route],
+        phases: [Schema.Phase],
+        operations: [Schema.Operation],
+        functions: [Int: FunctionDeclSyntax],
+        operationNodes: [String: EnumDeclSyntax],
+        declaration: EnumDeclSyntax
+    ) throws {
+        var counted: [SourceTrigger: (edges: Int, routers: Int)] = [:]
+        var pairs: [SourceTrigger] = []
+        for pair in transitions.map({ SourceTrigger(from: $0.from, trigger: $0.trigger) }) {
+            if counted[pair] == nil { pairs.append(pair) }
+            counted[pair, default: (0, 0)].edges += 1
+        }
+        for pair in routes.map({ SourceTrigger(from: $0.from, trigger: $0.trigger) }) {
+            if counted[pair] == nil { pairs.append(pair) }
+            counted[pair, default: (0, 0)].routers += 1
+        }
+        let phaseNames = Dictionary(phases.map { ($0.caseName, $0.typeName) }, uniquingKeysWith: { first, _ in first })
+        for pair in pairs {
+            guard let count = counted[pair], count.routers > 1 || (count.edges > 1 && count.routers != 1) else {
+                continue
+            }
+            let declarations =
+                count.routers > 1
+                ? routes.filter { SourceTrigger(from: $0.from, trigger: $0.trigger) == pair }.map(\.declaration)
+                : transitions.filter { SourceTrigger(from: $0.from, trigger: $0.trigger) == pair }.map(\.declaration)
+            try reject(
+                declarations.dropFirst().first.flatMap { functions[$0] }.map { Syntax($0.name) }
+                    ?? Syntax(declaration.name),
+                "Ambiguous routing from '\(phaseNames[pair.from] ?? pair.from)' for \(describe(pair.trigger, operations: operations)); declare exactly one @Route when multiple edges match."
+            )
+        }
+        for operation in operations {
+            for phase in operation.activeIn {
+                for kind in [Schema.Trigger.Kind.success, .failure]
+                where kind == .success ? !operation.neverSucceeds : !operation.isInfallible {
+                    let on = Schema.Trigger(kind: kind, name: operation.effect)
+                    guard counted[SourceTrigger(from: phase, trigger: on)] != nil else {
+                        try reject(
+                            operationNodes[operation.name].map { Syntax($0.name) } ?? Syntax(declaration.name),
+                            "Operation '\(operation.name)' needs a \(kind.rawValue) edge or router in active phase case '\(phase)'."
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checks that types named by generated public or package members have matching access.
+    private func validatePublicAccess(
+        access: Schema.Access,
+        declaration: EnumDeclSyntax,
+        phases: [Schema.Phase],
+        operations: [Schema.Operation],
+        events: [Schema.Event],
+        transitions: [Schema.Transition],
+        routes: [Schema.Route],
+        restoration: Schema.Restoration?,
+        draft: Schema,
+        typeScopes: LexicalScopes
+    ) throws {
+        guard access == .public || access == .package else { return }
+        let sufficient: Set<String> = access == .public ? ["public", "open"] : ["public", "open", "package"]
+        var spellings: [(TypeSyntax, Int)] = []
+        var authored = phases.map(\.typeName) + ["Input"] + operations.map(\.name) + events.map(\.name)
+        for (name, aliases) in operations.map({ ($0.name, ["Input", "Output", "Failure", "Key"]) })
+            + events.map({ ($0.name, ["Payload"]) })
+        {
+            let scope = typeScopes.memberScope(name) ?? LexicalScopes.schema
+            for alias in aliases {
+                guard let target = typeScopes.declaredAlias(alias, in: scope) else { continue }
+                authored.append("\(name).\(alias)")
+                spellings.append((target, scope))
+            }
+        }
+        var signatures = transitions.flatMap { [$0.payloadType, $0.failureType, $0.requestType] }
+        for route in routes where route.namespace != nil && draft.choiceAccess(route) == access {
+            for edge in draft.branches(route) where edge.takesRouted {
+                signatures.append(edge.routedType)
+            }
+        }
+        signatures += routes.flatMap { [$0.payloadType, $0.failureType, $0.pinnedFailure] }
+        signatures += [restoration?.archiveType, restoration?.failureType]
+        authored += signatures.compactMap { $0 }
+        spellings += authored.map { (self.spellings.type($0), LexicalScopes.schema) }
+        var named: Set<SyntaxIdentifier> = []
+        for (spelling, scope) in spellings {
+            named.formUnion(typeScopes.namedDeclarations(spelling, in: scope))
+        }
+        func requireAccess(_ members: MemberBlockItemListSyntax) throws {
+            for member in members {
+                let name: TokenSyntax
+                let modifiers: DeclModifierListSyntax
+                var nested: MemberBlockSyntax?
+                if let type = member.decl.as(StructDeclSyntax.self) {
+                    (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
+                } else if let type = member.decl.as(EnumDeclSyntax.self) {
+                    (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
+                } else if let type = member.decl.as(ClassDeclSyntax.self) {
+                    (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
+                } else if let type = member.decl.as(ActorDeclSyntax.self) {
+                    (name, modifiers, nested) = (type.name, type.modifiers, type.memberBlock)
+                } else if let type = member.decl.as(ProtocolDeclSyntax.self) {
+                    (name, modifiers) = (type.name, type.modifiers)
+                } else if let alias = member.decl.as(TypeAliasDeclSyntax.self) {
+                    (name, modifiers) = (alias.name, alias.modifiers)
+                } else {
+                    continue
+                }
+                guard
+                    !named.contains(member.decl.id)
+                        || modifiers.contains(where: { sufficient.contains($0.name.text) })
+                else {
+                    try reject(
+                        name,
+                        "Declare '\(name.unescaped)' \(access.rawValue): the \(access.rawValue) schema '\(declaration.name.unescaped)' generates \(access.rawValue) members that name it."
+                    )
+                }
+                if let nested { try requireAccess(nested.members) }
+            }
+        }
+        try requireAccess(declaration.memberBlock.members)
+    }
+
+    /// Checks that schema-local declarations named by each choosing router's `routed:` parameters
+    /// (including declarations reached through schema-local aliases) meet that router's own
+    /// choice-enum access level, anchoring refusals at the authored `routed:` parameter type.
+    private func validateRoutedAccess(
+        declaration: EnumDeclSyntax,
+        routes: [Schema.Route],
+        draft: Schema,
+        routedParameters: [Int: FunctionParameterSyntax],
+        functions: [Int: FunctionDeclSyntax],
+        typeScopes: LexicalScopes
+    ) throws {
+        guard routes.contains(where: { $0.namespace != nil && draft.hasRoutedPayload($0) }) else { return }
+        struct LocalDeclaration {
+            let name: String
+            let effectiveAccess: Schema.Access
+            let aliasTarget: TypeSyntax?
+            let aliasGenericParameters: Set<String>
+            let enclosingScope: Int
+            let memberScope: Int?
+        }
+        struct Scope {
+            let parent: Int?
+            var members: [String: SyntaxIdentifier] = [:]
+            let genericParameters: Set<String>
+        }
+        func declaredAccess(_ modifiers: DeclModifierListSyntax) -> Schema.Access {
+            for modifier in modifiers where modifier.detail == nil {
+                if modifier.name.text == "open" { return .public }
+                if let level = Schema.Access(rawValue: modifier.name.text) { return level }
+            }
+            return .internal
+        }
+        var localDeclarations: [SyntaxIdentifier: LocalDeclaration] = [:]
+        var scopes: [Scope] = [Scope(parent: nil, genericParameters: [])]
+        func index(
+            _ members: MemberBlockItemListSyntax,
+            enclosingAccess: Schema.Access,
+            scope: Int
+        ) {
+            for member in members {
+                let decl = member.decl
+                if let alias = decl.as(TypeAliasDeclSyntax.self) {
+                    let effective = min(enclosingAccess, declaredAccess(alias.modifiers))
+                    let params = Set((alias.genericParameterClause?.parameters ?? []).map(\.name.lookupName))
+                    scopes[scope].members[alias.name.lookupName] = decl.id
+                    localDeclarations[decl.id] = LocalDeclaration(
+                        name: alias.name.unescaped,
+                        effectiveAccess: effective,
+                        aliasTarget: alias.initializer.value,
+                        aliasGenericParameters: params,
+                        enclosingScope: scope,
+                        memberScope: nil
+                    )
+                    continue
+                }
+                if let proto = decl.as(ProtocolDeclSyntax.self) {
+                    let effective = min(enclosingAccess, declaredAccess(proto.modifiers))
+                    scopes[scope].members[proto.name.lookupName] = decl.id
+                    localDeclarations[decl.id] = LocalDeclaration(
+                        name: proto.name.unescaped,
+                        effectiveAccess: effective,
+                        aliasTarget: nil,
+                        aliasGenericParameters: [],
+                        enclosingScope: scope,
+                        memberScope: nil
+                    )
+                    continue
+                }
+                let nominal:
+                    (
+                        name: TokenSyntax,
+                        modifiers: DeclModifierListSyntax,
+                        generic: GenericParameterClauseSyntax?,
+                        block: MemberBlockSyntax
+                    )?
+                if let type = decl.as(StructDeclSyntax.self) {
+                    nominal = (type.name, type.modifiers, type.genericParameterClause, type.memberBlock)
+                } else if let type = decl.as(EnumDeclSyntax.self) {
+                    nominal = (type.name, type.modifiers, type.genericParameterClause, type.memberBlock)
+                } else if let type = decl.as(ClassDeclSyntax.self) {
+                    nominal = (type.name, type.modifiers, type.genericParameterClause, type.memberBlock)
+                } else if let type = decl.as(ActorDeclSyntax.self) {
+                    nominal = (type.name, type.modifiers, type.genericParameterClause, type.memberBlock)
+                } else {
+                    nominal = nil
+                }
+                guard let nominal else { continue }
+                let effective = min(enclosingAccess, declaredAccess(nominal.modifiers))
+                let child = scopes.count
+                let params = Set((nominal.generic?.parameters ?? []).map(\.name.lookupName))
+                scopes.append(Scope(parent: scope, genericParameters: params))
+                scopes[scope].members[nominal.name.lookupName] = decl.id
+                localDeclarations[decl.id] = LocalDeclaration(
+                    name: nominal.name.unescaped,
+                    effectiveAccess: effective,
+                    aliasTarget: nil,
+                    aliasGenericParameters: [],
+                    enclosingScope: scope,
+                    memberScope: child
+                )
+                index(nominal.block.members, enclosingAccess: effective, scope: child)
+            }
+        }
+        index(declaration.memberBlock.members, enclosingAccess: draft.effectiveAccess, scope: 0)
+        let schemaName = declaration.name.lookupName
+        func lookup(_ name: String, from start: Int, shadowed: Set<String>) -> SyntaxIdentifier? {
+            guard !shadowed.contains(name) else { return nil }
+            var current: Int? = start
+            while let index = current {
+                if scopes[index].genericParameters.contains(name) { return nil }
+                if let id = scopes[index].members[name] { return id }
+                current = scopes[index].parent
+            }
+            return nil
+        }
+        func memberScope(of base: TypeSyntax, from scope: Int, shadowed: Set<String>, depth: Int) -> Int? {
+            guard depth > 0 else { return nil }
+            let base = base.unparenthesized
+            if let identifier = base.as(IdentifierTypeSyntax.self) {
+                guard identifier.moduleSelector == nil else { return nil }
+                if identifier.name.tokenKind == .keyword(.Self) { return scope }
+                guard case .identifier = identifier.name.tokenKind else { return nil }
+                let name = identifier.name.lookupName
+                if let id = lookup(name, from: scope, shadowed: shadowed), let info = localDeclarations[id] {
+                    if let child = info.memberScope { return child }
+                    if let target = info.aliasTarget, info.aliasGenericParameters.isEmpty {
+                        return memberScope(of: target, from: info.enclosingScope, shadowed: [], depth: depth - 1)
+                    }
+                    return nil
+                }
+                return name == schemaName && !shadowed.contains(name) ? 0 : nil
+            }
+            guard let member = base.as(MemberTypeSyntax.self), member.moduleSelector == nil,
+                let parentScope = memberScope(of: member.baseType, from: scope, shadowed: shadowed, depth: depth - 1),
+                let id = scopes[parentScope].members[member.name.lookupName],
+                let info = localDeclarations[id]
+            else { return nil }
+            if let child = info.memberScope { return child }
+            if let target = info.aliasTarget, info.aliasGenericParameters.isEmpty {
+                return memberScope(of: target, from: info.enclosingScope, shadowed: [], depth: depth - 1)
+            }
+            return nil
+        }
+        func referencedDeclarations(in type: TypeSyntax, scope: Int, shadowed: Set<String>) -> [SyntaxIdentifier] {
+            var result: [SyntaxIdentifier] = []
+            for reference in TypeQualifier.lookupReferences(in: type) {
+                guard case .identifier = reference.name.tokenKind else { continue }
+                if let id = lookup(reference.name.lookupName, from: scope, shadowed: shadowed) {
+                    result.append(id)
+                }
+            }
+            var pending = [Syntax(type)]
+            while let node = pending.popLast() {
+                pending += node.children(viewMode: .sourceAccurate).reversed()
+                if let member = node.as(MemberTypeSyntax.self), member.moduleSelector == nil,
+                    let base = memberScope(of: member.baseType, from: scope, shadowed: shadowed, depth: 64),
+                    let id = scopes[base].members[member.name.lookupName]
+                {
+                    result.append(id)
+                }
+            }
+            return result
+        }
+        func firstInsufficientDeclaration(in type: TypeSyntax, required: Schema.Access) -> LocalDeclaration? {
+            var queue = typeScopes.namedDeclarations(type, in: LexicalScopes.schema)
+            var cursor = 0
+            var visited: Set<SyntaxIdentifier> = []
+            var remainingExpansions = 256
+            while cursor < queue.count {
+                let id = queue[cursor]
+                cursor += 1
+                guard visited.insert(id).inserted, let info = localDeclarations[id] else { continue }
+                if info.effectiveAccess < required { return info }
+                if let aliasTarget = info.aliasTarget, remainingExpansions > 0 {
+                    remainingExpansions -= 1
+                    queue += referencedDeclarations(
+                        in: aliasTarget,
+                        scope: info.enclosingScope,
+                        shadowed: info.aliasGenericParameters
+                    )
+                }
+            }
+            return nil
+        }
+        for route in routes where route.namespace != nil && draft.hasRoutedPayload(route) {
+            let required = draft.choiceAccess(route)
+            for edge in draft.branches(route) where edge.takesRouted {
+                guard let routedType = edge.routedType,
+                    let offending = firstInsufficientDeclaration(
+                        in: self.spellings.type(routedType),
+                        required: required
+                    )
+                else { continue }
+                let node =
+                    routedParameters[edge.declaration].map { Syntax($0.type) }
+                    ?? functions[edge.declaration].map { Syntax($0.name) }
+                    ?? Syntax(declaration.name)
+                let article = required == .internal ? "an" : "a"
+                let message: String
+                switch required {
+                case .public:
+                    message =
+                        "Declare '\(offending.name)' public, or narrow '@Route' '\(route.name)' to a less visible access level: router '\(route.name)' generates a public choice enum that names it."
+                case .package:
+                    message =
+                        "Declare '\(offending.name)' package or public, or narrow '@Route' '\(route.name)' to internal or fileprivate: router '\(route.name)' generates a package choice enum that names it."
+                case .internal:
+                    message =
+                        "Declare '\(offending.name)' at least internal, or narrow '@Route' '\(route.name)' to fileprivate: router '\(route.name)' generates \(article) \(required.rawValue) choice enum that names it."
+                case .fileprivate:
+                    message =
+                        "Declare '\(offending.name)' at least fileprivate: router '\(route.name)' generates a fileprivate choice enum that names it."
+                case .private:
+                    continue
+                }
+                try reject(node, message)
+            }
+        }
     }
 
     /// Refuses a `renamed:` that is anything but the bare name of another edge, or of another router, whose
@@ -3829,7 +4535,8 @@ private struct SchemaParser {
             members.compactMap({ $0.decl.as(FunctionDeclSyntax.self) })
                 .filter({ $0.name.unescaped == function.name.unescaped }).count == 1
         else { try reject(function.name, "A @Restoration function cannot be overloaded.") }
-        let deprecation = try validateFunction(function, role: "Restoration functions", schema: schema)
+        let (deprecationAttribute, _) = try validateFunction(function, role: "Restoration functions")
+        let deprecation = deprecationAttribute.map { Self.deprecation($0, of: function, schema: schema) }
         let parameters = function.signature.parameterClause.parameters
         guard parameters.count == 1, let parameter = parameters.first else {
             try reject(

@@ -312,6 +312,85 @@ A projection is also how an `isolated` schema's snapshots leave their actor.
 The transform runs where the snapshot lives and returns a `Sendable` value, so
 the sequence is a ``SnapshotSequence`` whatever the mode.
 
+## Wait for a condition with a deadline
+
+Use ``SnapshotSequence/wait(timeout:where:)``,
+``SnapshotSequence/wait(deadline:where:)``, or
+``SnapshotSequence/wait(deadline:clock:where:)`` to wait until a snapshot or
+projection satisfies a predicate, with an optional deadline. The result is a
+``SnapshotWaitResult`` that separates a match (`.matched(value)`), a deadline
+expiry (`.timedOut`), caller task cancellation (`.cancelled`), and the sequence
+ending before a match (`.ended`, such as when the owner closes or is released).
+
+```swift
+@MainActor
+func waitUntilIdle(
+    _ lookup: Lookup.MainActorHost,
+    timeout: Duration
+) async throws -> SnapshotWaitResult<Bool> {
+    if !lookup.currentSnapshot.isSearching { return .matched(false) }
+    let updates = try lookup.distinctSnapshots { $0.isSearching }
+    return await updates.wait(timeout: timeout) { !$0 }
+}
+```
+
+Checking the current snapshot before subscribing avoids taking a subscriber
+slot when the state already matches, and on a `Shared` owner guarantees a
+synchronous fast path before applying a short or zero deadline (an open `Shared`
+owner delivers its registration snapshot asynchronously through its serial
+mailbox). On `MainActorHost`, `ActorHost`, `IsolatedHost`, and any closed owner,
+registration buffers the initial snapshot synchronously before `snapshots()` or
+`distinctSnapshots(_:)` returns, so `wait` tests that buffered element before
+checking the deadline and returns `.matched` without starting a timer even when
+the deadline has already passed.
+
+`wait` runs on the caller's isolation (`nonisolated(nonsending)`), so the
+predicate stays on the caller's actor without needing `@Sendable` or moving a
+sequence iterator across task-group boundaries. Avoid iterating a
+``SnapshotSequence`` inside a `@MainActor` child task of `withTaskGroup` on
+Swift 6.4, which triggers a region-based isolation compiler error, and avoid
+standard `AsyncSequence` operators such as `first(where:)` from an actor when
+their predicates are `@concurrent` or leave the registration alive until the
+sequence is released. In an `isolated` schema, project the condition to a
+`Sendable` value with `snapshots(_:)` or `distinctSnapshots(_:)` to obtain a
+``SnapshotSequence`` and call `wait` on it.
+
+Every `wait` call follows these rules:
+
+- **Single-pass ownership.** `wait` claims the sequence the same way
+  `makeAsyncIterator()` does. A second call on an already-claimed sequence
+  returns `.ended` immediately without cancelling the active consumer.
+- **Caller cancellation.** If `Task.isCancelled` is already `true` when `wait`
+  starts (after claiming), it cancels the sequence and returns `.cancelled`
+  without evaluating the predicate or starting a timer. Cancelling the calling
+  task while waiting wakes the wait promptly, cancels the timer, and returns
+  `.cancelled`.
+- **Timeout ties.** An element already buffered in or handed to the sequence
+  before the deadline fires is still tested against the predicate and returns
+  `.matched` if it matches; once the deadline passes, newer offers are ignored.
+  The first terminal cause recorded under the sequence's lock wins, so a late
+  timer cannot turn `.ended` into `.timedOut`. If caller task cancellation
+  discards an unread buffered element after closure or deadline expiry, `wait`
+  reports `.cancelled` rather than claiming that buffered element failed to
+  match. An external call to `cancel()` while the calling task is not cancelled
+  reports `.ended`.
+- **Turn fairness and latest-value coalescing.** Because ``SnapshotSequence``
+  keeps only the latest unread value, transitions that enter and leave a
+  matching state before `wait` reads them can coalesce. Under continuous
+  non-matching offers, `wait` yields the caller's actor after 32 consecutive
+  synchronous evaluations so a busy producer cannot monopolize it.
+- **Subscription cleanup.** On every exit path after claiming, `wait` cancels
+  its timer task and calls `cancel(isolation:)` on the caller's isolation
+  before returning. On a `MainActorHost` awaited on the main actor, or on a
+  `Shared` owner, the registration is removed before `wait` returns. From
+  another actor, or on `ActorHost` and `IsolatedHost`, the registration's gate
+  closes before `wait` returns (stopping callbacks and freeing the subscriber
+  slot immediately) while callback removal finishes on the owner's next turn or
+  sweep.
+
+Pass a custom `Clock` to ``SnapshotSequence/wait(deadline:clock:where:)`` to
+test timeout and race behavior deterministically without real sleeps.
+
 ## Subscribe with a callback
 
 `subscribe(_:onFinish:)` registers a callback that receives the snapshot

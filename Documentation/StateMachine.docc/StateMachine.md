@@ -86,6 +86,7 @@ appears in the advanced topics at the end.
 
 - ``ObservableMainActorHost``
 - ``SnapshotSequence``
+- ``SnapshotWaitResult``
 - ``MainActorSnapshotSequence``
 - ``IsolatedSnapshotSequence``
 - ``SnapshotPublisher``

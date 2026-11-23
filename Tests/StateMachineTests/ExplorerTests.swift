@@ -1,6 +1,7 @@
 import Foundation
 import StateMachine
 import Testing
+import os
 
 // The schedule explorer for the presentation layer. It enumerates every short sequence of events
 // over a small alphabet, runs each against the real presentation classes from a fresh state with
@@ -323,6 +324,123 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
                 await explorerRun(configuration, [.observe(0), .applyBelow, .close, .observe(2)])
             )
             #expect(outcome.violations.isEmpty)
+        }
+    }
+
+    // Scoped deterministic schedules for `SnapshotSequence.wait(deadline:clock:where:)` against
+    // the explorer's one-slot fake host (`ExplorerHost`) and `ExplorerShot` lifetime/slot checks
+    // (I2, I15, I41): deadline firing while a host cancellation is parked on a worker, a final
+    // offer and closure delivered synchronously inside the initial non-matching predicate with an
+    // expired deadline, and a final offer racing with deadline expiry.
+    @Test(.parksCooperativeThread) func boundedWaitRegistrationAndFinalOfferSchedules() async throws {
+        // 1. Deadline expires while a host cancellation is parked on a worker (I2, I15).
+        do {
+            let world = ExplorerWorld()
+            world.state.withLock { $0.offMainExempt = true }
+            let host = ExplorerHost(0, world)
+            let clock = ManualTestClock()
+            world.setLatestAttempt(1)
+            world.setContext(.call(attempt: 1))
+            let sequence = try host.sequence(seeded: true)
+            world.setContext(.spontaneous)
+            let id = try #require(world.slot(of: 0))
+
+            let waitTask = Task { @MainActor in
+                await sequence.wait(deadline: clock.now.advanced(by: .seconds(5)), clock: clock) { _ in false }
+            }
+            await clock.waitUntilSleeping()
+            // Park host cancellation on a worker so the slot stays occupied while the deadline
+            // triggers `cancel()` on exit; any unread value waits for the slot to free (I2).
+            #expect(host.beginCancelling(id))
+            clock.advance(by: .seconds(5))
+            let result = await waitTask.value
+            if case .timedOut = result {} else { Issue.record("Expected .timedOut, got \(result)") }
+            #expect(host.finishCancelling(id))
+            host.forget()
+            for _ in 0 ..< 2000 where !world.allUnfreed.isEmpty || !world.liveValues().isEmpty {
+                await Task { @MainActor in }.value
+            }
+            #expect(world.violations.isEmpty, "\(world.violations)")
+            #expect(world.allUnfreed.isEmpty)
+            #expect(world.liveValues().isEmpty)
+        }
+
+        // 2. Initial non-matching predicate delivers a final offer and finishes before the deadline
+        // expires: the final offer must still be evaluated and matched (I41), and the slot freed.
+        do {
+            let world = ExplorerWorld()
+            world.state.withLock { $0.offMainExempt = true }
+            let host = ExplorerHost(0, world)
+            let clock = ManualTestClock()
+            world.setLatestAttempt(1)
+            world.setContext(.call(attempt: 1))
+            let sequence = try host.sequence(seeded: true)
+            world.setContext(.spontaneous)
+            let id = try #require(world.slot(of: 0))
+
+            var firstRevision: UInt64?
+            var finalRevision: UInt64?
+            let matchedRevision: UInt64? = await {
+                let result = await sequence.wait(deadline: clock.now.advanced(by: .seconds(5)), clock: clock) { shot in
+                    if firstRevision == nil {
+                        firstRevision = shot.revision
+                        host.deliver(to: id)
+                        finalRevision = world.state.withLock { $0.revision }
+                        host.finish(id)
+                        clock.advance(by: .seconds(5))
+                        return false
+                    }
+                    return shot.revision == finalRevision
+                }
+                if case .matched(let matched) = result { return matched.revision }
+                return nil
+            }()
+            #expect(matchedRevision != nil && matchedRevision == finalRevision)
+            #expect(clock.totalSleepsStarted == 0)
+            host.forget()
+            for _ in 0 ..< 2000 where !world.allUnfreed.isEmpty || !world.liveValues().isEmpty {
+                await Task { @MainActor in }.value
+            }
+            #expect(world.violations.isEmpty, "\(world.violations)")
+            #expect(world.allUnfreed.isEmpty)
+            #expect(world.liveValues().isEmpty)
+        }
+
+        // 3. Host finishes with a non-matching final offer before the deadline fires: `.ended`
+        // wins over `.timedOut`, the final element is still read (I41), and cleanup frees the slot.
+        do {
+            let world = ExplorerWorld()
+            world.state.withLock { $0.offMainExempt = true }
+            let host = ExplorerHost(0, world)
+            let clock = ManualTestClock()
+            world.setLatestAttempt(1)
+            world.setContext(.call(attempt: 1))
+            let sequence = try host.sequence(seeded: true)
+            world.setContext(.spontaneous)
+            let id = try #require(world.slot(of: 0))
+
+            var seen: [UInt64] = []
+            let waitTask = Task { @MainActor in
+                await sequence.wait(deadline: clock.now.advanced(by: .seconds(5)), clock: clock) { shot in
+                    seen.append(shot.revision)
+                    return false
+                }
+            }
+            await clock.waitUntilSleeping()
+            host.deliver(to: id)
+            let deliveredRevision = world.state.withLock { $0.revision }
+            host.finish(id)
+            clock.advance(by: .seconds(5))
+            let result = await waitTask.value
+            if case .ended = result {} else { Issue.record("Expected .ended, got \(result)") }
+            #expect(seen.contains(deliveredRevision))
+            host.forget()
+            for _ in 0 ..< 2000 where !world.allUnfreed.isEmpty || !world.liveValues().isEmpty {
+                await Task { @MainActor in }.value
+            }
+            #expect(world.violations.isEmpty, "\(world.violations)")
+            #expect(world.allUnfreed.isEmpty)
+            #expect(world.liveValues().isEmpty)
         }
     }
 
