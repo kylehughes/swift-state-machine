@@ -72,6 +72,11 @@ jobs:
         python3 Scripts/check-macro-expansions.py --configuration release --output "$RUNNER_TEMP/state-machine-expansions-release"
         python3 Scripts/check-macro-fixtures.py --configuration release --output "$RUNNER_TEMP/state-machine-graph-release"
       timeout-minutes: 15
+    - name: Release value-witness size
+      run: |
+        python3 -m unittest Probes/Performance/test_witness_size.py
+        python3 Scripts/check-witness-size.py --build-root "$PWD/.build/arm64-apple-macosx/release" --output "$RUNNER_TEMP/state-machine-witness-size"
+      timeout-minutes: 15
     - name: Strict format
       run: swift format lint --strict --recursive Package.swift Sources Tests
       timeout-minutes: 15

@@ -1,67 +1,32 @@
 #!/usr/bin/env python3
 """Run external normal-import PT fixtures. Full mode is the exact acceptance matrix, without speed gates."""
 import argparse
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import platform
-import shutil
-import signal
 import statistics
-import subprocess
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / 'Probes/Performance'
 sys.path.insert(0, str(ROOT / 'Scripts'))
 sys.path.insert(0, str(FIXTURES))
-from platform_build import runtime_targets
+from performance_build import Evidence as _Evidence, digest, freeze_build, select_plan
 from instrument_core import copy_instrumented
 from instrument_resources import copy_resources
 
 
-def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def Evidence(directory):
+    return _Evidence(directory, ROOT)
 
 
 def identities():
-    paths = [ROOT / 'Package.swift', ROOT / 'Package.resolved', ROOT / 'SPEC.md', Path(__file__), ROOT / 'Scripts/check-macro-fixtures.py', ROOT / 'Scripts/platform_build.py']
+    paths = [ROOT / 'Package.swift', ROOT / 'Package.resolved', ROOT / 'SPEC.md', Path(__file__), ROOT / 'Scripts/check-macro-fixtures.py', ROOT / 'Scripts/platform_build.py', ROOT / 'Scripts/performance_build.py']
     paths += [path for name in ['StateMachine', 'StateMachineMacros'] for path in sorted((ROOT / 'Sources' / name).rglob('*.swift'))]
     paths += sorted(FIXTURES.rglob('*'))
     return {str(p.relative_to(ROOT)): digest(p) for p in paths if p.is_file() and '__pycache__' not in str(p)}
-
-
-class Evidence:
-    def __init__(self, directory):
-        self.directory = directory
-        self.commands = []
-        self.base_environment = os.environ.copy()
-        self.base_environment.pop("DYLD_INSERT_LIBRARIES", None)
-    def run(self, name, command, timeout=600, env=None, allow_failure=False):
-        log = self.directory / (name + '.log')
-        log.parent.mkdir(parents=True, exist_ok=True)
-        start = time.monotonic_ns()
-        with log.open('w') as output:
-            process = subprocess.Popen(list(map(str, command)), cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
-                                       env=env if env is not None else self.base_environment, start_new_session=True)
-            timed_out = False
-            try:
-                code = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                os.killpg(process.pid, signal.SIGKILL)
-                code = process.wait()
-        receipt = dict(name=name, command=list(map(str, command)), exit=code, timed_out=timed_out,
-                       durationNanoseconds=time.monotonic_ns() - start, timeoutSeconds=timeout, log=str(log),
-                       allowFailure=allow_failure, environmentOverrides=({'DYLD_INSERT_LIBRARIES': env['DYLD_INSERT_LIBRARIES']} if env and 'DYLD_INSERT_LIBRARIES' in env else {}))
-        self.commands.append(receipt)
-        (self.directory / 'commands.json').write_text(json.dumps(self.commands, indent=2) + '\n')
-        if timed_out or (code and not allow_failure):
-            raise RuntimeError(f'{name} failed (exit {code}, timeout {timed_out}). See {log}')
-        return log.read_text()
 
 
 def percentile(values, p):
@@ -105,68 +70,6 @@ def aggregate(samples):
     if all(isinstance(v, (int, float)) for v in samples):
         return statistics.median(samples)
     return samples[0] if all(v == samples[0] for v in samples) else samples
-
-
-def select_plan(build_root, manifest):
-    allowed = runtime_targets(manifest, {'StateMachine'})
-    description = json.loads((build_root / 'description.json').read_text())
-    commands = {}
-    for command in description.get('swiftCommands', {}).values():
-        name = command['moduleName']
-        # Native plans include host-tool copies with the same module name/triple.
-        # Select observed product Modules, never Modules-tool or a path-name glob for objects.
-        if name not in allowed or Path(command['moduleOutputPath']).parent != build_root / 'Modules':
-            continue
-        if name in commands:
-            raise ValueError('Duplicate shipping product module ' + name)
-        args = command['otherArguments']
-        if '-O' not in args or '-swift-version' not in args or args[args.index('-swift-version') + 1] != '6' or '-warnings-as-errors' not in args:
-            raise ValueError('Expected Release strict Swift 6 module: ' + name)
-        if '-target' not in args or args[args.index('-target') + 1] != platform.machine() + '-apple-macosx13.0':
-            raise ValueError('Expected host macOS 13 product target: ' + name)
-        if any('experimental' in a.lower() or 'unchecked' in a.lower() for a in args):
-            raise ValueError('Unexpected experimental/concurrency-suppression option')
-        commands[name] = command
-    if set(commands) != allowed:
-        raise ValueError('Incomplete shipping closure: ' + str(allowed - set(commands)))
-    for command in commands.values():
-        if not command['objects'] or any(not Path(p).is_file() for p in command['objects']):
-            raise ValueError('Missing exact native plan object')
-    return commands
-
-
-def freeze_build(build_root, commands, destination):
-    destination.mkdir()
-    modules = destination / 'Modules'
-    modules.mkdir()
-    objects = []
-    manifest = []
-    for name, command in commands.items():
-        for original in [Path(command['moduleOutputPath']), *map(Path, command['objects'])]:
-            target = modules / original.name if original.suffix == '.swiftmodule' else destination / (name + '-' + original.name)
-            before = digest(original)
-            shutil.copy2(original, target)
-            if digest(original) != before or digest(target) != before:
-                raise ValueError('Build changed while copying: ' + str(original))
-            manifest.append(dict(original=str(original), frozen=str(target), sha256=before))
-            if original.suffix == '.o': objects.append(target)
-    plugin = destination / 'StateMachineMacros-tool'
-    original = build_root / plugin.name
-    before = digest(original)
-    shutil.copy2(original, plugin)
-    if before != digest(plugin) or before != digest(original): raise ValueError('Plugin changed during copy')
-    manifest.append(dict(original=str(original), frozen=str(plugin), sha256=before))
-    (destination / 'closure.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    # A derived plan retains the original observed flags/dependency selection and maps only
-    # artifact locations. It lets later DEVELOPMENT controls reuse this immutable closure.
-    location_map = {entry['original']: entry['frozen'] for entry in manifest}
-    frozen_commands = {}
-    for name, command in commands.items():
-        frozen_commands[name] = dict(command, moduleOutputPath=location_map[command['moduleOutputPath']],
-                                     importPath=str(modules), objects=[location_map[p] for p in command['objects']],
-                                     frozenFromModule=command['moduleOutputPath'])
-    (destination / 'description.json').write_text(json.dumps({'swiftCommands': frozen_commands, 'derivedFrozenPlan': True}, indent=2) + '\n')
-    return modules, plugin, objects
 
 
 def instrument(evidence, commands, sdk, shipping_modules, shipping_objects, plugin, resource=False):

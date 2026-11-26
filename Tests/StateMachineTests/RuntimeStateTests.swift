@@ -420,4 +420,184 @@ import Testing
             return
         }
     }
+
+    private struct LargeSendableModel: Sendable, Equatable {
+        var a: Int
+        var b: Int
+        var c: Int
+        var d: Int
+        var tag: String
+    }
+
+    private final class NonSendablePayload {
+        var value: Int
+        init(_ value: Int) { self.value = value }
+    }
+
+    private final class TrackedModel: Sendable {
+        let value: Int
+        init(_ value: Int) { self.value = value }
+    }
+
+    @Test func snapshotAndDeliveryClaimKeepPointerSizedInlineLayoutsAndConditionalSendable() throws {
+        let pointerSize = MemoryLayout<AnyObject>.size
+        #expect(MemoryLayout<RuntimeState<LargeSendableModel, NonSendablePayload>.Snapshot>.size == pointerSize)
+        #expect(MemoryLayout<RuntimeState<LargeSendableModel, NonSendablePayload>.Snapshot?>.size == pointerSize)
+        #expect(MemoryLayout<RuntimeDeliveryClaim>.size == pointerSize)
+        #expect(MemoryLayout<RuntimeDeliveryClaim?>.size == pointerSize)
+
+        let model = LargeSendableModel(a: 1, b: 2, c: 3, d: 4, tag: "v0")
+        let engine = RuntimeState<LargeSendableModel, NonSendablePayload>(model, limits: try .init())
+        let sendableSnapshot: any Sendable = engine.snapshot
+        let roundTripped = try #require(
+            sendableSnapshot as? RuntimeState<LargeSendableModel, NonSendablePayload>.Snapshot
+        )
+        #expect(roundTripped.model == model)
+        #expect(roundTripped.revision == 0)
+        #expect(!roundTripped.isClosed)
+        #expect(roundTripped.edge == nil)
+
+        var nonSendableEngine = RuntimeState<NonSendablePayload, Int>(NonSendablePayload(7), limits: try .init())
+        let candidate = try RuntimeState<NonSendablePayload, Int>
+            .prepare(
+                on: nonSendableEngine.snapshot,
+                next: NonSendablePayload(9),
+                plan: .init(edge: "advance")
+            )
+        guard case .committed(let next) = nonSendableEngine.commit(candidate) else {
+            Issue.record("Non-Sendable model commit failed")
+            return
+        }
+        #expect(next.model.value == 9)
+        #expect(next.edge == "advance")
+    }
+
+    @Test func historicalSnapshotsRemainImmutableAndTicketsOrClaimsDoNotRetainOldModels() throws {
+        var engine = RuntimeState<TrackedModel, Int>(TrackedModel(0), scopes: [a], limits: try .init())
+        let s0 = engine.snapshot
+        weak var m1: TrackedModel?
+        let ticket: RuntimeTicket
+        let claim: RuntimeDeliveryClaim
+        do {
+            let model1 = TrackedModel(1)
+            m1 = model1
+            let start = trackedStart(scope: a)
+            let candidate = try RuntimeState<TrackedModel, Int>
+                .prepare(
+                    on: engine.snapshot,
+                    next: model1,
+                    plan: .init(starts: [start], edge: "start")
+                )
+            guard case .committed(let s1) = engine.commit(candidate) else {
+                Issue.record("Expected start commit")
+                return
+            }
+            #expect(s1.revision == 1)
+            #expect(s1.edge == "start")
+            #expect(s1.model.value == 1)
+            let batch = try #require(engine.drain(limit: 1).first)
+            guard case .start(let work)? = batch.commands.first else {
+                Issue.record("Expected drained start work")
+                return
+            }
+            ticket = work.ticket
+            guard case .retained = engine.retainOutcome(for: ticket) else {
+                Issue.record("Expected outcome retention")
+                return
+            }
+            let claimed = engine.claimDelivery(for: ticket)
+            claim = try #require(claimed)
+            // Advancing to revision 2 and draining drops every engine reference to revision 1's storage.
+            let c2 = try RuntimeState<TrackedModel, Int>
+                .prepare(
+                    on: engine.snapshot,
+                    next: TrackedModel(2),
+                    plan: .init(edge: "next")
+                )
+            guard case .committed(let s2) = engine.commit(c2) else {
+                Issue.record("Expected revision 2 commit")
+                return
+            }
+            #expect(s2.revision == 2)
+            #expect(s2.edge == "next")
+            _ = engine.drain(limit: 1)
+            // s1 is still in scope here so m1 stays alive until the block exits.
+            #expect(m1 != nil)
+        }
+        // Neither the active ticket nor its live delivery claim keeps revision 1's model alive.
+        #expect(m1 == nil)
+        #expect(engine.isActive(ticket))
+        // Claim equality holds across repeated diagnostics reads, while a new claim is distinct.
+        let diag1 = try #require(engine.executionReservations.first?.preparationClaim)
+        let diag2 = try #require(engine.executionReservations.first?.preparationClaim)
+        #expect(diag1 == claim)
+        #expect(diag1 == diag2)
+        engine.finishDeliveryClaim(claim)
+        let claimedSecond = engine.claimDelivery(for: ticket)
+        let secondClaim = try #require(claimedSecond)
+        #expect(secondClaim != claim)
+        // A candidate carrying the finished claim is rejected with inactiveAuthority.
+        let staleClaimCandidate = try RuntimeState<TrackedModel, Int>
+            .prepare(
+                on: engine.snapshot,
+                next: TrackedModel(3),
+                requiring: [ticket],
+                plan: .init(retire: [ticket], finishingClaims: [claim])
+            )
+        guard case .rejected(.inactiveAuthority, _) = engine.commit(staleClaimCandidate) else {
+            Issue.record("Expected stale delivery claim to be rejected")
+            return
+        }
+        engine.finishDeliveryClaim(secondClaim)
+        // Idempotent close preserves final revision, clears edge, and keeps s0 untouched.
+        let closed1 = engine.close()
+        let closed2 = engine.close()
+        #expect(closed1.revision == 3)
+        #expect(closed1.isClosed)
+        #expect(closed1.edge == nil)
+        #expect(closed2.revision == closed1.revision)
+        #expect(closed2.isClosed)
+        #expect(s0.revision == 0)
+        #expect(!s0.isClosed)
+        #expect(s0.model.value == 0)
+        #expect(engine.owns(s0))
+    }
+
+    private func trackedStart(scope: RuntimeScopeID) -> RuntimeState<TrackedModel, Int>.Start {
+        .init(RuntimeOperation(kind: 1, scope: scope), descriptor: 1)
+    }
+
+    @Test func valueCopiesOfRuntimeStateKeepIndependentRevisionsInOneRealm() throws {
+        var original = try engine()
+        var fork = original
+        let forkCandidate = try Core.prepare(on: fork.snapshot, next: 10, plan: .init(edge: "fork"))
+        guard case .committed(let forked) = fork.commit(forkCandidate) else {
+            Issue.record("Expected fork commit")
+            return
+        }
+        #expect(forked.model == 10)
+        #expect(forked.revision == 1)
+        #expect(forked.edge == "fork")
+        #expect(original.snapshot.model == 0)
+        #expect(original.snapshot.revision == 0)
+        #expect(original.snapshot.edge == nil)
+        #expect(original.owns(forked))
+        // A candidate prepared on the fork's revision conflicts on the original value copy.
+        let fromFork = try Core.prepare(on: forked, next: 20)
+        reject(original.commit(fromFork), as: .conflict, model: 0, revision: 0)
+        // The original copy can still advance from its own revision.
+        let fromOriginal = try Core.prepare(on: original.snapshot, next: 30, plan: .init(edge: "orig"))
+        guard case .committed(let advanced) = original.commit(fromOriginal) else {
+            Issue.record("Expected original commit")
+            return
+        }
+        #expect(advanced.model == 30)
+        #expect(advanced.revision == 1)
+        #expect(advanced.edge == "orig")
+        // A foreign owner's snapshot is still rejected as foreignOwner.
+        let other = try engine()
+        #expect(!original.owns(other.snapshot))
+        let foreign = try Core.prepare(on: other.snapshot, next: 40)
+        reject(original.commit(foreign), as: .foreignOwner, model: 30, revision: 1)
+    }
 }

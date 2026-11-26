@@ -390,12 +390,12 @@ public typealias CommitRejection = StateMachine::CommitRejection
 
 /// An immutable historical payload with sealed complete-root provenance.
 public struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::CustomStringConvertible {
-    fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: StateMachine::RuntimeDeliveryClaim?
+    fileprivate let _stateMachinePayload: Phase
     /// The copied historical payload.
     public var value: Phase {
-        payload
+        _stateMachinePayload
     }
     /// The owner-lifetime accepted revision.
     public var revision: Swift::UInt64 {
@@ -407,6 +407,9 @@ public struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::CustomSt
     }
     /// Prepares the declared edge with phase authority preserved.
 public func open(_ input: Int) -> Prepared where Phase == Browsing {
+    guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
     let change: StateMachine::Change<Browsing, Effect.Open> = _StateMachineSchema.open(payload, input)
     return _stateMachinePrepare(on: record, next: .browsing(change.next),
         effects: change.effects.map(\.effect),
@@ -415,7 +418,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the declared edge with phase authority preserved.
     public func close(_ input: Int) -> Prepared where Phase == Browsing {
-        let change: StateMachine::Change<Browsing, Effect.Close> = _StateMachineSchema.close(payload, input)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let change: StateMachine::Change<Browsing, Effect.Close> = _StateMachineSchema.close(payload, input)
         return _stateMachinePrepare(on: record, next: .browsing(change.next),
             effects: change.effects.map(\.effect),
             from: 0, to: 0, invalidates: [],
@@ -423,7 +429,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the declared edge with phase authority preserved.
     public func closeAll() -> Prepared where Phase == Browsing {
-        let change: StateMachine::Change<Browsing, Effect.CloseAll> = _StateMachineSchema.closeAll(payload)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let change: StateMachine::Change<Browsing, Effect.CloseAll> = _StateMachineSchema.closeAll(payload)
         return _stateMachinePrepare(on: record, next: .browsing(change.next),
             effects: change.effects.map(\.effect),
             from: 0, to: 0, invalidates: [],
@@ -431,7 +440,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the declared edge with phase authority preserved.
     public func refresh() -> Prepared where Phase == Browsing {
-        let change: StateMachine::Change<Browsing, Effect.Refresh> = _StateMachineSchema.refresh(payload)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let change: StateMachine::Change<Browsing, Effect.Refresh> = _StateMachineSchema.refresh(payload)
         return _stateMachinePrepare(on: record, next: .browsing(change.next),
             effects: change.effects.map(\.effect),
             from: 0, to: 0, invalidates: [],
@@ -439,7 +451,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the declared edge with phase authority preserved.
     public func archive() -> Prepared where Phase == Browsing {
-        let next: Archived = _StateMachineSchema.archive(payload)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Archived = _StateMachineSchema.archive(payload)
         return _stateMachinePrepare(on: record, next: .archived(next),
             effects: [],
             from: 0, to: 1, invalidates: [],
@@ -447,7 +462,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func downloaded(_ value: Download.Output, request: DownloadRequest, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Browsing {
-        let next: Browsing = _StateMachineSchema.downloaded(payload, value, request: request)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Browsing = _StateMachineSchema.downloaded(payload, value, request: request)
         return _stateMachinePrepare(on: record, next: .browsing(next),
             effects: [],
             from: 0, to: 0, invalidates: [],
@@ -455,7 +473,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func ignored(_ value: Download.Output, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Browsing {
-        let next: Browsing = _StateMachineSchema.ignored(payload, value)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Browsing = _StateMachineSchema.ignored(payload, value)
         return _stateMachinePrepare(on: record, next: .browsing(next),
             effects: [],
             from: 0, to: 0, invalidates: [],
@@ -463,7 +484,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func missed(_ value: Download.Failure, request: DownloadRequest, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Browsing {
-        let next: Browsing = _StateMachineSchema.missed(payload, value, request: request)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Browsing = _StateMachineSchema.missed(payload, value, request: request)
         return _stateMachinePrepare(on: record, next: .browsing(next),
             effects: [],
             from: 0, to: 0, invalidates: [],
@@ -471,7 +495,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func indexed(_ value: Swift::Void, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Browsing {
-        let next: Browsing = _StateMachineSchema.indexed(payload)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Browsing = _StateMachineSchema.indexed(payload)
         return _stateMachinePrepare(on: record, next: .browsing(next),
             effects: [],
             from: 0, to: 0, invalidates: [],
@@ -479,7 +506,10 @@ public func open(_ input: Int) -> Prepared where Phase == Browsing {
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func refreshed(_ value: Swift::Void, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Browsing {
-        let next: Browsing = _StateMachineSchema.refreshed(payload)
+        guard case .browsing(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Browsing = _StateMachineSchema.refreshed(payload)
         return _stateMachinePrepare(on: record, next: .browsing(next),
             effects: [],
             from: 0, to: 0, invalidates: [],
@@ -525,9 +555,9 @@ public enum Snapshot: Swift::Sendable, StateMachine::StateMachineSnapshot, Swift
 fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: StateMachine::RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
     case .browsing(let payload):
-        return .browsing(Observed(payload: payload, record: record, claim: claim))
+        return .browsing(Observed(record: record, claim: claim, _stateMachinePayload: payload))
     case .archived(let payload):
-        return .archived(Observed(payload: payload, record: record, claim: claim))
+        return .archived(Observed(record: record, claim: claim, _stateMachinePayload: payload))
     }
 }
 
@@ -582,12 +612,13 @@ public struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swift
     public let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
         snapshot = _stateMachineSnapshot(record)
-        edgeID = record.edge
     }
     /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
     /// change that takes no edge, such as a reset, closure, or the authority-only commit of
     /// `discardPending(id:)`.
-    public let edgeID: Swift::String?
+    public var edgeID: Swift::String? {
+        snapshot.record.edge
+    }
     /// The owner-lifetime accepted revision.
     public var revision: Swift::UInt64 {
         snapshot.revision

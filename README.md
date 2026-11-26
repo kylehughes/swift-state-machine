@@ -32,7 +32,7 @@ UIKit, and `StateMachineTesting` drives real owners from tests.
 Add State Machine to your `Package.swift` dependencies.
 
 ```swift
-.package(url: "https://github.com/kylehughes/swift-state-machine.git", from: "1.1.0")
+.package(url: "https://github.com/kylehughes/swift-state-machine.git", from: "1.1.1")
 ```
 
 Add the `StateMachine` product to any target that declares a graph. The macros

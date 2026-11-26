@@ -1,3 +1,4 @@
 import StateMachine
 import StateMachineExamples
-nonisolated func misuse(_ value: GeneratedProfile.Idle) { _ = GeneratedProfile.Observed(payload: value, record: (), claim: nil) }
+private nonisolated func placeholder<T>() -> T { fatalError() }
+nonisolated func misuse() { _ = GeneratedProfile.Observed<GeneratedProfile.Idle>(record: placeholder(), claim: nil, _stateMachinePayload: placeholder()) }

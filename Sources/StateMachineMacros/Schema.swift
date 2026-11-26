@@ -4274,7 +4274,7 @@ private struct SchemaParser {
             }
         }
         if collision == nil, let observed, observed.isEmpty, owners.contains(where: { $0 != .owned }),
-            ["payload", "record", "claim", "value", "revision", "description"].contains(name)
+            ["record", "claim", "value", "revision", "description"].contains(name)
         {
             collision = ("Observed method \(spelled(observed))", "redeclares Observed's \(name) property")
         }

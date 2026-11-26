@@ -177,13 +177,22 @@ CONFINED_EXCLUSIONS = {
 }
 CONFINED_TYPES = {'RuntimeActorHost', 'RuntimeMainActorHost', 'RuntimeIsolatedHost', 'MainActorSnapshotSubscription',
                   'RuntimeConfinedExecution'}
-# Main-actor teardown and wakeup tasks of snapshot sequences and Combine publishers. The benchmark registers
-# callback subscriptions only, so it never creates one of these tasks.
+# Main-actor teardown, wakeup, and bounded-wait deadline-timer tasks of snapshot sequences and Combine
+# publishers. The benchmark registers callback subscriptions only, so it never creates a sequence,
+# calls `SnapshotSequence.wait`, or starts one of these tasks.
 SEQUENCE_EXCLUSIONS = {
     'RuntimeSnapshots.swift': {'Task': 5},
     'SnapshotPublisher.swift': {'Task': 6},
+    'SnapshotWait.swift': {'Task': 1},
 }
-SEQUENCE_MEMBERS = {'snapshots', 'distinctSnapshots', 'snapshotPublisher', 'pendingCompletionUpdates'}
+SEQUENCE_MEMBERS = {
+    'snapshots',
+    'distinctSnapshots',
+    'snapshotPublisher',
+    'pendingCompletionUpdates',
+    'SnapshotSequence',
+    'SnapshotWaitResult',
+}
 # Protocol declarations whose requirements name a confined host's types without constructing a task or a host.
 DECLARATION_REFERENCES = {'StateMachineHosting.swift'}
 

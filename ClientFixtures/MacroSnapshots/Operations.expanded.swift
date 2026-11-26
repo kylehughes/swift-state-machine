@@ -365,12 +365,12 @@ public typealias CommitRejection = StateMachine::CommitRejection
 
 /// An immutable historical payload with sealed complete-root provenance.
 public struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::CustomStringConvertible {
-    fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: StateMachine::RuntimeDeliveryClaim?
+    fileprivate let _stateMachinePayload: Phase
     /// The copied historical payload.
     public var value: Phase {
-        payload
+        _stateMachinePayload
     }
     /// The owner-lifetime accepted revision.
     public var revision: Swift::UInt64 {
@@ -382,6 +382,9 @@ public struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::CustomSt
     }
     /// Prepares the declared edge with phase authority preserved.
 public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle {
+    guard case .idle(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
     let change: StateMachine::Change<Loading, Effect.Begin> = try _StateMachineSchema.begin(payload, input)
     return _stateMachinePrepare(on: record, next: .loading(change.next),
         effects: change.effects.map(\.effect),
@@ -390,7 +393,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the declared edge with phase authority preserved.
     public func cancel() -> Prepared where Phase == Loading {
-        let next: Idle = _StateMachineSchema.cancel(payload)
+        guard case .loading(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Idle = _StateMachineSchema.cancel(payload)
         return _stateMachinePrepare(on: record, next: .idle(next),
             effects: [],
             from: 1, to: 0, invalidates: [0],
@@ -398,7 +404,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the declared edge with phase authority preserved.
     public func sessionChanged() -> Prepared where Phase == Loading {
-        let next: Loading = _StateMachineSchema.sessionChanged(payload)
+        guard case .loading(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Loading = _StateMachineSchema.sessionChanged(payload)
         return _stateMachinePrepare(on: record, next: .loading(next),
             effects: [],
             from: 1, to: 1, invalidates: [1],
@@ -406,7 +415,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the declared edge with phase authority preserved.
     public func note(_ input: String) -> Prepared where Phase == Loading {
-        let change: StateMachine::Change<Loading, Effect.Note> = _StateMachineSchema.note(payload, input)
+        guard case .loading(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let change: StateMachine::Change<Loading, Effect.Note> = _StateMachineSchema.note(payload, input)
         return _stateMachinePrepare(on: record, next: .loading(change.next),
             effects: change.effects.map(\.effect),
             from: 1, to: 1, invalidates: [],
@@ -414,7 +426,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func received(_ value: Fetch.Output, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Loading {
-        let next: Loaded = _StateMachineSchema.received(payload, value)
+        guard case .loading(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Loaded = _StateMachineSchema.received(payload, value)
         return _stateMachinePrepare(on: record, next: .loaded(next),
             effects: [],
             from: 1, to: 2, invalidates: [],
@@ -422,7 +437,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func failed(_ value: Fetch.Failure, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Loading {
-        let next: Failed = _StateMachineSchema.failed(payload, value)
+        guard case .loading(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Failed = _StateMachineSchema.failed(payload, value)
         return _stateMachinePrepare(on: record, next: .failed(next),
             effects: [],
             from: 1, to: 3, invalidates: [],
@@ -430,7 +448,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func audited(_ value: Audit.Output, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Loading {
-        let next: Loading = _StateMachineSchema.audited(payload, value)
+        guard case .loading(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Loading = _StateMachineSchema.audited(payload, value)
         return _stateMachinePrepare(on: record, next: .loading(next),
             effects: [],
             from: 1, to: 1, invalidates: [],
@@ -438,7 +459,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the declared edge that the router `choose` selects.
     fileprivate func restart(_ input: Bool) -> Prepared where Phase == Loaded {
-        let next: Idle = _StateMachineSchema.restart(payload, input)
+        guard case .loaded(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Idle = _StateMachineSchema.restart(payload, input)
         return _stateMachinePrepare(on: record, next: .idle(next),
             effects: [],
             from: 2, to: 0, invalidates: [],
@@ -446,7 +470,10 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Prepares the declared edge that the router `choose` selects.
     fileprivate func keep(_ input: Bool) -> Prepared where Phase == Loaded {
-        let next: Loaded = _StateMachineSchema.keep(payload, input)
+        guard case .loaded(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Loaded = _StateMachineSchema.keep(payload, input)
         return _stateMachinePrepare(on: record, next: .loaded(next),
             effects: [],
             from: 2, to: 2, invalidates: [],
@@ -454,6 +481,9 @@ public func begin(_ input: Int) throws(Problem) -> Prepared where Phase == Idle 
     }
     /// Runs the router `choose`, then prepares the edge it selects.
     public func choose(_ input: Bool) throws(Problem) -> Prepared where Phase == Loaded {
+        guard case .loaded(let payload) = record.model else {
+            Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+        }
         let selection: Route.Choose = try _StateMachineSchema.choose(payload, input)
         switch selection {
     case .restart:
@@ -512,13 +542,13 @@ public enum Snapshot: Swift::Sendable, StateMachine::StateMachineSnapshot, Swift
 fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: StateMachine::RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
     case .idle(let payload):
-        return .idle(Observed(payload: payload, record: record, claim: claim))
+        return .idle(Observed(record: record, claim: claim, _stateMachinePayload: payload))
     case .loading(let payload):
-        return .loading(Observed(payload: payload, record: record, claim: claim))
+        return .loading(Observed(record: record, claim: claim, _stateMachinePayload: payload))
     case .loaded(let payload):
-        return .loaded(Observed(payload: payload, record: record, claim: claim))
+        return .loaded(Observed(record: record, claim: claim, _stateMachinePayload: payload))
     case .failed(let payload):
-        return .failed(Observed(payload: payload, record: record, claim: claim))
+        return .failed(Observed(record: record, claim: claim, _stateMachinePayload: payload))
     }
 }
 
@@ -593,12 +623,13 @@ public struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swift
     public let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
         snapshot = _stateMachineSnapshot(record)
-        edgeID = record.edge
     }
     /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
     /// change that takes no edge, such as a reset, closure, or the authority-only commit of
     /// `discardPending(id:)`.
-    public let edgeID: Swift::String?
+    public var edgeID: Swift::String? {
+        snapshot.record.edge
+    }
     /// The owner-lifetime accepted revision.
     public var revision: Swift::UInt64 {
         snapshot.revision

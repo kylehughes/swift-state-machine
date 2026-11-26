@@ -1181,6 +1181,9 @@ struct Generator {
         return """
             /// Runs the router `\(route.name)`, then prepares the edge it selects.
             \(deprecated(route.deprecation))\(access)func \(route.name)(\(parameter))\(routedThrows(route)) -> Prepared where Phase == \(phase(route.from)) {
+                guard case .\(route.from)(let payload) = record.model else {
+                    Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+                }
                 \(selection)
                 switch \(consume)selection { \(cases) }
             }
@@ -1306,11 +1309,63 @@ struct Generator {
                 "case .\($0.caseName)(let value): return \"\($0.caseName), revision \\(value.record.revision)\\(value.record.isClosed ? \", closed\" : \"\")\""
             }
             .joined(separator: "\n")
-        let observationCases = schema.phases
-            .map {
-                "case .\($0.caseName)(let payload): return .\($0.caseName)(Observed(payload: payload, record: record, claim: claim))"
+        let observedMemberNames = Set(
+            schema.transitions.flatMap { [$0.name, observedName($0)] }
+                + schema.routes.map(\.name)
+                + schema.phases.flatMap { [$0.caseName, $0.typeName] }
+        )
+        let observationCases: String
+        let valueProjection: String
+        if schema.access == .public || schema.access == .package {
+            var payloadField = "_stateMachinePayload"
+            while observedMemberNames.contains(payloadField) {
+                payloadField += "_"
             }
-            .joined(separator: "\n")
+            // Exported schemas retain the typed phase payload alongside the pointer-sized raw
+            // snapshot so cross-module normal and library-evolution readers copy the phase
+            // directly without enum spare-bit unmasking or module-interface leakage.
+            observationCases = schema.phases
+                .map {
+                    "case .\($0.caseName)(let payload): return .\($0.caseName)(Observed(record: record, claim: claim, \(payloadField): payload))"
+                }
+                .joined(separator: "\n")
+            valueProjection = """
+                fileprivate let \(payloadField): Phase
+                /// The copied historical payload.
+                \(access)var value: Phase {
+                    \(payloadField)
+                }
+                """
+        } else {
+            var projectField = "_stateMachineProject"
+            while observedMemberNames.contains(projectField) {
+                projectField += "_"
+            }
+            let projectType =
+                schema.mode == .shared
+                ? "@Sendable (borrowing _StateMachineEngine.Snapshot) -> Phase"
+                : "(borrowing _StateMachineEngine.Snapshot) -> Phase"
+            observationCases = schema.phases
+                .map {
+                    """
+                    case .\($0.caseName):
+                        return .\($0.caseName)(Observed(record: record, claim: claim, \(projectField): { record in
+                            guard case .\($0.caseName)(let payload) = record.model else {
+                                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+                            }
+                            return payload
+                        }))
+                    """
+                }
+                .joined(separator: "\n")
+            valueProjection = """
+                fileprivate let \(projectField): \(projectType)
+                /// The copied historical payload.
+                \(access)var value: Phase {
+                    \(projectField)(record)
+                }
+                """
+        }
         // Functions of one name that throw one type share a case.
         var rejectionCases = Set<String>()
         let edgeFailures = schema.throwingFunctions
@@ -1385,11 +1440,9 @@ struct Generator {
             \(access)typealias CommitRejection = StateMachine::CommitRejection
             /// An immutable historical payload with sealed complete-root provenance.
             \(access)struct Observed<Phase\(bound)>: \(schema.mode == .shared ? "Swift::Sendable, " : "")Swift::CustomStringConvertible {
-                fileprivate let payload: Phase
                 fileprivate let record: _StateMachineEngine.Snapshot
                 fileprivate let claim: StateMachine::RuntimeDeliveryClaim?
-                /// The copied historical payload.
-                \(access)var value: Phase { payload }
+                \(valueProjection)
                 /// The owner-lifetime accepted revision.
                 \(access)var revision: Swift::UInt64 { record.revision }
                 /// The phase, revision, and closure of this observation, without its payload.
@@ -1435,12 +1488,11 @@ struct Generator {
                 \(access)let snapshot: Snapshot
                 fileprivate init(_ record: _StateMachineEngine.Snapshot) {
                     snapshot = _stateMachineSnapshot(record)
-                    edgeID = record.edge
                 }
                 /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
                 /// change that takes no edge, such as a reset, closure, or the authority-only commit of
                 /// `discardPending(id:)`.
-                \(access)let edgeID: Swift::String?
+                \(access)var edgeID: Swift::String? { snapshot.record.edge }
                 /// The owner-lifetime accepted revision.
                 \(access)var revision: Swift::UInt64 { snapshot.revision }
                 /// The accepted phase, revision, and closure, without the payload.
@@ -1525,10 +1577,14 @@ struct Generator {
             }
 
             """
+        let extractPayload =
+            edge.takesSource
+            ? "guard case .\(edge.from)(let payload) = record.model else { Swift::preconditionFailure(\"Observed phase payload did not match its snapshot.\") }\n"
+            : ""
         return forwarded + """
             \(documentation)
             \(forwarded.isEmpty ? visibility : "fileprivate ")func \(observedName(edge))(\(parameter))\(throwsClause) -> Prepared where Phase == \(before) {
-                let \(result): \(resultType) = \(call)
+                \(extractPayload)let \(result): \(resultType) = \(call)
                 return _stateMachinePrepare(on: record, next: .\(edge.to)(\(starts ? "change.next" : "next")),
                     effects: \(starts ? "change.effects.map(\\.effect)" : "[]"),
                     from: \(index(edge.from)), to: \(index(edge.to)), invalidates: \(scopeIndices(edge.invalidates)),

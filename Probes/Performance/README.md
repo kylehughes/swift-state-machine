@@ -69,7 +69,7 @@ These samples are **critical-section body time**. Timestamp placement excludes a
 
 The resource lane registers task handles and awaits their termination. Exact patch counts cover ten Shared-host `Task<Void>` sites, four mailbox sites, one coordinator watcher assignment, and one outside-lock ledger preparation-round defer. Coordinator watchers await their exact `Outcome` workers. A lexical inventory recognizes ordinary, generic, parenthesized, detached, and nested `Task` constructions. Comments, strings, and `Task` type annotations do not count as constructions. Unknown constructor or member spellings, `Task`-bearing string interpolation, `async let`, or task-group creation reject the copy for review.
 
-The whole Core module also contains confined-host definitions. Their task families are explicitly inventoried and excluded from joining. Those excluded sites are eight MainActor-host constructions, ten actor-host constructions (two inherited and eight detached), six isolated-host constructions, and one MainActor subscription cleanup construction. The sequence and publisher sources are inventoried the same way (five and six constructions). The workload registers callbacks only and never creates those tasks. Because this workload constructs only `Local` and `Shared` owners, it never executes those confined host or token paths. The copy asserts that exercised Core files have no references to the excluded types and that execution fixtures do not use Actor or MainActor facades. The excluded files remain byte-identical to their shipping sources. This is a scoped Shared-resource measurement rather than coverage of confined-host task lifetimes. Changed exclusion inventories, new task sites, and changed patch shapes reject the copy.
+The whole Core module also contains confined-host definitions. Their task families are explicitly inventoried and excluded from joining. Those excluded sites are eight MainActor-host constructions, ten actor-host constructions (two inherited and eight detached), six isolated-host constructions, and one MainActor subscription cleanup construction. The sequence, wait-timer, and publisher sources are inventoried the same way (five, one, and six constructions). The workload registers callbacks only and never creates those tasks. Because this workload constructs only `Local` and `Shared` owners, it never executes those confined host or token paths. The copy asserts that exercised Core files have no references to the excluded types and that execution fixtures do not use Actor or MainActor facades. The excluded files remain byte-identical to their shipping sources. This is a scoped Shared-resource measurement rather than coverage of confined-host task lifetimes. Changed exclusion inventories, new task sites, and changed patch shapes reject the copy.
 
 Private getters count queued batches, execution reservations, active authorities, preparation claims, retained deliveries, subscribers, mailboxes, coordinator workers, and tasks waiting for flush or shutdown progress. These reads occur outside the core locks. The emitted `task-inventory.json` records every construction's source hash, line, constructor kind, nesting depth, and tracked, joined, or excluded disposition.
 
@@ -82,3 +82,45 @@ The coordinator and progress markers are actors. After their last job has return
 The output retains every command, exit code, timeout, monotonic duration, and raw process result. Each successful repetition has role-specific p50/p95/p99/median latency, attempt and acceptance throughput, conflict and rejection counts, allocation checkpoints, and resource checkpoints. Percentiles use nearest rank (`ceil(p × N)`), while the separately named median uses the statistical median. Aggregate values are medians of the five corresponding repetition summaries. Warmup data remains in raw logs and is excluded from aggregates. Failures and timeouts stop the run with `status: fail` and preserve the evidence.
 
 An uncommitted checkout can have no Git HEAD. That failed lookup is retained, and the used-source SHA-256 map supplies the candidate identity. Toolchain, SDK, OS, hardware, compiler flags, source identities, selected native plan, frozen object, module, and plugin hashes, instrumented copy hashes, patch assertions, and executable hashes accompany the results. Used source changes during measurement invalidate the receipt. These data describe one candidate on one environment and do not establish a historical improvement, universal tail latency, fairness, or minimum-OS execution.
+
+## Value-witness size and paired throughput check
+
+`Probes/Performance/WitnessSize/` defines a representative nine-phase `@StateMachine(mode: .isolated, owners: [.local])` consumer (`DocumentSyncFlow`) with nested nontrivial value and reference-containing payloads and one observable operation. `Scripts/check-witness-size.py` compiles and links it as a normal `-O -Xlinker -dead_strip` arm64 consumer against a verified Release shipping closure, executes its functional verification (`--mode verify`), and reads live `__TEXT,__text` extents from `ld -map` (strictly before `# Dead Stripped Symbols:`, cross-checked against `xcrun size -m -arch arm64`, with interval-union deduplication so folded aliases are never double-counted).
+
+```sh
+python3 Scripts/check-witness-size.py \
+  --build-root "$PWD/.build/arm64-apple-macosx/release" \
+  --output /absolute/external/fresh-witness-size
+```
+
+The check enforces two independent budgets on deduplicated live arm64 `__TEXT,__text` extents, while reporting total live `__TEXT,__text` and whole Mach-O file size separately as non-gated cross-checks:
+
+- **Schema-attributed witness budget (`256 KiB` / `262,144 B`, `--budget-bytes`)**: `schema.combinedWitnessAndHelperBytes`, covering live `__TEXT,__text` `value witness for` functions and compiler-outlined value helpers whose demangled symbol names `DocumentSyncFlow`.
+- **Whole-executable witness budget (`512 KiB` / `524,288 B`, `--all-witness-budget-bytes`)**: `allLiveText.combinedWitnessAndHelperBytes`, covering every live `__TEXT,__text` `value witness for` function and outlined value helper across the entire linked fixture executable so relocating generated symbols outside the schema namespace cannot mask a regression.
+
+Missing sections, `size -m` mismatches, demangling drift, or zero/missing schema witness attribution fail closed.
+
+For diagnostic throughput comparison against a frozen baseline closure on an otherwise quiet machine, pass `--compare-baseline` (or `--paired-executables BASELINE_EXE CANDIDATE_EXE` for pre-staged binaries) to run paired interleaved AB/BA warmed repetitions with deterministic checksum parity:
+
+```sh
+python3 Scripts/check-witness-size.py \
+  --compare-baseline /absolute/external/baseline-closure \
+  --build-root "$PWD/.build/arm64-apple-macosx/release" \
+  --output /absolute/external/fresh-witness-compare \
+  --rounds 9 --cycles 800
+```
+
+CI runs only the deterministic Mach-O size check, unit controls (`Probes/Performance/test_witness_size.py`), and functional verification, never a single-sample wall-clock timing gate.
+
+## Cross-module public-reader check
+
+`Probes/Performance/PublicReader/` defines a minimal three-module benchmark (`StateMachine` -> `PublicSchema` -> `PublicConsumer`) that compiles a public `.isolated`, `.local` schema as its own Release `-O` module in both `normal` and `-enable-library-evolution` modes. Its `retained_multi_field` workload repeatedly reads six fields from retained historical `Observed<Active>` values after the owner advances to `@Terminal` and closes, catching cross-module `Observed<Phase>.value` regressions that same-module fixtures inline away.
+
+```sh
+python3 Scripts/check-public-reader.py \
+  --baseline-closure /absolute/external/baseline-closure \
+  --candidate-closure /absolute/external/candidate-closure \
+  --output /absolute/external/fresh-public-reader
+```
+
+Each mode verifies deterministic checksum parity and runs paired interleaved AB/BA warmed repetitions (`--rounds 7 --iterations 250000` by default). This is a diagnostic maintainer reproducer and is not a CI wall-clock gate.

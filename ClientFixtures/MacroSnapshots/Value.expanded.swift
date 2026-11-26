@@ -126,12 +126,12 @@ internal typealias CommitRejection = StateMachine::CommitRejection
 
 /// An immutable historical payload with sealed complete-root provenance.
 internal struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::CustomStringConvertible {
-    fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: StateMachine::RuntimeDeliveryClaim?
+    fileprivate let _stateMachineProject: @Sendable (borrowing _StateMachineEngine.Snapshot) -> Phase
     /// The copied historical payload.
     internal var value: Phase {
-        payload
+        _stateMachineProject(record)
     }
     /// The owner-lifetime accepted revision.
     internal var revision: Swift::UInt64 {
@@ -143,6 +143,9 @@ internal struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::Custom
     }
     /// Prepares the declared edge with phase authority preserved.
 internal func finish(_ input: Int) -> Prepared where Phase == Idle {
+    guard case .idle(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
     let next: Done = _StateMachineSchema.finish(payload, input)
     return _stateMachinePrepare(on: record, next: .done(next),
         effects: [],
@@ -188,10 +191,20 @@ internal enum Snapshot: Swift::Sendable, StateMachine::StateMachineSnapshot, Swi
 
 fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: StateMachine::RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
-    case .idle(let payload):
-        return .idle(Observed(payload: payload, record: record, claim: claim))
-    case .done(let payload):
-        return .done(Observed(payload: payload, record: record, claim: claim))
+    case .idle:
+        return .idle(Observed(record: record, claim: claim, _stateMachineProject: { record in
+            guard case .idle(let payload) = record.model else {
+                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+            }
+            return payload
+        }))
+    case .done:
+        return .done(Observed(record: record, claim: claim, _stateMachineProject: { record in
+            guard case .done(let payload) = record.model else {
+                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+            }
+            return payload
+        }))
     }
 }
 
@@ -233,12 +246,13 @@ internal struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swi
     internal let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
         snapshot = _stateMachineSnapshot(record)
-        edgeID = record.edge
     }
     /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
     /// change that takes no edge, such as a reset, closure, or the authority-only commit of
     /// `discardPending(id:)`.
-    internal let edgeID: Swift::String?
+    internal var edgeID: Swift::String? {
+        snapshot.record.edge
+    }
     /// The owner-lifetime accepted revision.
     internal var revision: Swift::UInt64 {
         snapshot.revision

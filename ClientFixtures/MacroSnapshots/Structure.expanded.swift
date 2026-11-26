@@ -236,12 +236,12 @@ internal typealias CommitRejection = StateMachine::CommitRejection
 
 /// An immutable historical payload with sealed complete-root provenance.
 internal struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::CustomStringConvertible {
-    fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: StateMachine::RuntimeDeliveryClaim?
+    fileprivate let _stateMachineProject: @Sendable (borrowing _StateMachineEngine.Snapshot) -> Phase
     /// The copied historical payload.
     internal var value: Phase {
-        payload
+        _stateMachineProject(record)
     }
     /// The owner-lifetime accepted revision.
     internal var revision: Swift::UInt64 {
@@ -253,6 +253,9 @@ internal struct Observed<Phase: Swift::Sendable>: Swift::Sendable, Swift::Custom
     }
     /// Prepares the declared edge with phase authority preserved.
 internal func add(_ input: String) -> Prepared where Phase == Cart {
+    guard case .cart(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
     let change: StateMachine::Change<Cart, Effect.Add> = _StateMachineSchema.add(payload, input)
     return _stateMachinePrepare(on: record, next: .cart(change.next),
         effects: change.effects.map(\.effect),
@@ -261,7 +264,10 @@ internal func add(_ input: String) -> Prepared where Phase == Cart {
     }
     /// Prepares the declared edge with phase authority preserved.
     internal func pay() -> Prepared where Phase == Cart {
-        let change: StateMachine::Change<Paying, Effect.Pay> = _StateMachineSchema.pay(payload)
+        guard case .cart(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let change: StateMachine::Change<Paying, Effect.Pay> = _StateMachineSchema.pay(payload)
         return _stateMachinePrepare(on: record, next: .paying(change.next),
             effects: change.effects.map(\.effect),
             from: 0, to: 1, invalidates: [],
@@ -269,7 +275,10 @@ internal func add(_ input: String) -> Prepared where Phase == Cart {
     }
     /// Prepares the declared edge with phase authority preserved.
     internal func confirm() -> Prepared where Phase == Paying {
-        let next: Confirming = _StateMachineSchema.confirm(payload)
+        guard case .paying(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Confirming = _StateMachineSchema.confirm(payload)
         return _stateMachinePrepare(on: record, next: .confirming(next),
             effects: [],
             from: 1, to: 2, invalidates: [],
@@ -277,7 +286,10 @@ internal func add(_ input: String) -> Prepared where Phase == Cart {
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func charged(_ value: Charge.Output, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Paying {
-        let next: Paid = _StateMachineSchema.charged(payload, value)
+        guard case .paying(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Paid = _StateMachineSchema.charged(payload, value)
         return _stateMachinePrepare(on: record, next: .paid(next),
             effects: [],
             from: 1, to: 3, invalidates: [],
@@ -285,7 +297,10 @@ internal func add(_ input: String) -> Prepared where Phase == Cart {
     }
     /// Prepares the completion edge that delivery selects, with operation authority preserved.
     fileprivate func charged(_ value: Charge.Output, authority: StateMachine::RuntimeTicket) -> Prepared where Phase == Confirming {
-        let next: Paid = _StateMachineSchema.charged(payload, value)
+        guard case .confirming(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
+    let next: Paid = _StateMachineSchema.charged(payload, value)
         return _stateMachinePrepare(on: record, next: .paid(next),
             effects: [],
             from: 2, to: 3, invalidates: [],
@@ -340,14 +355,34 @@ internal enum Snapshot: Swift::Sendable, StateMachine::StateMachineSnapshot, Swi
 
 fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: StateMachine::RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
-    case .cart(let payload):
-        return .cart(Observed(payload: payload, record: record, claim: claim))
-    case .paying(let payload):
-        return .paying(Observed(payload: payload, record: record, claim: claim))
-    case .confirming(let payload):
-        return .confirming(Observed(payload: payload, record: record, claim: claim))
-    case .paid(let payload):
-        return .paid(Observed(payload: payload, record: record, claim: claim))
+    case .cart:
+        return .cart(Observed(record: record, claim: claim, _stateMachineProject: { record in
+            guard case .cart(let payload) = record.model else {
+                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+            }
+            return payload
+        }))
+    case .paying:
+        return .paying(Observed(record: record, claim: claim, _stateMachineProject: { record in
+            guard case .paying(let payload) = record.model else {
+                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+            }
+            return payload
+        }))
+    case .confirming:
+        return .confirming(Observed(record: record, claim: claim, _stateMachineProject: { record in
+            guard case .confirming(let payload) = record.model else {
+                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+            }
+            return payload
+        }))
+    case .paid:
+        return .paid(Observed(record: record, claim: claim, _stateMachineProject: { record in
+            guard case .paid(let payload) = record.model else {
+                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+            }
+            return payload
+        }))
     }
 }
 
@@ -393,12 +428,13 @@ internal struct Receipt: Swift::Sendable, StateMachine::StateMachineReceipt, Swi
     internal let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
         snapshot = _stateMachineSnapshot(record)
-        edgeID = record.edge
     }
     /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
     /// change that takes no edge, such as a reset, closure, or the authority-only commit of
     /// `discardPending(id:)`.
-    internal let edgeID: Swift::String?
+    internal var edgeID: Swift::String? {
+        snapshot.record.edge
+    }
     /// The owner-lifetime accepted revision.
     internal var revision: Swift::UInt64 {
         snapshot.revision
@@ -2764,12 +2800,12 @@ internal typealias CommitRejection = StateMachine::CommitRejection
 
 /// An immutable historical payload with sealed complete-root provenance.
 internal struct Observed<Phase>: Swift::CustomStringConvertible {
-    fileprivate let payload: Phase
     fileprivate let record: _StateMachineEngine.Snapshot
     fileprivate let claim: StateMachine::RuntimeDeliveryClaim?
+    fileprivate let _stateMachineProject: (borrowing _StateMachineEngine.Snapshot) -> Phase
     /// The copied historical payload.
     internal var value: Phase {
-        payload
+        _stateMachineProject(record)
     }
     /// The owner-lifetime accepted revision.
     internal var revision: Swift::UInt64 {
@@ -2781,6 +2817,9 @@ internal struct Observed<Phase>: Swift::CustomStringConvertible {
     }
     /// Prepares the declared edge with phase authority preserved.
 internal func add() -> Prepared where Phase == Counting {
+    guard case .counting(let payload) = record.model else {
+        Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+    }
     let change: StateMachine::Change<Counting, Effect.Add> = _StateMachineSchema.add(payload)
     return _stateMachinePrepare(on: record, next: .counting(change.next),
         effects: change.effects.map(\.effect),
@@ -2821,8 +2860,13 @@ internal enum Snapshot: StateMachine::StateMachineSnapshot, Swift::CustomStringC
 
 fileprivate static func _stateMachineSnapshot(_ record: _StateMachineEngine.Snapshot, claim: StateMachine::RuntimeDeliveryClaim? = nil) -> Snapshot {
     switch record.model {
-    case .counting(let payload):
-        return .counting(Observed(payload: payload, record: record, claim: claim))
+    case .counting:
+        return .counting(Observed(record: record, claim: claim, _stateMachineProject: { record in
+            guard case .counting(let payload) = record.model else {
+                Swift::preconditionFailure("Observed phase payload did not match its snapshot.")
+            }
+            return payload
+        }))
     }
 }
 
@@ -2862,12 +2906,13 @@ internal struct Receipt: StateMachine::StateMachineReceipt, Swift::CustomStringC
     internal let snapshot: Snapshot
     fileprivate init(_ record: _StateMachineEngine.Snapshot) {
         snapshot = _stateMachineSnapshot(record)
-        edgeID = record.edge
     }
     /// The identifier of the graph edge the acceptance took, as `graph` names it, or `nil` for a
     /// change that takes no edge, such as a reset, closure, or the authority-only commit of
     /// `discardPending(id:)`.
-    internal let edgeID: Swift::String?
+    internal var edgeID: Swift::String? {
+        snapshot.record.edge
+    }
     /// The owner-lifetime accepted revision.
     internal var revision: Swift::UInt64 {
         snapshot.revision

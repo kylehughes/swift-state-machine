@@ -228,7 +228,7 @@ struct OperationsTests {
         #expect(delivering.contains("case .browsing: return \"browsing\""))
         // Every edge's plan records its identifier, which the accepted receipt reports.
         #expect(delivering.contains("edge: \"browsing.remove\")"))
-        #expect(delivering.contains("edgeID = record.edge"))
+        #expect(delivering.contains("var edgeID: Swift::String? { snapshot.record.edge }"))
         let plain = try Self.expansion(
             Self.keyed.replacingOccurrences(
                 of: "@StateMachine(mode: .shared)",
@@ -529,5 +529,138 @@ struct OperationsTests {
                 "Use a synchronous nongeneric static function with nonvariadic parameters and no defaults, each unlabeled except a completion's request, labeled request:."
             ]
         )
+    }
+
+    /// Exported schemas retain the typed phase payload alongside the pointer-sized raw snapshot,
+    /// while non-exported schemas project through a sealed per-phase noncapturing extractor.
+    ///
+    /// Both paths avoid generic dynamic casts, `@inlinable` interface exposure, and unsafe pointer
+    /// loads, keep `record`, `claim`, `_StateMachineEngine`, and `Observed.init` `fileprivate`,
+    /// and append underscores deterministically when authored verbs collide with private fields.
+    @Test func observationValueAvoidsDynamicCastInterfaceLeaksAndVerbCollisions() throws {
+        func schema(access: String, mode: String) -> String {
+            let prefix = access.isEmpty ? "" : "\(access) "
+            let member = (access == "public" || access == "package") ? "\(access) " : ""
+            let sendable = mode == ".shared" ? ": Sendable" : ""
+            return """
+                @StateMachine(mode: \(mode), owners: [.local])
+                \(prefix)nonisolated enum Flow\(sendable) {
+                    \(member)struct First\(sendable) { \(member)let n: Int }
+                    \(member)struct Result\(sendable) { \(member)let s: String }
+                    \(member)struct Model\(sendable) { \(member)let v: Int }
+                    @Initial case first(First)
+                    case result(Result)
+                    @Terminal case model(Model)
+                    \(member)enum Input\(sendable) { case payload, project }
+                    @Transition(on: Input.payload)
+                    static func payload(_ source: First) -> Result { fatalError() }
+                    @Transition(on: Input.project)
+                    static func project(_ source: Result) -> Model { fatalError() }
+                }
+                """
+        }
+
+        for (access, mode) in [("public", ".isolated"), ("public", ".shared"), ("package", ".isolated")] {
+            let source = schema(access: access, mode: mode)
+            #expect(Self.diagnostics(source) == nil, "\(access) \(mode) schema must expand cleanly")
+            let text = try Self.expansion(source)
+            #expect(text.contains("fileprivate let _stateMachinePayload: Phase"))
+            #expect(text.contains("_stateMachinePayload: payload"))
+            #expect(!text.contains("_stateMachineProject"))
+            #expect(text.contains("fileprivate let record: _StateMachineEngine.Snapshot"))
+            #expect(text.contains("fileprivate let claim: StateMachine::RuntimeDeliveryClaim?"))
+            #expect(text.contains("fileprivate typealias _StateMachineEngine ="))
+            #expect(!text.contains("as Phase"), "Observed.value must not fall back to generic dynamic cast")
+            #expect(!text.contains("UnsafeRawPointer"), "Observed.value must stay memory-safe")
+            #expect(!text.contains("@inlinable"), "Observed.value must not leak into module interfaces")
+            #expect(!text.contains("@usableFromInline"), "Observed.value must not expose internal helpers")
+        }
+
+        for (access, mode) in [("", ".isolated"), ("internal", ".shared"), ("private", ".isolated")] {
+            let source = schema(access: access, mode: mode)
+            #expect(Self.diagnostics(source) == nil, "\(access) \(mode) schema must expand cleanly")
+            let text = try Self.expansion(source)
+            let expectedProjectType =
+                mode == ".shared"
+                ? "@Sendable (borrowing _StateMachineEngine.Snapshot) -> Phase"
+                : "(borrowing _StateMachineEngine.Snapshot) -> Phase"
+            #expect(text.contains("fileprivate let _stateMachineProject: \(expectedProjectType)"))
+            #expect(text.contains("_stateMachineProject(record)"))
+            #expect(text.contains("_stateMachineProject: { record in"))
+            #expect(!text.contains("fileprivate let _stateMachinePayload: Phase"))
+            #expect(text.contains("fileprivate let record: _StateMachineEngine.Snapshot"))
+            #expect(text.contains("fileprivate let claim: StateMachine::RuntimeDeliveryClaim?"))
+            #expect(text.contains("fileprivate typealias _StateMachineEngine ="))
+            #expect(!text.contains("as Phase"), "Observed.value must not fall back to generic dynamic cast")
+            #expect(!text.contains("UnsafeRawPointer"), "Observed.value must stay memory-safe")
+            #expect(!text.contains("@inlinable"), "Observed.value must not leak into module interfaces")
+            #expect(!text.contains("@usableFromInline"), "Observed.value must not expose internal helpers")
+        }
+
+        // Exported schemas with zero-argument verbs named `_stateMachinePayload` and
+        // `_stateMachinePayload_` (plus `_stateMachineProject`) must remain valid via fallback.
+        let collidingExported = #"""
+            @StateMachine(mode: .isolated, owners: [.local])
+            public nonisolated enum CollidingExportedFlow {
+                public struct First { public let n: Int }
+                public struct Second { public let n: Int }
+                public struct Done { public let n: Int }
+                @Initial case first(First)
+                case second(Second)
+                @Terminal case done(Done)
+                public enum Input { case step, decide, project }
+                @Transition(on: Input.step)
+                static func _stateMachinePayload(_ source: First) -> Second { fatalError() }
+                @Transition(on: Input.project)
+                static func _stateMachineProject(_ source: First) -> Second { fatalError() }
+                @Transition(on: Input.decide)
+                static func left(_ source: Second) -> Done { fatalError() }
+                @Transition(on: Input.decide)
+                static func right(_ source: Second) -> First { fatalError() }
+                @Route(on: Input.decide)
+                static func _stateMachinePayload_(_ source: Second) -> Route._stateMachinePayload_ { fatalError() }
+            }
+            """#
+        #expect(Self.diagnostics(collidingExported) == nil)
+        let exportedText = try Self.expansion(collidingExported)
+        #expect(exportedText.contains("fileprivate let _stateMachinePayload__: Phase"))
+        #expect(exportedText.contains("_stateMachinePayload__: payload"))
+        #expect(exportedText.contains("public func _stateMachinePayload() -> Prepared where Phase == First"))
+        #expect(exportedText.contains("public func _stateMachineProject() -> Prepared where Phase == First"))
+        #expect(exportedText.contains("public func _stateMachinePayload_() -> Prepared where Phase == Second"))
+
+        // Non-exported schemas with zero-argument verbs named `_stateMachineProject` and
+        // `_stateMachineProject_` must remain valid via underscored extractor fallback.
+        let collidingInternal = #"""
+            @StateMachine(mode: .isolated, owners: [.local])
+            nonisolated enum CollidingInternalFlow {
+                struct First { let n: Int }
+                struct Second { let n: Int }
+                struct Done { let n: Int }
+                @Initial case first(First)
+                case second(Second)
+                @Terminal case done(Done)
+                enum Input { case step, decide }
+                @Transition(on: Input.step)
+                static func _stateMachineProject(_ source: First) -> Second { fatalError() }
+                @Transition(on: Input.decide)
+                static func left(_ source: Second) -> Done { fatalError() }
+                @Transition(on: Input.decide)
+                static func right(_ source: Second) -> First { fatalError() }
+                @Route(on: Input.decide)
+                static func _stateMachineProject_(_ source: Second) -> Route._stateMachineProject_ { fatalError() }
+            }
+            """#
+        #expect(Self.diagnostics(collidingInternal) == nil)
+        let internalText = try Self.expansion(collidingInternal)
+        #expect(
+            internalText.contains(
+                "fileprivate let _stateMachineProject__: (borrowing _StateMachineEngine.Snapshot) -> Phase"
+            )
+        )
+        #expect(internalText.contains("_stateMachineProject__(record)"))
+        #expect(internalText.contains("_stateMachineProject__: { record in"))
+        #expect(internalText.contains("internal func _stateMachineProject() -> Prepared where Phase == First"))
+        #expect(internalText.contains("internal func _stateMachineProject_() -> Prepared where Phase == Second"))
     }
 }
