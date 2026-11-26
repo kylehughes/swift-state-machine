@@ -124,10 +124,13 @@ A change to presentation, registration, or owner-teardown behavior updates this 
   enqueued behind every job enqueued so far (the FIFO edge that `dropAfterItsJob` and the presentation tests rely
   on). Background steps use semaphores, so the harness waits until the thread is inside `onCancel` or has returned.
   Asynchronous calls start with `Task.immediate`, so they run synchronously to their first suspension.
-  Registration closures park on a continuation that only `factoryReturn` or `factoryThrow` resumes. No sleeps and
-  no yields are used. Safety nets fail the run as I14, I15, I16, or I30 rather than drive it, with limits of 5 s per
-  semaphore wait, 30 turns for the settled state, and 2,000 turns for teardown. The teardown cap covers work on the
-  cooperative pool, which turns do not order.
+  Registration closures park on a continuation that only `factoryReturn` or `factoryThrow` resumes. Because Swift's
+  `withCheckedContinuation` resumes through the cooperative pool before switching back to the main actor, passive
+  settled-state, subscriber-completion, and top-level factory-resumption waits run 30 immediate main-actor turns first
+  and then back off with 1 ms sleeps up to a 5 s wall-clock safety net. Safety nets fail the run as I14, I15, I16, or
+  I30 rather than drive it, with limits of 5 s per semaphore wait or cooperative-pool settlement wait, 30 turns for
+  pure main-actor driving settlement, and 2,000 turns for teardown. The teardown cap covers work on the cooperative
+  pool, which turns do not order.
 - **Quiescence.** After the last event the harness runs 3 turns, releases every parked cancellation in admission
   order (3 turns after each), checks the settled-state invariants, and then tears down. Teardown cancels every call,
   throws from every parked closure, releases the presentation on the main actor, waits for the presentation to go and
@@ -700,9 +703,12 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   frame still running may hold an element it polled.
 - **I35** P: when a top-level `stopObserving()` or a `follow(_:)` on a cancelled task returns, no registration of
   an observation the call ended is still active, apart from one a registration closure still holds. One a
-  callback started inside the call is current and stays. Source: UI-004 ("stopObserving() releases every
-  registration the presentation holds before it returns"), `PresentingState.md` ("follow(_:) in a task that is
-  already cancelled … releases the sequence").
+  callback started inside the call is current and stays. A stop event (`stop`, `stopCustody`) checks I35 immediately
+  only when the presentation was still alive and `stopObserving()` actually ran, including when an in-flight async call
+  is the presentation's only remaining owner after a drop; `stopRacingRemoval` likewise requires a live receiver and
+  exercises `stopObserving()` under H1 against a parked cancellation rather than checking I35 directly. Source: UI-004
+  ("stopObserving() releases every registration the presentation holds before it returns"), `PresentingState.md`
+  ("follow(_:) in a task that is already cancelled … releases the sequence").
 - **I36** P: the presentation applies at most 32 of a registration's elements in one main-actor turn, the first
   among them, whatever an earlier observation applied in that turn. Each registration is counted on its own
   (`ExplorerTurnBudget`). An element counts as applied when the revision check reads it, and a registration's
@@ -854,7 +860,9 @@ or that it gave up (9), is "withheld" and is not the presentation's, so no owner
   The first sequence recorded for an invariant is a shortest one. A sequence that violates an invariant is not
   extended.
 - **Validity filter** (sound, because a disabled event is impossible or a no-op in that state). Presentation events
-  need the harness to hold the presentation, and `stop` needs a current attempt. Host events need a registration
+  need the harness to hold the presentation, and `stop` needs a current attempt; `stopCustody` and
+  `stopRacingRemoval` require the presentation to still be alive and a current attempt (covering a receiver retained
+  only by an in-flight async call after a drop). Host events need a registration
   holding that host's slot, active and not parked, while `hostCancelReturn` needs a parked one. `factoryReturn` and
   `factoryThrow` need a parked closure, `cancelFollower` needs an uncancelled follower, `request` and
   `cancelSubscription` need an open subscriber, and saved subscriptions need a saved publisher. Sequences allow at

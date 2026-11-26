@@ -101,14 +101,16 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
     let observeMain: (ExplorerMainHost) throws(SubscriptionFailure) -> Void
     let observeMainIsolated: (ExplorerMainIsolatedHost) throws(SubscriptionFailure) -> Void
     let observeSeq: (SnapshotSequence<ExplorerShot>) -> Void
-    let followSeq: (SnapshotSequence<ExplorerShot>) async -> Void
-    let observeAsync: (@escaping Register) async throws(SubscriptionFailure) -> Void
-    let followAsync: (@escaping Register) async throws(SubscriptionFailure) -> Void
-    let stop: () -> Void
+    let followSeq: @MainActor (SnapshotSequence<ExplorerShot>) async -> Void
+    let observeAsync: @MainActor (@escaping Register) async throws(SubscriptionFailure) -> Void
+    let followAsync: @MainActor (@escaping Register) async throws(SubscriptionFailure) -> Void
+    /// Runs `beforeStop` and `stopObserving()` against one acquired strong reference when the
+    /// presentation is still alive, returning whether it ran.
+    let stop: (_ beforeStop: () -> Void) -> Bool
     let apply: (ExplorerShot) -> Bool
     let dropMain: () -> Void
     let dropElsewhere: () -> Bool
-    let dropAfterJob: () async -> Void
+    let dropAfterJob: @MainActor () async -> Void
     /// Attaches a subscriber to `presentedSnapshots`, for the Combine class.
     let subscribe: ((ExplorerSubscriber) -> Void)?
     /// Returns a function that attaches a subscriber to the publisher value read now.
@@ -116,9 +118,9 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
     /// Attaches a subscriber to `presentedSnapshots(projecting:)` with `transform`.
     let subscribeProjected: ((ExplorerSubscriber, @escaping @MainActor (ExplorerShot) -> ExplorerShot) -> Void)?
     /// Calls `observe(host)` of an actor host.
-    let observeActor: (ExplorerActorHost) async throws(SubscriptionFailure) -> Void
+    let observeActor: @MainActor (ExplorerActorHost) async throws(SubscriptionFailure) -> Void
     /// Calls `observe(host, isolation:)` on the island.
-    let observeIsolated: (ExplorerIsland, ExplorerIslandHost) async -> Void
+    let observeIsolated: @MainActor (ExplorerIsland, ExplorerIslandHost) async -> Void
     /// Associates a sentinel with the presentation whose release records its deallocation.
     let watch: (ExplorerWorld) -> Void
     /// Reads `presentedSnapshots(projecting:)` with `transform` now; the result attaches later.
@@ -168,7 +170,12 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
                     guard let presentation = holder.weak else { return }
                     try await presentation.follow(snapshotsFrom: register)
                 },
-                stop: { holder.weak?.stopObserving() },
+                stop: { beforeStop in
+                    guard let presentation = holder.weak else { return false }
+                    beforeStop()
+                    presentation.stopObserving()
+                    return true
+                },
                 apply: { holder.weak?.apply($0) ?? false },
                 dropMain: { holder.dropMain() },
                 dropElsewhere: { holder.dropElsewhere() },
@@ -233,7 +240,12 @@ enum ExplorerPassiveKind: String, CaseIterable, Sendable {
                     guard let presentation = holder.weak else { return }
                     try await presentation.follow(snapshotsFrom: register)
                 },
-                stop: { holder.weak?.stopObserving() },
+                stop: { beforeStop in
+                    guard let presentation = holder.weak else { return false }
+                    beforeStop()
+                    presentation.stopObserving()
+                    return true
+                },
                 apply: { holder.weak?.apply($0) ?? false },
                 dropMain: { holder.dropMain() },
                 dropElsewhere: { holder.dropElsewhere() },

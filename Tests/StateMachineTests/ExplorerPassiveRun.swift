@@ -110,6 +110,7 @@ struct ExplorerOutcome: Sendable {
     // Attempts whose follower task was cancelled: their own deliveries must not be shown afterward.
     private var cancelledFollowers: Set<Int> = []
     private var parked: [Factory] = []
+    private var completedFactories: Set<Int> = []
     private var calls: [Call] = []
     private var running = 0
     // Armed callbacks, each run once. Enumeration arms at most one per sequence; a replayed script may
@@ -295,11 +296,14 @@ struct ExplorerOutcome: Sendable {
                 }
             }
         }
-        if explorerHasRemovalPause, families.contains(.core), current != nil, !hosts[0].parked.isEmpty {
+        if explorerHasRemovalPause, families.contains(.core), subject.alive(), current != nil, !hosts[0].parked.isEmpty
+        {
             result.append(.stopRacingRemoval)
         }
         // H8: a stop whose removal checks custody inside the window before its completion.
-        if explorerHasRemovalCompletionPause, families.contains(.core), current != nil { result.append(.stopCustody) }
+        if explorerHasRemovalCompletionPause, families.contains(.core), subject.alive(), current != nil {
+            result.append(.stopCustody)
+        }
         if families.contains(.combine), subject.subscribe != nil {
             if held {
                 result += [.subscribe(saved: false, unlimited: true), .subscribe(saved: false, unlimited: false)]
@@ -535,11 +539,9 @@ struct ExplorerOutcome: Sendable {
             markDrop()
             await subject.dropAfterJob()
         case .factoryReturn, .factoryThrow:
-            resumeFactory(event == .factoryReturn)
-            await hop()
+            await resumeFactoryAndSettle(event == .factoryReturn)
         case .factoryReturnNewest, .factoryThrowNewest:
-            resumeFactory(event == .factoryReturnNewest, newest: true)
-            await hop()
+            await resumeFactoryAndSettle(event == .factoryReturnNewest, newest: true)
         case .observeIsolated:
             // The call reaches the presentation only after the main-actor jobs enqueued so far, so they
             // run first and the observation it replaces ends at that call, not before them.
@@ -732,9 +734,7 @@ struct ExplorerOutcome: Sendable {
             if current == calls[index].attempt { current = nil }
             calls[index].task.cancel()
         case .stop:
-            letGoAll()
-            subject.stop()
-            if !inHook { checkReleased("stopObserving()") }
+            if subject.stop({ letGoAll() }), !inHook { checkReleased("stopObserving()") }
         case .echo(let host):
             echoHost = host
         case .deliverInCancel(let host):
@@ -807,16 +807,17 @@ struct ExplorerOutcome: Sendable {
             calls.append(Call(attempt: attempt, follower: true, task: task, cancelled: true))
             if !inHook { checkReleased("follow(_:) on a cancelled task") }
         case .stopCustody:
-            letGoAll()
+            var stopped = false
             explorerWithRemovalCompletionPause({ [weak self] in
                 MainActor.assumeIsolated { self?.checkCustodyInWindow() }
-            }) { subject.stop() }
-            if !inHook { checkReleased("stopObserving()") }
+            }) { stopped = subject.stop { letGoAll() } }
+            if stopped, !inHook { checkReleased("stopObserving()") }
         case .stopRacingRemoval:
-            letGoAll()
             let host = hosts[0]
             let parkedIDs = host.parked
-            explorerWithRemovalPause({ for id in parkedIDs { _ = host.finishCancelling(id) } }) { subject.stop() }
+            explorerWithRemovalPause({ for id in parkedIDs { _ = host.finishCancelling(id) } }) {
+                _ = subject.stop { letGoAll() }
+            }
         case .deliverElsewhere(let host):
             guard let id = world.slot(of: host) else { return }
             if !hosts[host].deliverElsewhere(to: id) { world.violate(.stuck, "a worker's offer never returned") }
@@ -1022,11 +1023,7 @@ struct ExplorerOutcome: Sendable {
     private func checkReleased(_ what: String) {
         // Only registrations of observations the call ended; one a callback started during the call is
         // current and stays (I35).
-        let active = world.state.withLock { state in
-            state.registrations.values
-                .filter { $0.phase == .active && !$0.withheld && state.letGo.contains($0.attempt ?? -1) }
-                .map(\.id).sorted()
-        }
+        let active = explorerActiveLetGoRegistrations(world)
         if !active.isEmpty {
             world.violate(.stopLeftRegistration, "\(what) returned with registrations \(active) still active")
         }
@@ -1166,6 +1163,7 @@ struct ExplorerOutcome: Sendable {
         let proceed = await withCheckedContinuation { continuation in
             parked.append(Factory(attempt: attempt, host: host, continuation: continuation))
         }
+        defer { completedFactories.insert(attempt) }
         if mode == .registerFirst {
             guard let early else { throw .capacityExceeded }
             guard proceed else {
@@ -1181,10 +1179,24 @@ struct ExplorerOutcome: Sendable {
         defer { world.setContext(.spontaneous) }
         return try hosts[host].sequence()
     }
-    private func resumeFactory(_ proceed: Bool, newest: Bool = false) {
-        guard !parked.isEmpty else { return }
+    @discardableResult private func resumeFactory(_ proceed: Bool, newest: Bool = false) -> Int? {
+        guard !parked.isEmpty else { return nil }
         let factory = newest ? parked.removeLast() : parked.removeFirst()
         factory.continuation.resume(returning: proceed)
+        return factory.attempt
+    }
+    // `withCheckedContinuation` resumes through the cooperative pool before switching back to the main
+    // actor, so a top-level factory resumption waits for that specific closure to finish on the main
+    // actor before advancing to the next step.
+    private func resumeFactoryAndSettle(_ proceed: Bool, newest: Bool = false) async {
+        guard let attempt = resumeFactory(proceed, newest: newest) else {
+            await hop()
+            return
+        }
+        if await !awaitSettled(until: { self.completedFactories.contains(attempt) }) {
+            world.violate(.stuck, "resumed factory closure of attempt \(attempt) never returned")
+        }
+        await hop()
     }
 
     // MARK: Callbacks
@@ -1489,6 +1501,15 @@ struct ExplorerOutcome: Sendable {
         }
         return condition()
     }
+    /// Waits for an observable condition whose completion may bounce through the cooperative pool
+    /// (such as a `withCheckedContinuation` resumption) to settle on the main actor.
+    private func awaitSettled(
+        fastHops: Int = 30,
+        timeout: Duration = .seconds(5),
+        until condition: () -> Bool
+    ) async -> Bool {
+        await explorerAwaitSettled(fastHops: fastHops, timeout: timeout, step: { await self.hop() }, until: condition)
+    }
 
     private func quiesce() async {
         armed = []
@@ -1504,7 +1525,7 @@ struct ExplorerOutcome: Sendable {
         }
         boundary(topLevel: true)
         if subject.held(), world.violations.isEmpty {
-            let settled = await hop(until: { self.finalStateHolds() == nil }, limit: 30)
+            let settled = await awaitSettled { self.finalStateHolds() == nil }
             if !settled, let problem = finalStateHolds() { world.violate(problem.0, problem.1) }
             boundary(topLevel: true)
             for (revision, attempt) in accepted where lastShown.revision < revision {
@@ -1552,7 +1573,7 @@ struct ExplorerOutcome: Sendable {
         // Once the presentation is gone, its subscribers finish on a later turn; what the harness keeps
         // goes next.
         let open = { self.subscribers.filter { !$0.cancelled && !$0.finished } }
-        if released, await !hop(until: { open().isEmpty }, limit: 30) {
+        if released, await !awaitSettled(until: { open().isEmpty }) {
             for subscriber in open() {
                 world.violate(
                     .combineFinish,
@@ -1598,6 +1619,30 @@ struct ExplorerOutcome: Sendable {
         }
         return nil
     }
+}
+
+/// Waits until `condition` holds, running immediate main-actor turns first and then sleeping in
+/// millisecond increments up to `timeout` so continuations that bounce through the cooperative pool
+/// (such as `withCheckedContinuation` in `SnapshotSequence` and parked factories) can switch back to
+/// the main actor under load without hiding a permanent disagreement.
+@MainActor func explorerAwaitSettled(
+    fastHops: Int = 30,
+    timeout: Duration = .seconds(5),
+    step: @escaping @MainActor () async -> Void,
+    until condition: () -> Bool
+) async -> Bool {
+    if condition() { return true }
+    for _ in 0 ..< fastHops {
+        await step()
+        if condition() { return true }
+    }
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+    while ContinuousClock.now < deadline {
+        try? await Task.sleep(for: .milliseconds(1))
+        await step()
+        if condition() { return true }
+    }
+    return condition()
 }
 
 /// I36's count: the elements of each registration applied in the main-actor turn in progress.

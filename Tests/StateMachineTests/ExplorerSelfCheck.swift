@@ -136,6 +136,16 @@ func explorerIngressMembershipProblem(id: Int, revision: UInt64, staged: Set<Int
     staged.contains(id) ? nil : "r\(revision) was delivered but never staged"
 }
 
+/// I35 on a passive presentation: registrations of observations the call ended that are still active
+/// and not withheld by a registration closure.
+func explorerActiveLetGoRegistrations(_ world: ExplorerWorld) -> [Int] {
+    world.state.withLock { state in
+        state.registrations.values
+            .filter { $0.phase == .active && !$0.withheld && state.letGo.contains($0.attempt ?? -1) }
+            .map(\.id).sorted()
+    }
+}
+
 // MARK: The planted defects
 
 /// Runs every planted defect and its control against the checks above and the harness's own components.
@@ -701,6 +711,21 @@ func explorerIngressMembershipProblem(id: Int, revision: UInt64, staged: Set<Int
         "a delivered value that was never staged",
         planted: explorerIngressMembershipProblem(id: 9, revision: 30, staged: [1, 2]) != nil,
         control: explorerIngressMembershipProblem(id: 2, revision: 20, staged: [1, 2]) == nil
+    )
+
+    // I35: an actual stopObserving() invocation that leaves a let-go registration active.
+    let activeStop = ExplorerWorld()
+    activeStop.setContext(.call(attempt: 1))
+    let stuckRegistration = activeStop.admit(host: 0)
+    activeStop.setContext(.spontaneous)
+    activeStop.letGo([1])
+    let plantedStop = !explorerActiveLetGoRegistrations(activeStop).isEmpty
+    if let stuckRegistration { activeStop.freed(stuckRegistration) }
+    check(
+        .stopLeftRegistration,
+        "stopObserving() returning with a let-go registration still active",
+        planted: plantedStop,
+        control: explorerActiveLetGoRegistrations(activeStop).isEmpty
     )
     return checks
 }

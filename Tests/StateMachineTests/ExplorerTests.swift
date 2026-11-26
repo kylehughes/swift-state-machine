@@ -329,6 +329,112 @@ private func configurations(full: Bool) -> [ExplorerConfiguration] {
         }
     }
 
+    // I35 regression and controls:
+    // 1. After `observeAsyncHeld(A); factoryReturn; dropElsewhere`, the async observation has returned
+    //    on the main actor and the presentation is deallocated, so `stopCustody` is not enabled and
+    //    replaying it does not falsely attribute an uninvoked stop to `stopObserving()`.
+    // 2. While an async call still retains the presentation after `dropElsewhere`, `stopCustody` stays
+    //    enabled, runs `stopObserving()` against that live receiver, and immediately checks I35.
+    @Test(.parksCooperativeThread) func passiveStopCustodyAndWeakReceiverSchedules() async throws {
+        var kinds: [ExplorerPassiveKind] = [.combine]
+        if #available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            kinds.append(.observation)
+        }
+        for kind in kinds {
+            let configuration = ExplorerConfiguration(kind: kind, families: [.core, .async], depth: 4)
+            let afterDrop = try #require(
+                await explorerRun(configuration, [.observeAsyncHeld(0), .factoryReturn, .dropElsewhere])
+            )
+            #expect(afterDrop.violations.isEmpty, "\(afterDrop.violations)")
+            #expect(!afterDrop.enabled.contains(.stopCustody))
+
+            let replayDroppedStop = try #require(
+                await explorerRun(configuration, [.observeAsyncHeld(0), .factoryReturn, .dropElsewhere, .stopCustody])
+            )
+            #expect(replayDroppedStop.violations.isEmpty, "\(replayDroppedStop.violations)")
+            #expect(!replayDroppedStop.trace.contains("custody window"))
+
+            let weakHeldParked = try #require(
+                await explorerRun(configuration, [.observeAsyncHeld(0), .dropElsewhere])
+            )
+            #expect(weakHeldParked.violations.isEmpty, "\(weakHeldParked.violations)")
+            #expect(weakHeldParked.enabled.contains(.stopCustody))
+
+            let weakHeldStop = try #require(
+                await explorerRun(configuration, [.observeAsyncHeld(0), .dropElsewhere, .stopCustody])
+            )
+            #expect(weakHeldStop.violations.isEmpty, "\(weakHeldStop.violations)")
+
+            let weakFollower = try #require(
+                await explorerRun(configuration, [.followSeq(0), .dropElsewhere])
+            )
+            #expect(weakFollower.violations.isEmpty, "\(weakFollower.violations)")
+            #expect(weakFollower.enabled.contains(.stopCustody))
+
+            let weakFollowerStop = try #require(
+                await explorerRun(configuration, [.followSeq(0), .dropElsewhere, .stopCustody])
+            )
+            #expect(weakFollowerStop.violations.isEmpty, "\(weakFollowerStop.violations)")
+            // Verify `stopCustody` genuinely ran `stopObserving()` on the weakly retained receiver,
+            // entered H8's custody window, and freed registration #1 synchronously before quiesce.
+            let custodyIndex = try #require(weakFollowerStop.trace.firstIndex(of: "custody window"))
+            let freedIndex = try #require(weakFollowerStop.trace.firstIndex(of: "#1 freed"))
+            let quiesceIndex = try #require(weakFollowerStop.trace.firstIndex(of: "quiesce"))
+            #expect(freedIndex < custodyIndex)
+            #expect(custodyIndex < quiesceIndex)
+        }
+    }
+
+    // I14 regression and controls:
+    // 1. Replaying `observe(A); observe(A); deliver(A); turn; turn; finish(A)` settles cleanly.
+    // 2. A continuation/off-actor completion released strictly after the 30-turn fast-path budget still
+    //    settles within the bounded watchdog (guaranteeing the fallback path is exercised).
+    // 3. A permanent disagreement expires cleanly at the bounded watchdog so genuine I14 defects fail.
+    @Test(.parksCooperativeThread) func passiveSettlementWatchdogAndTerminalFinishSchedule() async throws {
+        var kinds: [ExplorerPassiveKind] = [.combine]
+        if #available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *) {
+            kinds.append(.observation)
+        }
+        for kind in kinds {
+            let configuration = ExplorerConfiguration(kind: kind, families: [.core], depth: 6)
+            let outcome = try #require(
+                await explorerRun(configuration, [.observe(0), .observe(0), .deliver(0), .turn, .turn, .finish(0)])
+            )
+            #expect(outcome.violations.isEmpty, "\(outcome.violations)")
+        }
+
+        // Delayed settlement control: launch the detached completion only on the first fallback step
+        // (`fastHops + 1`), after every fast-path turn and check has returned false, with no timer.
+        let gate = OSAllocatedUnfairLock(initialState: false)
+        var steps = 0
+        let fastHops = 30
+        let settledDelayed = await explorerAwaitSettled(
+            fastHops: fastHops,
+            timeout: .seconds(2),
+            step: {
+                steps += 1
+                await Task { @MainActor in }.value
+                if steps == fastHops + 1 {
+                    Task.detached { gate.withLock { $0 = true } }
+                }
+            },
+            until: { gate.withLock { $0 } }
+        )
+        #expect(settledDelayed)
+        #expect(steps > fastHops)
+
+        // Permanent disagreement negative control: watchdog must expire and return false.
+        let started = ContinuousClock.now
+        let settledPermanent = await explorerAwaitSettled(
+            fastHops: 5,
+            timeout: .milliseconds(40),
+            step: { await Task { @MainActor in }.value },
+            until: { false }
+        )
+        #expect(!settledPermanent)
+        #expect(started.duration(to: .now) >= .milliseconds(35))
+    }
+
     // Scoped deterministic schedules for `SnapshotSequence.wait(deadline:clock:where:)` against
     // the explorer's one-slot fake host (`ExplorerHost`) and `ExplorerShot` lifetime/slot checks
     // (I2, I15, I41): deadline firing while a host cancellation is parked on a worker, a final
